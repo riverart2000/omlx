@@ -6593,11 +6593,11 @@
                 '<div style="display:flex;gap:10px;flex-wrap:wrap;margin-top:10px;align-items:flex-end">' +
                   '<div><label style="display:block;font-size:12px;color:#8b949e">Aspect</label>' +
                     '<select id="imgPreset" style="background:#010409;border:1px solid #30363d;border-radius:8px;color:#e6edf3;padding:6px">' +
-                      '<option value="1:1">1:1 — 768×768</option>' +
-                      '<option value="9:16">9:16 — 576×1024</option>' +
-                      '<option value="16:9">16:9 — 1024×576</option>' +
-                      '<option value="4:5">4:5 — 768×960</option>' +
-                      '<option value="3:2">3:2 — 960×640</option>' +
+                      '<option value="1:1">1:1 — 1024×1024</option>' +
+                      '<option value="9:16">9:16 — 768×1344</option>' +
+                      '<option value="16:9">16:9 — 1344×768</option>' +
+                      '<option value="4:5">4:5 — 1024×1280</option>' +
+                      '<option value="3:2">3:2 — 1216×832</option>' +
                     '</select></div>' +
                   '<div><label style="display:block;font-size:12px;color:#8b949e">Steps</label>' +
                     '<input id="imgSteps" type="number" min="4" max="50" value="28" style="width:80px;background:#010409;border:1px solid #30363d;border-radius:8px;color:#e6edf3;padding:6px"></div>' +
@@ -6635,7 +6635,7 @@
                     s.innerHTML = '⏳ Model weights are still downloading — you can queue a prompt, but generation will fail until it finishes.';
                     s.style.color = '#d29922';
                 } else if (!h.model_loaded) {
-                    s.innerHTML = '✓ Ready. First image loads the model (~30s). Renders on CPU for full quality (M5 GPU kernels are buggy in current MLX): ~4 min at 768, ~2 min at smaller sizes.';
+                    s.innerHTML = '✓ Ready. First image loads the model (~30s). Renders on the M5 GPU: ~10s at 1024, a few seconds at smaller sizes.';
                     s.style.color = '#3fb950';
                 } else {
                     s.innerHTML = '✓ Model loaded and warm.';

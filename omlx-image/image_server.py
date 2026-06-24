@@ -33,11 +33,11 @@ os.makedirs(OUT_DIR, exist_ok=True)
 MAX_DIM = 2048
 MIN_DIM = 256
 PRESETS = {
-    "1:1":  (768, 768),
-    "9:16": (576, 1024),
-    "16:9": (1024, 576),
-    "4:5":  (768, 960),
-    "3:2":  (960, 640),
+    "1:1":  (1024, 1024),
+    "9:16": (768, 1344),
+    "16:9": (1344, 768),
+    "4:5":  (1024, 1280),
+    "3:2":  (1216, 832),
 }
 
 _jobs = {}
@@ -208,8 +208,8 @@ class Handler(BaseHTTPRequestHandler):
             if preset in PRESETS:
                 w, h = PRESETS[preset]
             else:
-                w = int(d.get("width", 768))
-                h = int(d.get("height", 768))
+                w = int(d.get("width", 1024))
+                h = int(d.get("height", 1024))
             w = max(MIN_DIM, min(MAX_DIM, w))
             h = max(MIN_DIM, min(MAX_DIM, h))
             opts = {

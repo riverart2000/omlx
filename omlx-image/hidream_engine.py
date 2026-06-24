@@ -21,14 +21,20 @@ MODEL_PATH = os.environ.get(
 )
 SCRIPTS_DIR = os.path.join(MODEL_PATH, "scripts", "hidream_o1")
 
-# Device selection. MLX 0.31.2 (latest as of 2026-06) ships Metal GPU kernels
-# that produce numerically degraded results on the brand-new Apple M5 GPU:
-# the HiDream transformer forward returns near-DC-only per-patch output, so
-# images come out as flat 32x32 colour blocks (verified: GPU within-patch
-# detail ~1/255 vs ~20/255 on CPU and in the model's own reference samples).
-# CPU produces correct, sharp images. Default to CPU until a future MLX build
-# fixes M5 Metal kernels; override with HIDREAM_DEVICE=gpu to re-test.
-DEVICE = os.environ.get("HIDREAM_DEVICE", "cpu").strip().lower()
+# Device selection. The brand-new Apple M5 GPU was previously thought to have a
+# broadly-broken MLX Metal backend (flat 32x32 colour-block images). Root cause
+# was actually narrow: the M5 GPU matmul kernel uses tf32-style reduced-precision
+# accumulation (~6e-4 rel error). Harmless for normal matmuls, but FATAL for the
+# Qwen3-VL rotary embedding, which computes rope angles via a matmul
+# (`inv_freq @ position_ids`). At image position ids up to ~4096, a 6e-4 relative
+# error becomes ~2.5 radians of absolute error, and cos()/sin() amplify that into
+# pure noise -> attention collapses -> DC-only per-patch output. The fix
+# (`_patch_qwen3vl_rope` below) recomputes those angles with an element-wise
+# broadcast multiply instead of a matmul, which stays in full fp32 on the GPU and
+# matches CPU to ~4e-8. With that patch the entire forward runs correctly on the
+# GPU (~10-20x faster than CPU). Default to GPU; set HIDREAM_DEVICE=cpu to fall
+# back to the (slow but always-correct) CPU path.
+DEVICE = os.environ.get("HIDREAM_DEVICE", "gpu").strip().lower()
 
 _CTX = None            # cached (lazy) model context
 _LOAD_ERROR = None     # last load failure, surfaced to /health
@@ -67,6 +73,52 @@ def _ensure_path():
         sys.path.insert(0, SCRIPTS_DIR)
 
 
+_ROPE_PATCHED = False
+
+
+def _patch_qwen3vl_rope():
+    """Make the Qwen3-VL rotary embedding numerically safe on the Apple M5 GPU.
+
+    Upstream computes rope angles as `inv_freq_expanded @ position_ids_expanded`
+    (a matmul whose contraction dim is 1, i.e. just an outer product). On the M5
+    GPU the matmul path runs in tf32-style reduced precision (~6e-4 rel error);
+    at image position ids up to ~4096 that is ~2.5 rad of absolute angle error,
+    which cos()/sin() turn into noise and collapse attention. Replacing the
+    matmul with an element-wise broadcast multiply keeps the computation in full
+    fp32 on the GPU and matches the CPU result to ~4e-8. Mathematically identical
+    to the original; only the kernel used to multiply changes.
+    """
+    global _ROPE_PATCHED
+    if _ROPE_PATCHED:
+        return
+    import mlx.core as mx
+    from mlx_vlm.models.qwen3_vl import language as _lang
+
+    def _rope_call(self, x, position_ids):
+        if position_ids.ndim == 2:
+            position_ids = mx.broadcast_to(
+                position_ids[None, ...],
+                (3, position_ids.shape[0], position_ids.shape[1]),
+            )
+        inv_freq_expanded = mx.broadcast_to(
+            self.inv_freq[None, None, :, None].astype(mx.float32),
+            (3, position_ids.shape[1], self.inv_freq.shape[0], 1),
+        )
+        position_ids_expanded = position_ids[:, :, None, :].astype(mx.float32)
+        # Element-wise broadcast multiply instead of `@` — avoids the M5 GPU
+        # tf32 matmul path that corrupts large rope angles.
+        freqs = inv_freq_expanded * position_ids_expanded
+        freqs = mx.swapaxes(freqs, 2, 3)
+        freqs = self.apply_interleaved_mrope(freqs, self.mrope_section)
+        emb = mx.concatenate([freqs, freqs], axis=-1)
+        cos = mx.cos(emb)
+        sin = mx.sin(emb)
+        return cos.astype(x.dtype), sin.astype(x.dtype)
+
+    _lang.Qwen3VLRotaryEmbedding.__call__ = _rope_call
+    _ROPE_PATCHED = True
+
+
 def load():
     """Load the backbone + custom heads once and cache. Raises on failure."""
     global _CTX, _LOAD_ERROR
@@ -78,6 +130,7 @@ def load():
     from hidream_model import HiDreamConfig, build_model
 
     _set_device(mx)
+    _patch_qwen3vl_rope()
     t0 = time.time()
     backbone, processor = mlx_vlm_load(MODEL_PATH)
     cfg = HiDreamConfig()
