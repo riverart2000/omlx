@@ -98,8 +98,39 @@ DEFAULT_FILLERS = [
 ]
 VIDEO_EXTS = {".mp4", ".mov", ".mkv", ".webm", ".avi", ".m4v"}
 CI_ENHANCE_BIN = os.path.join(BASE_DIR, "tools", "ci_enhance")
+CAPTION_BIN = os.path.join(BASE_DIR, "tools", "caption_render.py")
 ASPECTS = {"9:16": (9, 16), "16:9": (16, 9), "1:1": (1, 1),
            "4:5": (4, 5), "original": None}
+VOCAB_PATH = os.path.join(BASE_DIR, "voice_vocab.json")
+CAPTION_LLM = ("porschefreak--Huihui-Qwen3.6-35B-A3B-Claude-4.7-Opus-"
+               "abliterated-mlx-6Bit")
+OMLX_URL = "http://127.0.0.1:8000/v1/chat/completions"
+
+
+def _load_vocab() -> dict:
+    try:
+        with open(VOCAB_PATH) as f:
+            d = json.load(f)
+            return {"vocabulary": d.get("vocabulary") or [],
+                    "corrections": d.get("corrections") or {}}
+    except Exception:
+        return {"vocabulary": [], "corrections": {}}
+
+
+def _vocab_prompt() -> str:
+    """Names/terms to bias Whisper toward correct spelling."""
+    names = _load_vocab()["vocabulary"]
+    return (" ".join(names) + ".") if names else ""
+
+
+def _apply_corrections(text: str) -> str:
+    """Fix known mistranscriptions (e.g. 'Joe Baines' -> 'Joe Bains')."""
+    if not text:
+        return text
+    for wrong, right in _load_vocab()["corrections"].items():
+        text = re.sub(re.escape(wrong), right, text, flags=re.IGNORECASE)
+    return text
+
 
 os.makedirs(OUT_DIR, exist_ok=True)
 os.makedirs(REF_DIR, exist_ok=True)
@@ -275,7 +306,7 @@ def _do_transcribe(path: str) -> str:
     if getattr(audio, "ndim", 1) > 1:
         audio = audio.mean(axis=1)
     audio = np.asarray(audio, dtype=np.float32)
-    return (stt.generate(audio).text or "").strip()
+    return _apply_corrections((stt.generate(audio).text or "").strip())
 
 
 def _do_transcribe_words(path: str, initial_prompt: str | None = None) -> dict:
@@ -290,19 +321,21 @@ def _do_transcribe_words(path: str, initial_prompt: str | None = None) -> dict:
         audio = audio.mean(axis=1)
     audio = np.asarray(audio, dtype=np.float32)
     kw = {"word_timestamps": True}
-    if initial_prompt:
-        kw["initial_prompt"] = initial_prompt
+    vocab = _vocab_prompt()
+    prompt = " ".join(p for p in [vocab, initial_prompt] if p).strip()
+    if prompt:
+        kw["initial_prompt"] = prompt
     res = stt.generate(audio, **kw)
     words = []
     for seg in (getattr(res, "segments", None) or []):
         for w in (seg.get("words") or []):
             words.append({
-                "word": w.get("word", ""),
+                "word": _apply_corrections(w.get("word", "")),
                 "start": float(w.get("start", 0.0)),
                 "end": float(w.get("end", 0.0)),
                 "prob": float(w.get("probability", 0.0)),
             })
-    return {"text": (getattr(res, "text", "") or "").strip(),
+    return {"text": _apply_corrections((getattr(res, "text", "") or "").strip()),
             "duration": (len(audio) / float(sr) if sr else 0.0),
             "words": words}
 
@@ -843,6 +876,20 @@ def _ci_enhance_available() -> bool:
         and os.access(CI_ENHANCE_BIN, os.X_OK)
 
 
+def _captions_available() -> bool:
+    """Smart captions need the Pillow renderer present and the local oMLX LLM
+    reachable."""
+    if not os.path.isfile(CAPTION_BIN):
+        return False
+    try:
+        import urllib.request
+        base = OMLX_URL.rsplit("/v1/", 1)[0]
+        with urllib.request.urlopen(base + "/v1/models", timeout=2) as r:
+            return r.status == 200
+    except Exception:
+        return False
+
+
 def _passthrough_media(src: str, out_path: str) -> None:
     """Copy a media file into an mp4 container (video copied, audio to aac)."""
     info = _probe_media(src)
@@ -943,6 +990,214 @@ def _apply_aspect(video_path: str, base: str, opts: dict) -> str:
     return out
 
 
+def _remap_time(t: float, keeps: list) -> float | None:
+    """Map an original-timeline timestamp to the output timeline defined by the
+    kept intervals. Returns None if t falls inside a removed (cut) region."""
+    acc = 0.0
+    for a, b in keeps:
+        if t < a:
+            return None
+        if t <= b:
+            return acc + (t - a)
+        acc += (b - a)
+    return acc
+
+
+def _segment_lines(words: list, max_line: float = 2.4, max_words: int = 6):
+    """Group word-timestamps into short caption lines for timing + LLM rewrite."""
+    lines, cur = [], []
+    for w in words:
+        if not cur:
+            cur = [w]
+            continue
+        span = w["end"] - cur[0]["start"]
+        if span > max_line or len(cur) >= max_words or \
+                (w["start"] - cur[-1]["end"]) > 0.7:
+            lines.append(cur)
+            cur = [w]
+        else:
+            cur.append(w)
+    if cur:
+        lines.append(cur)
+    out = []
+    for ln in lines:
+        out.append({
+            "start": round(ln[0]["start"], 2),
+            "end": round(ln[-1]["end"], 2),
+            "t": " ".join((w.get("word") or "").strip() for w in ln).strip(),
+        })
+    return out
+
+
+def _llm_json(messages: list, max_tokens: int = 1400, temp: float = 0.7):
+    """Call the local oMLX LLM and parse a JSON object from the reply."""
+    import urllib.request
+    body = json.dumps({"model": CAPTION_LLM, "messages": messages,
+                       "temperature": temp, "max_tokens": max_tokens,
+                       "stream": False}).encode()
+    req = urllib.request.Request(OMLX_URL, data=body,
+                                 headers={"Content-Type": "application/json"})
+    with urllib.request.urlopen(req, timeout=600) as r:
+        data = json.loads(r.read())
+    txt = data["choices"][0]["message"]["content"]
+    m = re.search(r"\{.*\}", txt, re.S)
+    if not m:
+        raise RuntimeError("LLM returned no JSON")
+    return json.loads(m.group(0))
+
+
+def _gen_captions(lines: list, want_cards: bool, topic: str = "") -> dict:
+    """Use the LLM to rewrite transcript lines into punchy condensed captions
+    plus a few concept/hook cards. Returns {captions:[...], cards:[...]} keyed
+    by line index 'i'."""
+    payload = [{"i": i, "t": ln["t"]} for i, ln in enumerate(lines)]
+    sys_msg = (
+        "You are an elite short-form (TikTok/Reels/YouTube Shorts) video "
+        "editor. You write on-screen captions that drive retention. Output "
+        "ONLY one valid JSON object, no prose, no markdown.")
+    ask = (
+        "Rewrite each transcript line into a punchy on-screen caption that "
+        "captures the MEANING — condensed, 2 to 5 words, NOT a literal copy "
+        "of the words. Keep the speaker's intent. Pick 1 word per caption to "
+        "emphasise. Also choose " + ("3 to 6" if want_cards else "0") +
+        " standout moments for big concept 'hook cards' (a 2-5 word title + a "
+        "short punchy subtitle) that tease the idea.\n")
+    if topic:
+        ask += f"Video topic/voice: {topic}\n"
+    ask += ('Return JSON exactly: {"captions":[{"i":<int>,"text":"...",'
+            '"emphasis":["..."]}],"cards":[{"i":<int>,"title":"...",'
+            '"subtitle":"..."}]}\nLines: ' + json.dumps(payload))
+    out = _llm_json([{"role": "system", "content": sys_msg},
+                     {"role": "user", "content": ask}])
+    caps = {int(c["i"]): c for c in out.get("captions", []) if "i" in c}
+    cards = out.get("cards", []) if want_cards else []
+    return {"captions": caps, "cards": cards}
+
+
+def _build_overlays(lines: list, gen: dict, keeps: list) -> list:
+    """Combine LLM text with ASR timing, remap to the output timeline, and emit
+    overlay items: {id,type,text/title/subtitle,emphasis,a,b}."""
+    items = []
+    caps = gen.get("captions", {})
+    for i, ln in enumerate(lines):
+        c = caps.get(i)
+        text = (c.get("text") if c else "") or ln["t"]
+        a = _remap_time(ln["start"], keeps)
+        b = _remap_time(ln["end"], keeps)
+        if a is None:
+            a = _remap_time(ln["start"] + 0.05, keeps)
+        if b is None:
+            b = _remap_time(ln["end"] - 0.05, keeps)
+        if a is None or b is None or b - a < 0.25:
+            continue
+        items.append({"id": f"cap{i}", "type": "caption", "text": text,
+                      "emphasis": (c.get("emphasis") if c else []) or [],
+                      "a": round(a, 2), "b": round(b, 2)})
+    for j, card in enumerate(gen.get("cards", [])):
+        i = int(card.get("i", 0))
+        if i >= len(lines):
+            continue
+        ln = lines[i]
+        a = _remap_time(ln["start"], keeps)
+        if a is None:
+            continue
+        b = a + 2.2
+        items.append({"id": f"card{j}", "type": "card",
+                      "title": card.get("title", ""),
+                      "subtitle": card.get("subtitle", ""),
+                      "a": round(a, 2), "b": round(b, 2)})
+    return items
+
+
+def _render_captions_pngs(items: list, W: int, H: int, outdir: str) -> dict:
+    spec = {"width": W, "height": H, "outdir": outdir,
+            "items": [{k: it[k] for k in it if k not in ("a", "b")}
+                      for it in items]}
+    res = subprocess.run([sys.executable, CAPTION_BIN], input=json.dumps(spec),
+                         capture_output=True, text=True)
+    if res.returncode != 0:
+        raise RuntimeError("caption render failed: " + res.stderr[-400:])
+    return json.loads(res.stdout or "{}")
+
+
+def _composite_captions(video_path: str, items: list, base: str) -> str:
+    """Overlay caption/card PNGs onto the video at their output-timeline times
+    with a quick pop-in. Returns the new file path."""
+    if not items:
+        return video_path
+    info = _probe_media(video_path)
+    W, H = info["width"], info["height"]
+    if not (W and H):
+        return video_path
+    pngs = _render_captions_pngs(items, W, H, base + "_caps")
+    valid = [it for it in items
+             if pngs.get(it["id"]) and os.path.exists(pngs[it["id"]])]
+    if not valid:
+        return video_path
+    inputs, fc, prev = ["-i", video_path], "", "0:v"
+    total = len(valid)
+    for n, it in enumerate(valid, start=1):
+        p = pngs[it["id"]]
+        inputs += ["-i", p]
+        a, b = it["a"], it["b"]
+        pop = 0.12
+        # Pop-in scale on the overlay, then steady; gated to [a,b].
+        scl = (f"[{n}:v]scale=iw*"
+               f"'min(1,0.82+0.18*(t-{a})/{pop})':-1:eval=frame[s{n}]")
+        outl = "[vout]" if n == total else f"[v{n}]"
+        fc += (scl + f";[{prev}][s{n}]overlay=(W-w)/2:(H-h)/2:"
+               f"enable='between(t,{a},{b})'{outl};")
+        prev = f"v{n}"
+    fc = fc.rstrip(";")
+    out = base + ".caps.mp4"
+    cmd = ["ffmpeg", "-y", "-loglevel", "error"] + inputs + \
+        ["-filter_complex", fc, "-map", "[vout]"]
+    if info["has_audio"]:
+        cmd += ["-map", "0:a:0", "-c:a", "copy"]
+    cmd += ["-c:v", "libx264", "-preset", "medium", "-crf", "18",
+            "-pix_fmt", "yuv420p", "-movflags", "+faststart", out]
+    _run(cmd)
+    _safe_rm(video_path)
+    return out
+
+
+def _render_punchin_video(src_video, src48, keeps, out_path, loudness, zoom=1.10):
+    """Render the kept segments with an alternating static punch-in (wide/zoom)
+    so jump-cuts read as intentional energy. Crisp cuts, high-quality encode."""
+    info = _probe_media(src_video)
+    W, H = info["width"], info["height"]
+    if not (W and H):
+        # Fall back to the plain select-based render.
+        return _render_clean_video(src_video, src48, keeps, out_path, loudness)
+    zw, zh = (int(W / zoom) // 2) * 2, (int(H / zoom) // 2) * 2
+    vparts, aparts, labels = [], [], []
+    for idx, (a, b) in enumerate(keeps):
+        zoomed = (idx % 2 == 1)
+        v = f"[0:v]trim={a}:{b},setpts=PTS-STARTPTS"
+        if zoomed:
+            v += f",crop={zw}:{zh}:(iw-{zw})/2:(ih-{zh})/2,scale={W}:{H}"
+        v += f",setsar=1[v{idx}]"
+        a_ = f"[1:a]atrim={a}:{b},asetpts=PTS-STARTPTS[a{idx}]"
+        vparts.append(v)
+        aparts.append(a_)
+        labels.append(f"[v{idx}][a{idx}]")
+    fc = ";".join(vparts + aparts)
+    fc += ";" + "".join(labels) + f"concat=n={len(keeps)}:v=1:a=1[v][a]"
+    lufs = LUFS_TARGETS.get(loudness)
+    if lufs is not None:
+        fc += f";[a]loudnorm=I={lufs}:TP=-1.5:LRA=11[aout]"
+        amap = "[aout]"
+    else:
+        amap = "[a]"
+    cmd = ["ffmpeg", "-y", "-loglevel", "error", "-i", src_video, "-i", src48,
+           "-filter_complex", fc, "-map", "[v]", "-map", amap,
+           "-c:v", "libx264", "-preset", "medium", "-crf", "18",
+           "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "192k",
+           "-movflags", "+faststart", out_path]
+    _run(cmd)
+    return cmd
+
+
 def _run_cleanup(jid: str, opts: dict) -> None:
     tmps = []
     try:
@@ -1025,6 +1280,7 @@ def _run_cleanup(jid: str, opts: dict) -> None:
                 render48 = den
 
         cuts, hits, sil, text = [], [], [], ""
+        words = None
         n_fillers, n_silences = 0, 0
         if explicit is not None:
             cuts = [(float(a), float(b)) for a, b in explicit if float(b) > float(a)]
@@ -1044,6 +1300,7 @@ def _run_cleanup(jid: str, opts: dict) -> None:
                     raise RuntimeError(res["error"])
                 data = res["data"]
                 text = data["text"]
+                words = data["words"]
                 fcuts, hits = _filler_cuts(data["words"], opts["fillers"], opts["pad"])
                 cuts += fcuts
                 n_fillers = len(hits)
@@ -1059,13 +1316,39 @@ def _run_cleanup(jid: str, opts: dict) -> None:
         if has_cuts and not keeps:
             raise RuntimeError("everything would be cut — loosen the settings")
 
+        # Viral-edit options (video only).
+        want_punchin = bool(opts.get("dynamic_edit")) and info["has_video"]
+        want_caps = bool(opts.get("captions")) and info["has_video"]
+        # The keep-intervals that define the OUTPUT timeline (whole clip if no cuts).
+        out_keeps = keeps if has_cuts else [(0.0, dur)]
+
+        # Captions need word timestamps even when fillers aren't being removed.
+        if want_caps and words is None and render48 is not None:
+            _clean_set(jid, stage="transcribing for captions", progress=52)
+            wav16c = base + ".caps16k.wav"
+            tmps.append(wav16c)
+            _run(["ffmpeg", "-y", "-loglevel", "error", "-i", render48,
+                  "-ar", "16000", "-ac", "1", "-c:a", "pcm_s16le", wav16c])
+            res = _enqueue("transcribe_words",
+                           {"path": wav16c, "initial_prompt": opts.get("prompt")},
+                           timeout=3600)
+            if "error" in res:
+                raise RuntimeError(res["error"])
+            words = res["data"]["words"]
+            if not text:
+                text = res["data"]["text"]
+
         _clean_set(jid, stage="rendering", progress=82)
         eid = "clean_" + uuid.uuid4().hex[:12]
+        captioned = False
         if info["has_video"]:
             fmt = "mp4"
             out = base + ".mp4"
             if render48 is not None:
-                if has_cuts:
+                if has_cuts and want_punchin:
+                    _render_punchin_video(path, render48, keeps, out,
+                                          opts["loudness"])
+                elif has_cuts:
                     _render_clean_video(path, render48, keeps, out, opts["loudness"])
                 else:
                     _remux_video(path, render48, out, opts["loudness"])
@@ -1075,8 +1358,22 @@ def _run_cleanup(jid: str, opts: dict) -> None:
                 _clean_set(jid, stage="enhancing light & colour", progress=92)
                 out = _apply_enhance(out, base, opts)
             if ASPECTS.get(opts.get("aspect")):
-                _clean_set(jid, stage="reframing aspect ratio", progress=96)
+                _clean_set(jid, stage="reframing aspect ratio", progress=95)
                 out = _apply_aspect(out, base, opts)
+            if want_caps and words:
+                try:
+                    _clean_set(jid, stage="writing smart captions", progress=97)
+                    lines = _segment_lines(words)
+                    gen = _gen_captions(lines, want_cards=True,
+                                        topic=opts.get("caption_topic", ""))
+                    items = _build_overlays(lines, gen, out_keeps)
+                    if items:
+                        out = _composite_captions(out, items, base)
+                        captioned = True
+                except Exception as ce:
+                    _clean_set(jid, stage="captions skipped", progress=98)
+                    captioned = False
+                    opts["_caption_error"] = f"{type(ce).__name__}: {ce}"
         else:
             fmt = opts["format"]
             out = base + "." + fmt
@@ -1113,6 +1410,9 @@ def _run_cleanup(jid: str, opts: dict) -> None:
             "saved_seconds": round(max(0.0, dur - new_dur), 2),
             "denoised": denoised,
             "enhanced": enhance,
+            "punch_in": bool(want_punchin and has_cuts),
+            "captioned": captioned,
+            "caption_error": opts.get("_caption_error"),
             "aspect": (opts.get("aspect") if ASPECTS.get(opts.get("aspect"))
                        else None),
             "fillers_removed": n_fillers,
@@ -1191,6 +1491,7 @@ class Handler(BaseHTTPRequestHandler):
                 "default_engine": DEFAULT_ENGINE,
                 "denoise_available": _denoise_available(),
                 "enhance_available": _ci_enhance_available(),
+                "captions_available": _captions_available(),
             })
             return
         if path == "/history":
@@ -1318,6 +1619,9 @@ class Handler(BaseHTTPRequestHandler):
             "aspect_fit": (data.get("aspect_fit")
                            if data.get("aspect_fit") in
                            ("fill", "pad_black", "pad_blur") else "fill"),
+            "dynamic_edit": bool(data.get("dynamic_edit", False)),
+            "captions": bool(data.get("captions", False)),
+            "caption_topic": (data.get("caption_topic") or "")[:400],
             "fillers": fillers,
             "pad": fnum("pad_ms", 60, 0, 500) / 1000.0,
             "max_silence": fnum("max_silence_ms", 700, 150, 10000) / 1000.0,
@@ -1338,6 +1642,7 @@ class Handler(BaseHTTPRequestHandler):
             any_step = (opts["denoise"] or opts["remove_fillers"]
                         or opts["remove_silences"] or opts["enhance_video"]
                         or bool(ASPECTS.get(opts["aspect"]))
+                        or opts["dynamic_edit"] or opts["captions"]
                         or cuts is not None)
             if not any_step:
                 return self._json(400, {"error": "enable at least one cleanup step"})
@@ -1850,6 +2155,12 @@ STUDIO_HTML = r"""<!DOCTYPE html>
               <option value="pad_black">Fit (black bars)</option>
             </select></div>
         </div>
+        <div class="row" id="clViralRow" style="margin-top:6px">
+          <label class="toggle"><input type="checkbox" id="clDynamic"> Dynamic punch-in (alternating zoom on cuts, video only)</label>
+          <label class="toggle" id="clCaptionsWrap" style="display:none"><input type="checkbox" id="clCaptions"> Smart captions + hook cards (LLM, video only)</label>
+          <div class="field" id="clTopicWrap" style="display:none;flex:1"><label>Topic / voice hint (optional)</label>
+            <input id="clTopic" type="text" placeholder="e.g. punchy founder talking about AI startups" style="width:100%"></div>
+        </div>
         <details style="margin-top:8px"><summary>Advanced</summary>
           <div class="row" style="margin-top:8px">
             <div class="field" style="flex:1"><label>Filler words (comma/space separated)</label>
@@ -1899,7 +2210,7 @@ STUDIO_HTML = r"""<!DOCTYPE html>
 
 <script>
 const $ = id => document.getElementById(id);
-let ready=false, lastSeed=null, ENG=null, ENGINES=[], REFS=[], curEngine='higgs', DENOISE_AVAILABLE=false, ENHANCE_AVAILABLE=false;
+let ready=false, lastSeed=null, ENG=null, ENGINES=[], REFS=[], curEngine='higgs', DENOISE_AVAILABLE=false, ENHANCE_AVAILABLE=false, CAPTIONS_AVAILABLE=false;
 
 const STYLES = { clean:{temp:0.50,topp:0.90,topk:40}, natural:{temp:0.70,topp:0.95,topk:50}, expressive:{temp:0.95,topp:0.97,topk:80} };
 
@@ -1927,6 +2238,8 @@ async function loadEngines(){
   $('denoiseField').style.display=DENOISE_AVAILABLE?'':'none';
   ENHANCE_AVAILABLE=!!d.enhance_available;
   $('clEnhanceRow').style.display=ENHANCE_AVAILABLE?'':'none';
+  CAPTIONS_AVAILABLE=!!d.captions_available;
+  $('clCaptionsWrap').style.display=CAPTIONS_AVAILABLE?'':'none';
   $('format').innerHTML=d.formats.map(f=>`<option value="${f}">${f.toUpperCase()}</option>`).join('');
   const seg=$('engineSeg'); seg.innerHTML='';
   ENGINES.forEach(e=>{ const b=document.createElement('button'); b.textContent=e.label.split(' ')[0];
@@ -2093,6 +2406,7 @@ function clEsc(s){ return String(s==null?'':s).replace(/[<>&]/g,c=>({'<':'&lt;',
 $('clEnhance').onchange=()=>{ const on=$('clEnhance').checked;
   $('clEnhanceFaceWrap').style.display=on?'':'none'; $('clEnhanceLevelWrap').style.display=on?'':'none'; };
 $('clAspect').onchange=()=>{ $('clAspectFitWrap').style.display=$('clAspect').value!=='original'?'':'none'; };
+$('clCaptions').onchange=()=>{ $('clTopicWrap').style.display=$('clCaptions').checked?'':'none'; };
 function clBusy(b){ $('clRun').disabled=b; $('clAnalyze').disabled=b; }
 function clBaseBody(){
   return {
@@ -2105,6 +2419,9 @@ function clBaseBody(){
     enhance_level:(parseInt($('clEnhanceLevel').value,10)||100)/100,
     aspect:$('clAspect').value,
     aspect_fit:$('clAspectFit').value,
+    dynamic_edit:$('clDynamic').checked,
+    captions:CAPTIONS_AVAILABLE&&$('clCaptions').checked,
+    caption_topic:$('clTopic').value.trim(),
     fillers:$('clFillerList').value,
     pad_ms:parseInt($('clPad').value,10)||60,
     max_silence_ms:parseInt($('clMaxSil').value,10)||700,
@@ -2131,7 +2448,7 @@ $('clAnalyze').onclick=async()=>{
 $('clRun').onclick=async()=>{
   const body=clBaseBody();
   if(!body.path){ clFlash('Paste a file path first.',true); return; }
-  if(!body.denoise&&!body.remove_fillers&&!body.remove_silences&&!body.enhance_video&&body.aspect==='original'){ clFlash('Enable at least one cleanup step.',true); return; }
+  if(!body.denoise&&!body.remove_fillers&&!body.remove_silences&&!body.enhance_video&&body.aspect==='original'&&!body.dynamic_edit&&!body.captions){ clFlash('Enable at least one cleanup step.',true); return; }
   body.mode='render';
   clBusy(true); $('clResult').innerHTML=''; $('clReview').innerHTML=''; clFlash('Starting…');
   try{
@@ -2231,6 +2548,9 @@ function renderCleanResult(res){
   if(res.saved_seconds>0) chips+=` <span class="tag">saved ${fmtDur(res.saved_seconds)}</span>`;
   if(res.denoised) chips+=' <span class="tag">denoised</span>';
   if(res.enhanced) chips+=' <span class="tag">enhanced</span>';
+  if(res.punch_in) chips+=' <span class="tag">punch-in</span>';
+  if(res.captioned) chips+=' <span class="tag">captions</span>';
+  if(res.caption_error) chips+=' <span class="tag" style="opacity:.7">captions skipped</span>';
   if(res.aspect) chips+=` <span class="tag">${esc(res.aspect)}</span>`;
   chips+=` <span class="tag">${res.fillers_removed} fillers</span>`;
   if(res.silences_removed) chips+=` <span class="tag">${res.silences_removed} silences</span>`;
