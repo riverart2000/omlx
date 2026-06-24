@@ -5,6 +5,8 @@
 /Users/joebains/mlx-audio/text_to_audio.py|mlx-audio/text_to_audio.py
 /Users/joebains/mlx-audio/tools/ci_enhance.swift|mlx-audio/tools/ci_enhance.swift
 /Users/joebains/mlx-audio/tools/ci_enhance|mlx-audio/tools/ci_enhance
+/Users/joebains/mlx-audio/tools/caption_render.py|mlx-audio/tools/caption_render.py
+/Users/joebains/mlx-audio/voice_vocab.json|mlx-audio/voice_vocab.json
 # oMLX app chat UI (lives inside the .app bundle, wiped on app update)
 /Applications/oMLX.app/Contents/Resources/omlx/admin/templates/chat.html|omlx-app/admin/templates/chat.html
 # Config
