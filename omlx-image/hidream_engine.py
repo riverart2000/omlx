@@ -162,13 +162,31 @@ def is_loaded() -> bool:
 def generate(prompt: str, width: int = 1024, height: int = 1024,
              steps: int = 28, seed: int = 32, snap: bool = True,
              noise_scale: float = None, noise_clip_std: float = 2.5,
-             blend_seams: int = 0, progress=None) -> np.ndarray:
-    """Run text-to-image and return an HxWx3 uint8 RGB array."""
+             blend_seams: int = 0, ref_images=None, progress=None) -> np.ndarray:
+    """Run text-to-image (or image edit / subject-driven generation when
+    ``ref_images`` is given) and return an HxWx3 uint8 RGB array.
+
+    ``ref_images``: optional list of 1-3 reference image file paths. When set,
+    the model runs in edit / multi-reference mode: it conditions on the
+    reference image(s) plus the prompt (e.g. one photo + "make it snow", or 2-3
+    photos of a person/product + "this subject sitting in a Paris cafe" for
+    consistent characters across scenes).
+
+    WARNING (2026-06-24): edit / multi-ref mode is NON-FUNCTIONAL in the current
+    HiDream-O1 MLX port. The architecture and token/sequence scaffolding
+    (build_edit_text_sample) exist and run without error, but the forward pass
+    produces noise (snap off) or DC-only colour blocks (snap on / 2048) — the
+    model's OWN bundled CLI fails the same way, confirming an upstream porting
+    gap (see model CLAUDE.md: "No edit/multi-ref support yet. Architecture
+    supports it, lab pipeline doesn't"). Kept here so it activates for free if a
+    future port fixes it. For working reference/subject-driven editing today, use
+    mflux (Qwen-Image-Edit / FLUX.1 Kontext). The server/UI do NOT expose this."""
     _ensure_path()
     import mlx.core as mx
     from pipeline_helpers import (
         PATCH_SIZE, NOISE_SCALE_DEFAULT, T_EPS, build_attention_mask,
         find_closest_resolution, patchify, unpatchify, build_t2i_text_sample,
+        build_edit_text_sample,
     )
     from flow_match import FlashFlowMatchScheduler, DEFAULT_TIMESTEPS
     from hidream_model import (forward_generation,
@@ -188,12 +206,24 @@ def generate(prompt: str, width: int = 1024, height: int = 1024,
     height = (height // PATCH_SIZE) * PATCH_SIZE
     h_patches, w_patches = height // PATCH_SIZE, width // PATCH_SIZE
 
-    sample = build_t2i_text_sample(prompt, height, width, tokenizer,
-                                   ctx["processor"], backbone.config)
+    refs = [r for r in (ref_images or []) if r]
+    if refs:
+        sample = build_edit_text_sample(prompt, refs, height, width, tokenizer,
+                                        ctx["processor"], backbone.config)
+    else:
+        sample = build_t2i_text_sample(prompt, height, width, tokenizer,
+                                       ctx["processor"], backbone.config)
     input_ids = mx.array(sample["input_ids"])
     position_ids = mx.array(sample["position_ids"])
     token_types = mx.array(sample["token_types"])
     vinput_mask = sample["vinput_mask"]
+
+    # Edit-mode vision extras (None for pure T2I).
+    pixel_values_mx = mx.array(sample["pixel_values"]).astype(mx.bfloat16) \
+        if refs else None
+    image_grid_thw_mx = mx.array(sample["image_grid_thw"]) if refs else None
+    ref_patches_mx = mx.array(sample["ref_patches"]).astype(mx.bfloat16) \
+        if refs else None
 
     DTYPE_MIN = -1e4
     mask4d = mx.array(build_attention_mask(sample["token_types"],
@@ -209,11 +239,19 @@ def generate(prompt: str, width: int = 1024, height: int = 1024,
     noise_scale_schedule = np.linspace(noise_scale, noise_scale,
                                        len(sched.timesteps_np))
 
+    # vinput_idx: where the model receives diffusion patches (tgt + refs in edit
+    # mode). tgt_idx: where the TARGET patches live (refs excluded) — used to
+    # slice the prediction back out.
     vinput_idx = mx.array(np.where(vinput_mask[0])[0].astype(np.int32))
-    tgt_idx = vinput_idx
+    if refs:
+        tgt_idx = mx.array(np.where(
+            sample["vinput_mask_tgt_only"][0])[0].astype(np.int32))
+    else:
+        tgt_idx = vinput_idx
 
     inputs_embeds_pre = precompute_text_embeds_with_vision(
-        model, cfg, input_ids, pixel_values=None, image_grid_thw=None)
+        model, cfg, input_ids, pixel_values=pixel_values_mx,
+        image_grid_thw=image_grid_thw_mx)
     mx.eval(inputs_embeds_pre)
 
     total = len(sched.timesteps_np)
@@ -221,9 +259,11 @@ def generate(prompt: str, width: int = 1024, height: int = 1024,
         t_pixeldit = mx.full([1], 1.0 - float(step_t) / 1000.0,
                              dtype=mx.float32)
         sigma = max(float(step_t) / 1000.0, T_EPS)
+        # Edit mode: feed target noise z concatenated with the clean ref patches.
+        vinputs = mx.concatenate([z, ref_patches_mx], axis=1) if refs else z
         x_pred = forward_generation(
             model, cfg, inputs_embeds_with_vision=inputs_embeds_pre,
-            position_ids=position_ids, vinputs=z, timestep=t_pixeldit,
+            position_ids=position_ids, vinputs=vinputs, timestep=t_pixeldit,
             input_ids=input_ids, token_types=token_types,
             attention_mask_4d=mask4d)
         gen_patches_mx = mx.take(x_pred, tgt_idx, axis=1).astype(mx.float32)

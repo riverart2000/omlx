@@ -15,6 +15,8 @@ Endpoints:
 """
 import json
 import os
+import base64
+import subprocess
 import threading
 import time
 import uuid
@@ -29,6 +31,18 @@ PORT = int(os.environ.get("IMAGE_PORT", "8400"))
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 OUT_DIR = os.path.join(BASE_DIR, "output")
 os.makedirs(OUT_DIR, exist_ok=True)
+TMP_DIR = os.path.join(OUT_DIR, "_tmp")
+os.makedirs(TMP_DIR, exist_ok=True)
+
+MFLUX_KONTEXT_BIN = os.environ.get(
+    "MFLUX_KONTEXT_BIN",
+    os.path.join(BASE_DIR, ".venv-mflux", "bin", "mflux-generate-kontext"),
+)
+KONTEXT_MODEL = os.environ.get(
+    "KONTEXT_MODEL",
+    "akx/FLUX.1-Kontext-dev-mflux-4bit",
+)
+KONTEXT_BASE_MODEL = os.environ.get("KONTEXT_BASE_MODEL", "dev")
 
 MAX_DIM = 2048
 MIN_DIM = 256
@@ -44,6 +58,64 @@ _jobs = {}
 _jobs_lock = threading.Lock()
 _work_q = []
 _work_cv = threading.Condition()
+
+
+def _decode_data_url_png(raw: str) -> bytes:
+    s = (raw or "").strip()
+    if not s:
+        raise ValueError("empty reference image payload")
+    if "," in s and "base64" in s[:80].lower():
+        s = s.split(",", 1)[1]
+    try:
+        return base64.b64decode(s, validate=True)
+    except Exception as e:
+        raise ValueError(f"invalid base64 reference image: {e}") from e
+
+
+def _run_kontext(jid, opts):
+    from PIL import Image
+
+    if not os.path.isfile(MFLUX_KONTEXT_BIN):
+        raise RuntimeError(f"missing kontext binary: {MFLUX_KONTEXT_BIN}")
+
+    ref_bytes = _decode_data_url_png(opts.get("reference_image", ""))
+    ref_name = f"{jid}_ref.png"
+    out_name = f"img_{uuid.uuid4().hex[:12]}.png"
+    ref_path = os.path.join(TMP_DIR, ref_name)
+    out_path = os.path.join(OUT_DIR, out_name)
+    with open(ref_path, "wb") as f:
+        f.write(ref_bytes)
+
+    t0 = time.time()
+    cmd = [
+        MFLUX_KONTEXT_BIN,
+        "--model", KONTEXT_MODEL,
+        "--base-model", KONTEXT_BASE_MODEL,
+        "--image-path", ref_path,
+        "--prompt", opts["prompt"],
+        "--steps", str(opts["steps"]),
+        "--guidance", str(opts["guidance"]),
+        "--seed", str(opts["seed"]),
+        "--height", str(opts["height"]),
+        "--width", str(opts["width"]),
+        "--output", out_path,
+    ]
+    proc = subprocess.run(
+        cmd, cwd=BASE_DIR, capture_output=True, text=True, check=False
+    )
+    try:
+        os.remove(ref_path)
+    except OSError:
+        pass
+    if proc.returncode != 0:
+        tail = (proc.stderr or proc.stdout or "").strip().splitlines()[-6:]
+        raise RuntimeError("kontext failed: " + " | ".join(tail))
+    if not os.path.isfile(out_path):
+        raise RuntimeError("kontext failed: output image not found")
+    img = Image.open(out_path)
+    w, h = img.size
+    elapsed = round(time.time() - t0, 1)
+    return out_name, int(w), int(h), elapsed
 
 
 def _set(jid, **kw):
@@ -72,37 +144,43 @@ def _run_job(jid):
         return
     opts = job["opts"]
     try:
-        if not eng.weights_ready():
-            raise RuntimeError("model weights are still downloading — "
-                               "try again once the download completes")
-        if not eng.is_loaded():
-            _set(jid, stage="loading model (first run, ~30s)", progress=2)
-        _set(jid, stage="generating", progress=5)
+        if opts["engine"] == "kontext":
+            _set(jid, stage="kontext generating", progress=8)
+            name, w, h, elapsed = _run_kontext(jid, opts)
+            _set(jid, stage="saving", progress=97)
+        else:
+            if not eng.weights_ready():
+                raise RuntimeError("model weights are still downloading — "
+                                   "try again once the download completes")
+            if not eng.is_loaded():
+                _set(jid, stage="loading model (first run, ~30s)", progress=2)
+            _set(jid, stage="generating", progress=5)
 
-        steps = opts["steps"]
+            steps = opts["steps"]
 
-        def prog(done, total):
-            _set(jid, stage=f"denoising {done}/{total}",
-                 progress=int(5 + 90 * done / max(1, total)))
+            def prog(done, total):
+                _set(jid, stage=f"denoising {done}/{total}",
+                     progress=int(5 + 90 * done / max(1, total)))
 
-        t0 = time.time()
-        arr, w, h = eng.generate(
-            prompt=opts["prompt"], width=opts["width"], height=opts["height"],
-            steps=steps, seed=opts["seed"], snap=opts["snap"],
-            blend_seams=opts["blend_seams"], progress=prog)
-        from PIL import Image
-        _set(jid, stage="saving", progress=97)
-        name = "img_" + uuid.uuid4().hex[:12] + ".png"
-        path = os.path.join(OUT_DIR, name)
-        Image.fromarray(arr).save(path)
-        elapsed = round(time.time() - t0, 1)
+            t0 = time.time()
+            arr, w, h = eng.generate(
+                prompt=opts["prompt"], width=opts["width"], height=opts["height"],
+                steps=steps, seed=opts["seed"], snap=opts["snap"],
+                blend_seams=opts["blend_seams"], progress=prog)
+            from PIL import Image
+            _set(jid, stage="saving", progress=97)
+            name = "img_" + uuid.uuid4().hex[:12] + ".png"
+            path = os.path.join(OUT_DIR, name)
+            Image.fromarray(arr).save(path)
+            elapsed = round(time.time() - t0, 1)
 
         result = {
             "filename": name,
             "url": f"/files/{name}",
             "width": int(w), "height": int(h),
-            "steps": steps, "seed": opts["seed"],
+            "steps": opts["steps"], "seed": opts["seed"],
             "prompt": opts["prompt"],
+            "engine": opts["engine"],
             "seconds": elapsed,
             "created": datetime.now().isoformat(timespec="seconds"),
         }
@@ -149,16 +227,21 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         path = urlparse(self.path).path
         if path == "/health":
+            kontext_ready = os.path.isfile(MFLUX_KONTEXT_BIN)
             return self._json(200, {
                 "ok": True,
                 "scripts_available": eng.scripts_available(),
                 "weights_ready": eng.weights_ready(),
                 "model_loaded": eng.is_loaded(),
+                "kontext_ready": kontext_ready,
+                "kontext_model": KONTEXT_MODEL,
                 "queue": len(_work_q),
             })
         if path == "/info":
             return self._json(200, {
                 "model": "HiDream-O1-Image-Dev (MLX bf16)",
+                "kontext_model": KONTEXT_MODEL,
+                "engines": ["hidream", "kontext"],
                 "presets": PRESETS, "default_steps": 28,
                 "min_dim": MIN_DIM, "max_dim": MAX_DIM,
                 "weights_ready": eng.weights_ready(),
@@ -212,14 +295,22 @@ class Handler(BaseHTTPRequestHandler):
                 h = int(d.get("height", 1024))
             w = max(MIN_DIM, min(MAX_DIM, w))
             h = max(MIN_DIM, min(MAX_DIM, h))
+            engine = str(d.get("engine", "hidream")).strip().lower()
+            if engine not in ("hidream", "kontext"):
+                return self._json(400, {"error": "engine must be hidream or kontext"})
             opts = {
+                "engine": engine,
                 "prompt": prompt[:2000],
                 "width": w, "height": h,
                 "steps": max(4, min(50, int(d.get("steps", 28)))),
                 "seed": int(d.get("seed", 32)),
                 "snap": bool(d.get("snap", False)),
                 "blend_seams": max(0, min(4, int(d.get("blend_seams", 0)))),
+                "guidance": float(d.get("guidance", 2.8)),
+                "reference_image": d.get("reference_image", ""),
             }
+            if engine == "kontext" and not opts["reference_image"]:
+                return self._json(400, {"error": "reference_image is required for kontext"})
             jid = "img_" + uuid.uuid4().hex[:12]
             _set(jid, status="running", stage="queued", progress=0,
                  result=None, error=None, opts=opts)

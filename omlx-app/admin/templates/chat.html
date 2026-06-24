@@ -6494,7 +6494,7 @@
             const imgBtn = document.createElement('button');
             imgBtn.type = 'button';
             imgBtn.className = 'omlx-image-studio ' + BTN + ' ' + IDLE.join(' ');
-            imgBtn.title = 'Image Studio — generate images (HiDream-O1)';
+            imgBtn.title = 'Image Studio — generate images (HiDream + Kontext edit)';
             imgBtn.innerHTML = '<i data-lucide="image" class="w-4 h-4" style="color:var(--text-tertiary)"></i>';
             imgBtn.onclick = openImageStudio;
 
@@ -6575,7 +6575,7 @@
             bar.style.cssText = 'display:flex;align-items:center;justify-content:space-between;' +
                 'padding:8px 12px;background:#161b22;border-bottom:1px solid #30363d;flex-shrink:0;';
             bar.innerHTML = '<span style="font-size:13px;font-weight:600;color:#e6edf3;display:flex;gap:8px;align-items:center;">' +
-                '<i data-lucide="image" class="w-4 h-4"></i> Image Studio — HiDream-O1</span>';
+                '<i data-lucide="image" class="w-4 h-4"></i> Image Studio — HiDream + Kontext</span>';
             const closeBtn = document.createElement('button');
             closeBtn.innerHTML = '<i data-lucide="x" class="w-4 h-4"></i>';
             closeBtn.title = 'Close';
@@ -6591,6 +6591,11 @@
                 '<textarea id="imgPrompt" rows="3" placeholder="a cinematic portrait of a red fox in autumn forest, golden light, 85mm" ' +
                 'style="width:100%;background:#010409;border:1px solid #30363d;border-radius:8px;color:#e6edf3;padding:8px;resize:vertical"></textarea>' +
                 '<div style="display:flex;gap:10px;flex-wrap:wrap;margin-top:10px;align-items:flex-end">' +
+                  '<div><label style="display:block;font-size:12px;color:#8b949e">Engine</label>' +
+                    '<select id="imgEngine" style="background:#010409;border:1px solid #30363d;border-radius:8px;color:#e6edf3;padding:6px">' +
+                      '<option value="hidream">HiDream text-to-image</option>' +
+                      '<option value="kontext">FLUX.1 Kontext (reference edit)</option>' +
+                    '</select></div>' +
                   '<div><label style="display:block;font-size:12px;color:#8b949e">Aspect</label>' +
                     '<select id="imgPreset" style="background:#010409;border:1px solid #30363d;border-radius:8px;color:#e6edf3;padding:6px">' +
                       '<option value="1:1">1:1 — 1024×1024</option>' +
@@ -6603,8 +6608,14 @@
                     '<input id="imgSteps" type="number" min="4" max="50" value="28" style="width:80px;background:#010409;border:1px solid #30363d;border-radius:8px;color:#e6edf3;padding:6px"></div>' +
                   '<div><label style="display:block;font-size:12px;color:#8b949e">Seed</label>' +
                     '<input id="imgSeed" type="number" value="32" style="width:110px;background:#010409;border:1px solid #30363d;border-radius:8px;color:#e6edf3;padding:6px"></div>' +
+                  '<div id="imgGuidanceWrap" style="display:none"><label style="display:block;font-size:12px;color:#8b949e">Guidance</label>' +
+                    '<input id="imgGuidance" type="number" step="0.1" value="2.8" style="width:90px;background:#010409;border:1px solid #30363d;border-radius:8px;color:#e6edf3;padding:6px"></div>' +
                   '<button id="imgDice" type="button" title="Random seed" style="background:#21262d;border:1px solid #30363d;border-radius:8px;color:#e6edf3;padding:7px 10px;cursor:pointer">🎲</button>' +
                   '<button id="imgGo" type="button" style="background:#238636;border:none;border-radius:8px;color:#fff;padding:8px 16px;font-weight:600;cursor:pointer">Generate</button>' +
+                '</div>' +
+                '<div id="imgRefWrap" style="display:none;margin-top:10px">' +
+                  '<label style="display:block;font-size:12px;color:#8b949e;margin-bottom:4px">Reference image (required for Kontext)</label>' +
+                  '<input id="imgRefFile" type="file" accept="image/*" style="display:block;width:100%;color:#c9d1d9">' +
                 '</div>' +
                 '<div id="imgProgWrap" style="display:none;margin-top:12px">' +
                   '<div style="height:6px;background:#21262d;border-radius:3px;overflow:hidden"><div id="imgProg" style="height:100%;width:0;background:#2f81f7;transition:width .3s"></div></div>' +
@@ -6624,7 +6635,24 @@
             const $ = id => document.getElementById(id);
             $('imgDice').onclick = () => { $('imgSeed').value = Math.floor(Math.random() * 1e9); };
             $('imgGo').onclick = imgGenerate;
+            $('imgEngine').onchange = imgEngineChanged;
+            imgEngineChanged();
             imgCheckHealth();
+        }
+
+        function imgEngineChanged() {
+            const $ = id => document.getElementById(id);
+            const isKontext = $('imgEngine') && $('imgEngine').value === 'kontext';
+            if ($('imgRefWrap')) $('imgRefWrap').style.display = isKontext ? 'block' : 'none';
+            if ($('imgGuidanceWrap')) $('imgGuidanceWrap').style.display = isKontext ? 'block' : 'none';
+            if ($('imgStatus')) {
+                if (isKontext) {
+                    $('imgStatus').innerHTML = 'Kontext mode: upload a reference image, then describe the edit while preserving identity/pose.';
+                    $('imgStatus').style.color = '#58a6ff';
+                } else {
+                    imgCheckHealth();
+                }
+            }
         }
 
         async function imgCheckHealth() {
@@ -6635,10 +6663,10 @@
                     s.innerHTML = '⏳ Model weights are still downloading — you can queue a prompt, but generation will fail until it finishes.';
                     s.style.color = '#d29922';
                 } else if (!h.model_loaded) {
-                    s.innerHTML = '✓ Ready. First image loads the model (~30s). Renders on the M5 GPU: ~10s at 1024, a few seconds at smaller sizes.';
+                    s.innerHTML = '✓ Ready. First image loads HiDream (~30s). M5 GPU render: ~10s at 1024.';
                     s.style.color = '#3fb950';
                 } else {
-                    s.innerHTML = '✓ Model loaded and warm.';
+                    s.innerHTML = '✓ HiDream model loaded and warm.';
                     s.style.color = '#3fb950';
                 }
             } catch (e) {
@@ -6651,12 +6679,29 @@
             const $ = id => document.getElementById(id);
             const prompt = ($('imgPrompt').value || '').trim();
             if (!prompt) { $('imgStatus').innerHTML = 'Enter a prompt first.'; $('imgStatus').style.color = '#f85149'; return; }
+            const engine = ($('imgEngine') && $('imgEngine').value) || 'hidream';
+            let referenceImage = '';
+            if (engine === 'kontext') {
+                const f = $('imgRefFile') && $('imgRefFile').files && $('imgRefFile').files[0];
+                if (!f) { $('imgStatus').innerHTML = 'Kontext requires a reference image.'; $('imgStatus').style.color = '#f85149'; return; }
+                referenceImage = await new Promise((resolve, reject) => {
+                    const fr = new FileReader();
+                    fr.onload = () => resolve(String(fr.result || ''));
+                    fr.onerror = () => reject(new Error('failed to read reference image'));
+                    fr.readAsDataURL(f);
+                });
+            }
             const body = {
+                engine: engine,
                 prompt: prompt,
                 preset: $('imgPreset').value,
                 steps: parseInt($('imgSteps').value, 10) || 28,
                 seed: parseInt($('imgSeed').value, 10) || 32,
             };
+            if (engine === 'kontext') {
+                body.reference_image = referenceImage;
+                body.guidance = parseFloat(($('imgGuidance') && $('imgGuidance').value) || '2.8') || 2.8;
+            }
             $('imgGo').disabled = true;
             $('imgResult').innerHTML = '';
             $('imgProgWrap').style.display = 'block';
