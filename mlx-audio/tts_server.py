@@ -88,6 +88,14 @@ FORMATS = ["wav", "flac", "mp3"]
 MAX_CHARS = 20000
 SAMPLE_RATES = [24000, 44100, 48000]
 LUFS_TARGETS = {"off": None, "youtube": -14.0, "podcast": -16.0, "broadcast": -23.0}
+VIRAL_LENGTH_TARGETS = {
+    "auto": "",
+    "15_30": "Target a tight short-form cut around 15-30 seconds. Prioritize strongest hook and payoff only.",
+    "30_45": "Target a concise short-form cut around 30-45 seconds. Keep one core idea and one strong payoff.",
+    "45_60": "Target around 45-60 seconds. Maintain momentum while preserving a clear mini-story arc.",
+    "60_90": "Target around 60-90 seconds. Allow a fuller story while keeping high retention pacing.",
+    "90_120": "Target around 90-120 seconds. Keep sections structured, but preserve depth and context.",
+}
 
 # Default disfluency / filler tokens to strip in media cleanup. Kept tight on
 # purpose (classic vocal fillers only) so real words like "a"/"so"/"like" are
@@ -1103,7 +1111,8 @@ def _llm_json(messages: list, max_tokens: int = 1400, temp: float = 0.7):
     return json.loads(m.group(0))
 
 
-def _gen_captions(lines: list, want_cards: bool, topic: str = "") -> dict:
+def _gen_captions(lines: list, want_cards: bool, topic: str = "",
+                  length_target: str = "auto") -> dict:
     """Use the LLM to rewrite transcript lines into punchy condensed captions
     plus a few concept/hook cards. Returns {captions:[...], cards:[...]} keyed
     by line index 'i'."""
@@ -1119,6 +1128,9 @@ def _gen_captions(lines: list, want_cards: bool, topic: str = "") -> dict:
         "emphasise. Also choose " + ("3 to 6" if want_cards else "0") +
         " standout moments for big concept 'hook cards' (a 2-5 word title + a "
         "short punchy subtitle) that tease the idea.\n")
+    lt = VIRAL_LENGTH_TARGETS.get(length_target, "")
+    if lt:
+        ask += "Edit goal: " + lt + "\n"
     if topic:
         ask += f"Video topic/voice: {topic}\n"
     ask += ('Return JSON exactly: {"captions":[{"i":<int>,"text":"...",'
@@ -1438,7 +1450,8 @@ def _run_cleanup(jid: str, opts: dict) -> None:
                     _clean_set(jid, stage="writing smart captions", progress=97)
                     lines = _segment_lines(words)
                     gen = _gen_captions(lines, want_cards=True,
-                                        topic=opts.get("caption_topic", ""))
+                                        topic=opts.get("caption_topic", ""),
+                                        length_target=opts.get("viral_length", "auto"))
                     items = _build_overlays(lines, gen, out_keeps)
                     if items:
                         out = _composite_captions(out, items, base)
@@ -1486,6 +1499,7 @@ def _run_cleanup(jid: str, opts: dict) -> None:
             "punch_in": bool(want_punchin and has_cuts),
             "captioned": captioned,
             "caption_error": opts.get("_caption_error"),
+            "viral_length": opts.get("viral_length", "auto"),
             "aspect": (opts.get("aspect") if ASPECTS.get(opts.get("aspect"))
                        else None),
             "fillers_removed": n_fillers,
@@ -1713,6 +1727,9 @@ class Handler(BaseHTTPRequestHandler):
             "dynamic_edit": bool(data.get("dynamic_edit", False)),
             "captions": bool(data.get("captions", False)),
             "caption_topic": (data.get("caption_topic") or "")[:400],
+            "viral_length": (data.get("viral_length")
+                             if data.get("viral_length") in VIRAL_LENGTH_TARGETS
+                             else "auto"),
             "index_transcript": bool(data.get("index_transcript", True)),
             "fillers": fillers,
             "pad": fnum("pad_ms", 60, 0, 500) / 1000.0,
@@ -2250,6 +2267,15 @@ STUDIO_HTML = r"""<!DOCTYPE html>
         <div class="row" id="clViralRow" style="margin-top:6px">
           <label class="toggle"><input type="checkbox" id="clDynamic"> Dynamic punch-in (smooth eased zoom on cuts, video only)</label>
           <label class="toggle" id="clCaptionsWrap" style="display:none"><input type="checkbox" id="clCaptions"> Smart captions + hook cards (LLM, video only)</label>
+          <div class="field" id="clLenWrap" style="display:none"><label>Viral length target</label>
+            <select id="clViralLength">
+              <option value="auto" selected>Auto (from source)</option>
+              <option value="15_30">15-30s (aggressive short-form)</option>
+              <option value="30_45">30-45s (tight)</option>
+              <option value="45_60">45-60s (balanced)</option>
+              <option value="60_90">60-90s (story-first)</option>
+              <option value="90_120">90-120s (deeper)</option>
+            </select></div>
           <div class="field" id="clTopicWrap" style="display:none;flex:1"><label>Topic / voice hint (optional)</label>
             <input id="clTopic" type="text" placeholder="e.g. punchy founder talking about AI startups" style="width:100%"></div>
         </div>
@@ -2512,7 +2538,8 @@ function clEsc(s){ return String(s==null?'':s).replace(/[<>&]/g,c=>({'<':'&lt;',
 $('clEnhance').onchange=()=>{ const on=$('clEnhance').checked;
   $('clEnhanceFaceWrap').style.display=on?'':'none'; $('clEnhanceLevelWrap').style.display=on?'':'none'; };
 $('clAspect').onchange=()=>{ $('clAspectFitWrap').style.display=$('clAspect').value!=='original'?'':'none'; };
-$('clCaptions').onchange=()=>{ $('clTopicWrap').style.display=$('clCaptions').checked?'':'none'; };
+$('clCaptions').onchange=()=>{ const on=$('clCaptions').checked;
+  $('clTopicWrap').style.display=on?'':'none'; $('clLenWrap').style.display=on?'':'none'; };
 async function clMemSearch(){
   const q=$('clMemQ').value.trim();
   const box=$('clMemResults');
@@ -2545,6 +2572,7 @@ function clBaseBody(){
     dynamic_edit:$('clDynamic').checked,
     captions:CAPTIONS_AVAILABLE&&$('clCaptions').checked,
     caption_topic:$('clTopic').value.trim(),
+    viral_length:$('clViralLength').value,
     index_transcript:$('clIndex').checked,
     fillers:$('clFillerList').value,
     pad_ms:parseInt($('clPad').value,10)||60,
@@ -2674,6 +2702,7 @@ function renderCleanResult(res){
   if(res.enhanced) chips+=' <span class="tag">enhanced</span>';
   if(res.punch_in) chips+=' <span class="tag">punch-in</span>';
   if(res.captioned) chips+=' <span class="tag">captions</span>';
+  if(res.viral_length&&res.viral_length!=='auto') chips+=` <span class="tag">${esc(res.viral_length.replace('_','-'))} target</span>`;
   if(res.caption_error) chips+=' <span class="tag" style="opacity:.7">captions skipped</span>';
   if(res.indexed) chips+=' <span class="tag">indexed \u2192 library</span>';
   if(res.aspect) chips+=` <span class="tag">${esc(res.aspect)}</span>`;
