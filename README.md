@@ -35,3 +35,10 @@ bash ~/mlx-audio/tts-studio.sh restart   # TTS Studio
 
 ## Add a new file to the backup
 Append a `LIVE_PATH|REPO_PATH` line to `files.txt`, then run `./backup.sh`.
+
+## Secrets
+This repo is **public**, so `backup.sh` automatically redacts secret-looking
+values (`secret_key`, `api_key`, `*_API_KEY`, tokens, passwords) in
+`config/*.json` to `__SECRET_REDACTED__` before committing. `restore.sh` merges
+configs back and keeps your real local secret values, so reverting never writes
+a placeholder over a working key. Real secrets never leave your Mac.
