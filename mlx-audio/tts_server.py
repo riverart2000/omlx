@@ -37,6 +37,7 @@ import os
 import queue
 import random
 import re
+import shutil
 import subprocess
 import sys
 import threading
@@ -1018,11 +1019,29 @@ def _run_cleanup(jid: str, opts: dict) -> None:
         final = os.path.join(OUT_DIR, eid + "." + fmt)
         os.replace(out, final)
         new_dur = _audio_seconds(final)
+
+        # Also save a copy next to the original file, named "<original> cleaned.<ext>".
+        saved_to, save_error = None, None
+        try:
+            src_dir = os.path.dirname(path)
+            stem = os.path.splitext(os.path.basename(path))[0]
+            cand = os.path.join(src_dir, f"{stem} cleaned.{fmt}")
+            i = 2
+            while os.path.exists(cand):
+                cand = os.path.join(src_dir, f"{stem} cleaned ({i}).{fmt}")
+                i += 1
+            shutil.copy2(final, cand)
+            saved_to = cand
+        except Exception as e:
+            save_error = f"{type(e).__name__}: {e}"
+
         report = {
             "filename": os.path.basename(final),
             "url": f"/files/{os.path.basename(final)}",
             "kind": "video" if info["has_video"] else "audio",
             "source": os.path.basename(path),
+            "saved_to": saved_to,
+            "save_error": save_error,
             "orig_seconds": round(dur, 2),
             "new_seconds": round(new_dur, 2),
             "saved_seconds": round(max(0.0, dur - new_dur), 2),
@@ -2128,8 +2147,14 @@ function renderCleanResult(res){
   }
   let tx='';
   if(res.transcript){ tx='<details style="margin-top:8px"><summary>Transcript</summary><pre style="white-space:pre-wrap;margin-top:6px">'+esc(res.transcript)+'</pre></details>'; }
+  let saved='';
+  if(res.saved_to){ saved=`<div class="hint" style="margin-top:8px">Saved next to original: <code>${esc(res.saved_to)}</code></div>`; }
+  else if(res.save_error){ saved=`<div class="status err" style="margin-top:8px">Couldn't save next to original: ${esc(res.save_error)}</div>`; }
+  const ext=(res.filename||res.url||'').split('.').pop();
+  const stem=(res.source||'cleaned').replace(/\.[^.]+$/,'');
+  const dlName=`${stem} cleaned.${ext}`;
   $('clResult').innerHTML=`<div class="card" style="margin:0">${media}<div style="margin-top:8px">${chips}</div>
-    <div class="row" style="margin-top:8px"><a class="mini" href="${res.url}" download>Download cleaned ${isVid?'video':'audio'}</a></div>${hits}${tx}</div>`;
+    <div class="row" style="margin-top:8px"><a class="mini" href="${res.url}" download="${esc(dlName)}">Download cleaned ${isVid?'video':'audio'}</a></div>${saved}${hits}${tx}</div>`;
 }
 
 syncLabels(); applyStyle('natural'); loadEngines(); loadHistory(); poll(); setInterval(poll,2500);
