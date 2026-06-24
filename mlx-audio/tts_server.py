@@ -90,6 +90,7 @@ SAMPLE_RATES = [24000, 44100, 48000]
 LUFS_TARGETS = {"off": None, "youtube": -14.0, "podcast": -16.0, "broadcast": -23.0}
 VIRAL_LENGTH_TARGETS = {
     "auto": "",
+    "original": "Preserve the original video length and flow. Do not force a shorter cut; keep pacing natural while still improving clarity/retention.",
     "15_30": "Target a tight short-form cut around 15-30 seconds. Prioritize strongest hook and payoff only.",
     "30_45": "Target a concise short-form cut around 30-45 seconds. Keep one core idea and one strong payoff.",
     "45_60": "Target around 45-60 seconds. Maintain momentum while preserving a clear mini-story arc.",
@@ -2270,6 +2271,7 @@ STUDIO_HTML = r"""<!DOCTYPE html>
           <div class="field" id="clLenWrap" style="display:none"><label>Viral length target</label>
             <select id="clViralLength">
               <option value="auto" selected>Auto (from source)</option>
+              <option value="original">Use original video length</option>
               <option value="15_30">15-30s (aggressive short-form)</option>
               <option value="30_45">30-45s (tight)</option>
               <option value="45_60">45-60s (balanced)</option>
@@ -2702,7 +2704,10 @@ function renderCleanResult(res){
   if(res.enhanced) chips+=' <span class="tag">enhanced</span>';
   if(res.punch_in) chips+=' <span class="tag">punch-in</span>';
   if(res.captioned) chips+=' <span class="tag">captions</span>';
-  if(res.viral_length&&res.viral_length!=='auto') chips+=` <span class="tag">${esc(res.viral_length.replace('_','-'))} target</span>`;
+  if(res.viral_length&&res.viral_length!=='auto'){
+    const lbl=res.viral_length==='original'?'original length':res.viral_length.replace('_','-');
+    chips+=` <span class="tag">${esc(lbl)} target</span>`;
+  }
   if(res.caption_error) chips+=' <span class="tag" style="opacity:.7">captions skipped</span>';
   if(res.indexed) chips+=' <span class="tag">indexed \u2192 library</span>';
   if(res.aspect) chips+=` <span class="tag">${esc(res.aspect)}</span>`;
