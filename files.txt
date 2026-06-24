@@ -13,3 +13,9 @@
 /Users/joebains/.omlx/settings.json|config/omlx/settings.json
 /Users/joebains/.omlx/model_settings.json|config/omlx/model_settings.json
 /Users/joebains/.config/omlx/mcp.json|config/config-omlx/mcp.json
+# oMLX Image Studio (HiDream-O1 microservice, port 8400)
+/Users/joebains/omlx-image/hidream_engine.py|omlx-image/hidream_engine.py
+/Users/joebains/omlx-image/image_server.py|omlx-image/image_server.py
+/Users/joebains/omlx-image/image.sh|omlx-image/image.sh
+/Users/joebains/omlx-image/requirements.txt|omlx-image/requirements.txt
+/Users/joebains/Library/LaunchAgents/com.joebains.omlx-image.plist|launchagents/com.joebains.omlx-image.plist

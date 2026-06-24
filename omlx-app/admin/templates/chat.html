@@ -6490,11 +6490,19 @@
             studioBtn.innerHTML = '<i data-lucide="audio-lines" class="w-4 h-4" style="color:var(--text-tertiary)"></i>';
             studioBtn.onclick = openStudio;
 
+            // Image Studio button — HiDream-O1 text-to-image (sidecar :8400)
+            const imgBtn = document.createElement('button');
+            imgBtn.type = 'button';
+            imgBtn.className = 'omlx-image-studio ' + BTN + ' ' + IDLE.join(' ');
+            imgBtn.title = 'Image Studio — generate images (HiDream-O1)';
+            imgBtn.innerHTML = '<i data-lucide="image" class="w-4 h-4" style="color:var(--text-tertiary)"></i>';
+            imgBtn.onclick = openImageStudio;
+
             if (ta) { row.insertBefore(voiceSelect, ta); row.insertBefore(micBtn, ta); row.insertBefore(hfBtn, ta); }
             else { row.appendChild(voiceSelect); row.appendChild(micBtn); row.appendChild(hfBtn); }
-            // Audio buttons grouped on the right, next to send: [studio][tts][send]
-            if (sendWrap) { row.insertBefore(studioBtn, sendWrap); row.insertBefore(ttsBtn, sendWrap); }
-            else { row.appendChild(studioBtn); row.appendChild(ttsBtn); }
+            // Audio/image buttons grouped on the right, next to send: [image][studio][tts][send]
+            if (sendWrap) { row.insertBefore(imgBtn, sendWrap); row.insertBefore(studioBtn, sendWrap); row.insertBefore(ttsBtn, sendWrap); }
+            else { row.appendChild(imgBtn); row.appendChild(studioBtn); row.appendChild(ttsBtn); }
 
             renderVoiceOptions();
             updateMic();
@@ -6544,6 +6552,154 @@
             document.addEventListener('keydown', function esc(e) {
                 if (e.key === 'Escape') { ov.style.display = 'none'; }
             });
+        }
+
+        // ---------- Image Studio overlay (HiDream-O1 text-to-image) ----------
+        const IMAGE_URL = (window.OLMLX_IMAGE_URL || 'http://127.0.0.1:8400').replace(/\/$/, '');
+        let imgPollTimer = null;
+        function openImageStudio() {
+            let ov = document.getElementById('omlx-image-overlay');
+            if (ov) { ov.style.display = 'flex'; return; }
+            ov = document.createElement('div');
+            ov.id = 'omlx-image-overlay';
+            ov.style.cssText = 'position:fixed;inset:0;z-index:9999;background:rgba(0,0,0,.55);' +
+                'display:flex;align-items:center;justify-content:center;backdrop-filter:blur(2px);';
+            ov.addEventListener('click', e => { if (e.target === ov) ov.style.display = 'none'; });
+
+            const panel = document.createElement('div');
+            panel.style.cssText = 'width:min(880px,94vw);height:min(820px,94vh);background:#0d1117;' +
+                'border:1px solid var(--line,#30363d);border-radius:14px;overflow:hidden;' +
+                'box-shadow:0 20px 60px rgba(0,0,0,.5);display:flex;flex-direction:column;';
+
+            const bar = document.createElement('div');
+            bar.style.cssText = 'display:flex;align-items:center;justify-content:space-between;' +
+                'padding:8px 12px;background:#161b22;border-bottom:1px solid #30363d;flex-shrink:0;';
+            bar.innerHTML = '<span style="font-size:13px;font-weight:600;color:#e6edf3;display:flex;gap:8px;align-items:center;">' +
+                '<i data-lucide="image" class="w-4 h-4"></i> Image Studio — HiDream-O1</span>';
+            const closeBtn = document.createElement('button');
+            closeBtn.innerHTML = '<i data-lucide="x" class="w-4 h-4"></i>';
+            closeBtn.title = 'Close';
+            closeBtn.style.cssText = 'background:transparent;border:none;color:#8b949e;cursor:pointer;padding:4px;border-radius:6px;';
+            closeBtn.onclick = () => { ov.style.display = 'none'; if (imgPollTimer) clearInterval(imgPollTimer); };
+            bar.appendChild(closeBtn);
+
+            const body = document.createElement('div');
+            body.style.cssText = 'flex:1;overflow:auto;padding:14px;color:#e6edf3;font-size:13px;';
+            body.innerHTML =
+                '<div id="imgStatus" style="font-size:12px;color:#8b949e;margin-bottom:10px"></div>' +
+                '<label style="display:block;font-weight:600;margin-bottom:4px">Prompt</label>' +
+                '<textarea id="imgPrompt" rows="3" placeholder="a cinematic portrait of a red fox in autumn forest, golden light, 85mm" ' +
+                'style="width:100%;background:#010409;border:1px solid #30363d;border-radius:8px;color:#e6edf3;padding:8px;resize:vertical"></textarea>' +
+                '<div style="display:flex;gap:10px;flex-wrap:wrap;margin-top:10px;align-items:flex-end">' +
+                  '<div><label style="display:block;font-size:12px;color:#8b949e">Aspect</label>' +
+                    '<select id="imgPreset" style="background:#010409;border:1px solid #30363d;border-radius:8px;color:#e6edf3;padding:6px">' +
+                      '<option value="1:1">1:1 — 768×768</option>' +
+                      '<option value="9:16">9:16 — 576×1024</option>' +
+                      '<option value="16:9">16:9 — 1024×576</option>' +
+                      '<option value="4:5">4:5 — 768×960</option>' +
+                      '<option value="3:2">3:2 — 960×640</option>' +
+                    '</select></div>' +
+                  '<div><label style="display:block;font-size:12px;color:#8b949e">Steps</label>' +
+                    '<input id="imgSteps" type="number" min="4" max="50" value="28" style="width:80px;background:#010409;border:1px solid #30363d;border-radius:8px;color:#e6edf3;padding:6px"></div>' +
+                  '<div><label style="display:block;font-size:12px;color:#8b949e">Seed</label>' +
+                    '<input id="imgSeed" type="number" value="32" style="width:110px;background:#010409;border:1px solid #30363d;border-radius:8px;color:#e6edf3;padding:6px"></div>' +
+                  '<button id="imgDice" type="button" title="Random seed" style="background:#21262d;border:1px solid #30363d;border-radius:8px;color:#e6edf3;padding:7px 10px;cursor:pointer">🎲</button>' +
+                  '<button id="imgGo" type="button" style="background:#238636;border:none;border-radius:8px;color:#fff;padding:8px 16px;font-weight:600;cursor:pointer">Generate</button>' +
+                '</div>' +
+                '<div id="imgProgWrap" style="display:none;margin-top:12px">' +
+                  '<div style="height:6px;background:#21262d;border-radius:3px;overflow:hidden"><div id="imgProg" style="height:100%;width:0;background:#2f81f7;transition:width .3s"></div></div>' +
+                  '<div id="imgStage" style="font-size:12px;color:#8b949e;margin-top:6px"></div>' +
+                '</div>' +
+                '<div id="imgResult" style="margin-top:14px"></div>';
+
+            panel.appendChild(bar);
+            panel.appendChild(body);
+            ov.appendChild(panel);
+            document.body.appendChild(ov);
+            if (window.lucide && lucide.createIcons) lucide.createIcons();
+            document.addEventListener('keydown', function esc(e) {
+                if (e.key === 'Escape') { ov.style.display = 'none'; if (imgPollTimer) clearInterval(imgPollTimer); }
+            });
+
+            const $ = id => document.getElementById(id);
+            $('imgDice').onclick = () => { $('imgSeed').value = Math.floor(Math.random() * 1e9); };
+            $('imgGo').onclick = imgGenerate;
+            imgCheckHealth();
+        }
+
+        async function imgCheckHealth() {
+            const s = document.getElementById('imgStatus'); if (!s) return;
+            try {
+                const h = await (await fetch(IMAGE_URL + '/health')).json();
+                if (!h.weights_ready) {
+                    s.innerHTML = '⏳ Model weights are still downloading — you can queue a prompt, but generation will fail until it finishes.';
+                    s.style.color = '#d29922';
+                } else if (!h.model_loaded) {
+                    s.innerHTML = '✓ Ready. First image loads the model (~30s). Renders on CPU for full quality (M5 GPU kernels are buggy in current MLX): ~4 min at 768, ~2 min at smaller sizes.';
+                    s.style.color = '#3fb950';
+                } else {
+                    s.innerHTML = '✓ Model loaded and warm.';
+                    s.style.color = '#3fb950';
+                }
+            } catch (e) {
+                s.innerHTML = '⚠ Image service not reachable on :8400. Start it: <code>bash ~/omlx-image/image.sh start</code>';
+                s.style.color = '#f85149';
+            }
+        }
+
+        async function imgGenerate() {
+            const $ = id => document.getElementById(id);
+            const prompt = ($('imgPrompt').value || '').trim();
+            if (!prompt) { $('imgStatus').innerHTML = 'Enter a prompt first.'; $('imgStatus').style.color = '#f85149'; return; }
+            const body = {
+                prompt: prompt,
+                preset: $('imgPreset').value,
+                steps: parseInt($('imgSteps').value, 10) || 28,
+                seed: parseInt($('imgSeed').value, 10) || 32,
+            };
+            $('imgGo').disabled = true;
+            $('imgResult').innerHTML = '';
+            $('imgProgWrap').style.display = 'block';
+            $('imgProg').style.width = '0';
+            $('imgStage').textContent = 'Queued…';
+            try {
+                const r = await fetch(IMAGE_URL + '/generate', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+                const d = await r.json();
+                if (!r.ok || d.error) throw new Error(d.error || ('HTTP ' + r.status));
+                imgPoll(d.job_id);
+            } catch (e) {
+                $('imgStage').textContent = 'Error: ' + e.message;
+                $('imgGo').disabled = false;
+            }
+        }
+
+        function imgPoll(jid) {
+            const $ = id => document.getElementById(id);
+            if (imgPollTimer) clearInterval(imgPollTimer);
+            imgPollTimer = setInterval(async () => {
+                try {
+                    const d = await (await fetch(IMAGE_URL + '/status?id=' + encodeURIComponent(jid))).json();
+                    if (d.progress != null) $('imgProg').style.width = d.progress + '%';
+                    if (d.stage) $('imgStage').textContent = d.stage;
+                    if (d.status === 'done') {
+                        clearInterval(imgPollTimer); imgPollTimer = null;
+                        $('imgGo').disabled = false;
+                        const res = d.result;
+                        const url = IMAGE_URL + res.url;
+                        $('imgStage').textContent = 'Done in ' + res.seconds + 's — ' + res.width + '×' + res.height;
+                        $('imgResult').innerHTML =
+                            '<img src="' + url + '" style="max-width:100%;border-radius:10px;border:1px solid #30363d">' +
+                            '<div style="margin-top:8px;display:flex;gap:8px">' +
+                              '<a href="' + url + '" download="' + res.filename + '" style="background:#21262d;border:1px solid #30363d;border-radius:8px;color:#e6edf3;padding:7px 12px;text-decoration:none;font-size:12px">⬇ Download</a>' +
+                              '<a href="' + url + '" target="_blank" style="background:#21262d;border:1px solid #30363d;border-radius:8px;color:#e6edf3;padding:7px 12px;text-decoration:none;font-size:12px">↗ Open full size</a>' +
+                            '</div>';
+                    } else if (d.status === 'error') {
+                        clearInterval(imgPollTimer); imgPollTimer = null;
+                        $('imgGo').disabled = false;
+                        $('imgStage').textContent = 'Error: ' + (d.error || 'generation failed');
+                    }
+                } catch (e) { /* transient */ }
+            }, 1200);
         }
 
         if (synth) { loadVoices(); if (typeof synth.onvoiceschanged !== 'undefined') synth.onvoiceschanged = loadVoices; }

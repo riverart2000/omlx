@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.joebains.omlx-image</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/joebains/omlx-image/.venv/bin/python</string>
+        <string>/Users/joebains/omlx-image/image_server.py</string>
+    </array>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>IMAGE_PORT</key>
+        <string>8400</string>
+        <key>HIDREAM_MODEL</key>
+        <string>/Users/joebains/.omlx/models/mlx-community/HiDream-O1-Image-Dev-mlx-bf16</string>
+    </dict>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>StandardOutPath</key>
+    <string>/Users/joebains/omlx-image/service.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/joebains/omlx-image/service.err</string>
+</dict>
+</plist>

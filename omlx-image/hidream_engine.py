@@ -1,0 +1,189 @@
+"""Warm, in-process HiDream-O1-Image-Dev (MLX) text-to-image engine.
+
+The model ships with a one-shot CLI generator (`generate_hidream_o1_mlx.py`).
+This module reuses that package's helper modules but loads the model ONCE and
+keeps it resident, so a long-running server can answer many requests without
+paying the load cost every time. The denoising loop is a faithful port of the
+script's `run_inference` body.
+"""
+from __future__ import annotations
+
+import os
+import sys
+import time
+from pathlib import Path
+
+import numpy as np
+
+MODEL_PATH = os.environ.get(
+    "HIDREAM_MODEL",
+    "/Users/joebains/.omlx/models/mlx-community/HiDream-O1-Image-Dev-mlx-bf16",
+)
+SCRIPTS_DIR = os.path.join(MODEL_PATH, "scripts", "hidream_o1")
+
+# Device selection. MLX 0.31.2 (latest as of 2026-06) ships Metal GPU kernels
+# that produce numerically degraded results on the brand-new Apple M5 GPU:
+# the HiDream transformer forward returns near-DC-only per-patch output, so
+# images come out as flat 32x32 colour blocks (verified: GPU within-patch
+# detail ~1/255 vs ~20/255 on CPU and in the model's own reference samples).
+# CPU produces correct, sharp images. Default to CPU until a future MLX build
+# fixes M5 Metal kernels; override with HIDREAM_DEVICE=gpu to re-test.
+DEVICE = os.environ.get("HIDREAM_DEVICE", "cpu").strip().lower()
+
+_CTX = None            # cached (lazy) model context
+_LOAD_ERROR = None     # last load failure, surfaced to /health
+
+
+def _set_device(mx):
+    """Pin MLX to the configured device (CPU by default — see DEVICE note)."""
+    try:
+        dev = mx.cpu if DEVICE in ("cpu", "") else mx.gpu
+        mx.set_default_device(dev)
+    except Exception:
+        pass
+
+
+def scripts_available() -> bool:
+    return os.path.isfile(os.path.join(SCRIPTS_DIR, "generate_hidream_o1_mlx.py"))
+
+
+def weights_ready() -> bool:
+    """The backbone safetensors must be present (the big download) plus the
+    custom heads. Returns False while the download is still in progress."""
+    if not os.path.isfile(os.path.join(MODEL_PATH, "extras",
+                                        "custom_heads.safetensors")):
+        return False
+    p = Path(MODEL_PATH)
+    have_backbone = any(p.glob("*.safetensors")) or \
+        any(p.glob("model*.safetensors"))
+    # An in-progress hf download leaves a *.incomplete blob in .cache.
+    incomplete = list((p / ".cache" / "huggingface" / "download").rglob(
+        "*.incomplete")) if (p / ".cache").exists() else []
+    return have_backbone and not incomplete
+
+
+def _ensure_path():
+    if SCRIPTS_DIR not in sys.path:
+        sys.path.insert(0, SCRIPTS_DIR)
+
+
+def load():
+    """Load the backbone + custom heads once and cache. Raises on failure."""
+    global _CTX, _LOAD_ERROR
+    if _CTX is not None:
+        return _CTX
+    _ensure_path()
+    import mlx.core as mx
+    from mlx_vlm import load as mlx_vlm_load
+    from hidream_model import HiDreamConfig, build_model
+
+    _set_device(mx)
+    t0 = time.time()
+    backbone, processor = mlx_vlm_load(MODEL_PATH)
+    cfg = HiDreamConfig()
+    model = build_model(cfg, backbone)
+    custom_path = Path(MODEL_PATH) / "extras" / "custom_heads.safetensors"
+    if not custom_path.exists():
+        raise RuntimeError(f"missing custom heads: {custom_path}")
+    custom_weights = mx.load(str(custom_path))
+    model.load_weights(list(custom_weights.items()), strict=False)
+
+    tokenizer = processor.tokenizer if hasattr(processor, "tokenizer") \
+        else processor
+    for n in ("boi", "bor", "eor", "bot", "tms"):
+        if not hasattr(tokenizer, f"{n}_token"):
+            setattr(tokenizer, f"{n}_token", f"<|{n}_token|>")
+
+    _CTX = {"mx": mx, "backbone": backbone, "processor": processor,
+            "model": model, "cfg": cfg, "tokenizer": tokenizer,
+            "device": DEVICE,
+            "load_seconds": round(time.time() - t0, 1)}
+    _LOAD_ERROR = None
+    return _CTX
+
+
+def is_loaded() -> bool:
+    return _CTX is not None
+
+
+def generate(prompt: str, width: int = 1024, height: int = 1024,
+             steps: int = 28, seed: int = 32, snap: bool = True,
+             noise_scale: float = None, noise_clip_std: float = 2.5,
+             blend_seams: int = 0, progress=None) -> np.ndarray:
+    """Run text-to-image and return an HxWx3 uint8 RGB array."""
+    _ensure_path()
+    import mlx.core as mx
+    from pipeline_helpers import (
+        PATCH_SIZE, NOISE_SCALE_DEFAULT, T_EPS, build_attention_mask,
+        find_closest_resolution, patchify, unpatchify, build_t2i_text_sample,
+    )
+    from flow_match import FlashFlowMatchScheduler, DEFAULT_TIMESTEPS
+    from hidream_model import (forward_generation,
+                               precompute_text_embeds_with_vision)
+
+    _set_device(mx)
+    ctx = load()
+    model, cfg, tokenizer = ctx["model"], ctx["cfg"], ctx["tokenizer"]
+    backbone = ctx["backbone"]
+    if noise_scale is None:
+        noise_scale = NOISE_SCALE_DEFAULT
+
+    if snap:
+        sw, sh = find_closest_resolution(width, height)
+        width, height = sw, sh
+    width = (width // PATCH_SIZE) * PATCH_SIZE
+    height = (height // PATCH_SIZE) * PATCH_SIZE
+    h_patches, w_patches = height // PATCH_SIZE, width // PATCH_SIZE
+
+    sample = build_t2i_text_sample(prompt, height, width, tokenizer,
+                                   ctx["processor"], backbone.config)
+    input_ids = mx.array(sample["input_ids"])
+    position_ids = mx.array(sample["position_ids"])
+    token_types = mx.array(sample["token_types"])
+    vinput_mask = sample["vinput_mask"]
+
+    DTYPE_MIN = -1e4
+    mask4d = mx.array(build_attention_mask(sample["token_types"],
+                                           DTYPE_MIN)).astype(mx.bfloat16)
+
+    rng_key = mx.random.key(seed + 1)
+    noise = noise_scale * mx.random.normal((1, 3, height, width), key=rng_key)
+    noise_np = np.asarray(noise)
+    z = mx.array(patchify(noise_np[0])[None]).astype(mx.bfloat16)
+
+    sched = FlashFlowMatchScheduler(num_train_timesteps=1000, shift=1.0)
+    sched.set_timesteps(steps, custom_timesteps=DEFAULT_TIMESTEPS)
+    noise_scale_schedule = np.linspace(noise_scale, noise_scale,
+                                       len(sched.timesteps_np))
+
+    vinput_idx = mx.array(np.where(vinput_mask[0])[0].astype(np.int32))
+    tgt_idx = vinput_idx
+
+    inputs_embeds_pre = precompute_text_embeds_with_vision(
+        model, cfg, input_ids, pixel_values=None, image_grid_thw=None)
+    mx.eval(inputs_embeds_pre)
+
+    total = len(sched.timesteps_np)
+    for step_idx, step_t in enumerate(sched.timesteps_np):
+        t_pixeldit = mx.full([1], 1.0 - float(step_t) / 1000.0,
+                             dtype=mx.float32)
+        sigma = max(float(step_t) / 1000.0, T_EPS)
+        x_pred = forward_generation(
+            model, cfg, inputs_embeds_with_vision=inputs_embeds_pre,
+            position_ids=position_ids, vinputs=z, timestep=t_pixeldit,
+            input_ids=input_ids, token_types=token_types,
+            attention_mask_4d=mask4d)
+        gen_patches_mx = mx.take(x_pred, tgt_idx, axis=1).astype(mx.float32)
+        v = (gen_patches_mx - z.astype(mx.float32)) / sigma
+        z = sched.step(-v, float(step_t), z,
+                       s_noise=float(noise_scale_schedule[step_idx]),
+                       noise_clip_std=noise_clip_std, seed=seed)
+        mx.eval(z)
+        if progress:
+            progress(step_idx + 1, total)
+
+    img = (z + 1) / 2
+    img_np = np.asarray(img[0].astype(mx.float32))
+    rgb = unpatchify(img_np, h_patches, w_patches)
+    arr = np.clip(rgb.transpose(1, 2, 0) * 255, 0, 255).astype(np.uint8)
+    return arr, width, height

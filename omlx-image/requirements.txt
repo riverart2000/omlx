@@ -1,0 +1,13 @@
+# Pinned to the HiDream-O1 lab's documented tested config. mlx-vlm 0.5.0's
+# metadata asks for transformers>=5.5, but 5.x breaks the Qwen3-VL backbone
+# import path; 4.57.1 is verified working. Ignore the pip resolver warnings
+# about mlx-lm/mlx-audio — those packages are not used by this server.
+mlx==0.31.2
+mlx-vlm==0.5.0
+transformers==4.57.1
+huggingface_hub==0.36.2
+pillow>=10.0
+numpy>=2.0
+tqdm>=4.66
+sentencepiece>=0.2.0
+safetensors>=0.6
