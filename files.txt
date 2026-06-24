@@ -1,0 +1,13 @@
+# TTS Studio (mlx-audio)
+/Users/joebains/mlx-audio/tts_server.py|mlx-audio/tts_server.py
+/Users/joebains/mlx-audio/tts-studio.sh|mlx-audio/tts-studio.sh
+/Users/joebains/mlx-audio/tts_config.json|mlx-audio/tts_config.json
+/Users/joebains/mlx-audio/text_to_audio.py|mlx-audio/text_to_audio.py
+/Users/joebains/mlx-audio/tools/ci_enhance.swift|mlx-audio/tools/ci_enhance.swift
+/Users/joebains/mlx-audio/tools/ci_enhance|mlx-audio/tools/ci_enhance
+# oMLX app chat UI (lives inside the .app bundle, wiped on app update)
+/Applications/oMLX.app/Contents/Resources/omlx/admin/templates/chat.html|omlx-app/admin/templates/chat.html
+# Config
+/Users/joebains/.omlx/settings.json|config/omlx/settings.json
+/Users/joebains/.omlx/model_settings.json|config/omlx/model_settings.json
+/Users/joebains/.config/omlx/mcp.json|config/config-omlx/mcp.json

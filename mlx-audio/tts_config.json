@@ -1,0 +1,27 @@
+{
+  "default_profile": "ultra_natural_hq",
+  "defaults": {
+    "model": "mlx-community/Voxtral-4B-TTS-2603-mlx-bf16",
+    "lang_code": "en",
+    "max_tokens": 1600,
+    "audio_format": "wav"
+  },
+  "profiles": {
+    "ultra_natural_hq": {
+      "voice": "neutral_female",
+      "speed": 0.9
+    },
+    "ultra_natural_alt": {
+      "voice": "neutral_male",
+      "speed": 0.9
+    },
+    "warm_natural": {
+      "voice": "casual_female",
+      "speed": 0.92
+    },
+    "polished_natural": {
+      "voice": "cheerful_female",
+      "speed": 0.94
+    }
+  }
+}

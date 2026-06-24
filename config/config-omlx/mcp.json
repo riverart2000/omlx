@@ -1,0 +1,60 @@
+{
+  "servers": {
+    "shopify": {
+      "transport": "stdio",
+      "command": "/bin/sh",
+      "args": [
+        "-c",
+        "cd /Users/joebains/qwen-coder/shopify-mcp && exec /Users/joebains/.nvm/versions/node/v25.9.0/bin/node index.js"
+      ],
+      "env": {
+        "DOTENV_CONFIG_QUIET": "true",
+        "PATH": "/Users/joebains/.nvm/versions/node/v25.9.0/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin",
+        "HOME": "/Users/joebains"
+      },
+      "enabled": true,
+      "timeout": 120
+    },
+    "brave-search": {
+      "transport": "stdio",
+      "command": "/Users/joebains/.nvm/versions/node/v25.9.0/bin/npx",
+      "args": [
+        "-y",
+        "@brave/brave-search-mcp-server"
+      ],
+      "env": {
+        "BRAVE_API_KEY": "__SECRET_REDACTED__",
+        "PATH": "/Users/joebains/.nvm/versions/node/v25.9.0/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin",
+        "HOME": "/Users/joebains"
+      },
+      "enabled": true,
+      "timeout": 120
+    },
+    "filesystem": {
+      "transport": "stdio",
+      "command": "/Users/joebains/.nvm/versions/node/v25.9.0/bin/npx",
+      "args": [
+        "-y",
+        "@modelcontextprotocol/server-filesystem",
+        "/Users/joebains"
+      ],
+      "env": {
+        "PATH": "/Users/joebains/.nvm/versions/node/v25.9.0/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin",
+        "HOME": "/Users/joebains"
+      },
+      "enabled": true,
+      "timeout": 120
+    },
+    "fetch": {
+      "transport": "stdio",
+      "command": "/opt/homebrew/bin/uvx",
+      "args": [
+        "mcp-server-fetch"
+      ],
+      "enabled": true,
+      "timeout": 120
+    }
+  },
+  "max_tool_calls": 10,
+  "default_timeout": 60.0
+}
