@@ -105,6 +105,8 @@ VOCAB_PATH = os.path.join(BASE_DIR, "voice_vocab.json")
 CAPTION_LLM = ("porschefreak--Huihui-Qwen3.6-35B-A3B-Claude-4.7-Opus-"
                "abliterated-mlx-6Bit")
 OMLX_URL = "http://127.0.0.1:8000/v1/chat/completions"
+MEMORY_URL = os.environ.get("MEM_URL", "http://127.0.0.1:8300")
+TRANSCRIPT_COLLECTION = "video_transcripts"
 
 
 def _load_vocab() -> dict:
@@ -890,6 +892,61 @@ def _captions_available() -> bool:
         return False
 
 
+def _memory_available() -> bool:
+    """The omlx-memory sqlite-vec service (RAG/storage) is reachable."""
+    try:
+        import urllib.request
+        with urllib.request.urlopen(MEMORY_URL + "/health", timeout=2) as r:
+            return r.status == 200
+    except Exception:
+        return False
+
+
+def _mem_post(route: str, payload: dict, timeout: int = 120) -> dict:
+    import urllib.request
+    body = json.dumps(payload).encode()
+    req = urllib.request.Request(MEMORY_URL + route, data=body,
+                                 headers={"Content-Type": "application/json"})
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        return json.loads(r.read())
+
+
+def _mem_get(route: str, timeout: int = 30) -> dict:
+    import urllib.request
+    with urllib.request.urlopen(MEMORY_URL + route, timeout=timeout) as r:
+        return json.loads(r.read())
+
+
+def _index_transcript(source: str, text: str, meta: dict) -> dict:
+    """Store a cleanup transcript in the shared sqlite-vec RAG so the whole
+    video library becomes semantically searchable. Re-indexing the same source
+    replaces the previous copy. Best-effort: callers ignore failures."""
+    text = (text or "").strip()
+    if not text:
+        return {"skipped": "empty transcript"}
+    # Drop any earlier doc for this same source in our collection (dedupe).
+    try:
+        docs = _mem_get("/rag/docs").get("docs", [])
+        for d in docs:
+            if (d.get("collection") == TRANSCRIPT_COLLECTION
+                    and d.get("source") == source):
+                _mem_post("/rag/delete", {"doc_id": d.get("id")}, timeout=30)
+    except Exception:
+        pass
+    header = (f"Video transcript: {source}\n"
+             f"Cleaned {datetime.now().isoformat(timespec='seconds')}")
+    extras = []
+    if meta.get("saved_to"):
+        extras.append(f"Saved to: {meta['saved_to']}")
+    if meta.get("aspect"):
+        extras.append(f"Aspect: {meta['aspect']}")
+    if extras:
+        header += "\n" + " | ".join(extras)
+    payload = {"collection": TRANSCRIPT_COLLECTION, "source": source,
+               "text": header + "\n\n" + text}
+    return _mem_post("/rag/ingest", payload, timeout=180)
+
+
 def _passthrough_media(src: str, out_path: str) -> None:
     """Copy a media file into an mp4 container (video copied, audio to aac)."""
     info = _probe_media(src)
@@ -1420,6 +1477,21 @@ def _run_cleanup(jid: str, opts: dict) -> None:
             "silences_removed": n_silences,
             "transcript": text[:8000],
         }
+
+        # Index the transcript into the shared sqlite-vec RAG so the whole
+        # processed-video library becomes searchable. Best-effort.
+        if opts.get("index_transcript", True) and text.strip():
+            try:
+                res = _index_transcript(os.path.basename(path), text,
+                                        {"saved_to": saved_to,
+                                         "aspect": report["aspect"]})
+                report["indexed"] = bool(res.get("doc_id"))
+                report["index_doc_id"] = res.get("doc_id")
+                report["index_chunks"] = res.get("n_chunks")
+            except Exception as ie:
+                report["indexed"] = False
+                report["index_error"] = f"{type(ie).__name__}: {ie}"
+
         _clean_set(jid, stage="done", progress=100, status="done", result=report)
     except Exception as e:
         _clean_set(jid, stage="error", status="error",
@@ -1492,6 +1564,9 @@ class Handler(BaseHTTPRequestHandler):
                 "denoise_available": _denoise_available(),
                 "enhance_available": _ci_enhance_available(),
                 "captions_available": _captions_available(),
+                "memory_available": _memory_available(),
+                "memory_url": MEMORY_URL,
+                "transcript_collection": TRANSCRIPT_COLLECTION,
             })
             return
         if path == "/history":
@@ -1622,6 +1697,7 @@ class Handler(BaseHTTPRequestHandler):
             "dynamic_edit": bool(data.get("dynamic_edit", False)),
             "captions": bool(data.get("captions", False)),
             "caption_topic": (data.get("caption_topic") or "")[:400],
+            "index_transcript": bool(data.get("index_transcript", True)),
             "fillers": fillers,
             "pad": fnum("pad_ms", 60, 0, 500) / 1000.0,
             "max_silence": fnum("max_silence_ms", 700, 150, 10000) / 1000.0,
@@ -2161,6 +2237,16 @@ STUDIO_HTML = r"""<!DOCTYPE html>
           <div class="field" id="clTopicWrap" style="display:none;flex:1"><label>Topic / voice hint (optional)</label>
             <input id="clTopic" type="text" placeholder="e.g. punchy founder talking about AI startups" style="width:100%"></div>
         </div>
+        <div class="row" id="clMemRow" style="margin-top:6px;display:none">
+          <label class="toggle"><input type="checkbox" id="clIndex" checked> Save transcript to searchable library (sqlite-vec RAG)</label>
+          <div class="field" style="flex:1"><label>Search your transcript library</label>
+            <div style="display:flex;gap:6px">
+              <input id="clMemQ" type="text" placeholder="e.g. consistency beats intensity" style="flex:1" onkeydown="if(event.key==='Enter')clMemSearch()">
+              <button class="ghost" type="button" onclick="clMemSearch()">Search</button>
+            </div>
+          </div>
+        </div>
+        <div id="clMemResults" style="margin-top:6px"></div>
         <details style="margin-top:8px"><summary>Advanced</summary>
           <div class="row" style="margin-top:8px">
             <div class="field" style="flex:1"><label>Filler words (comma/space separated)</label>
@@ -2210,7 +2296,7 @@ STUDIO_HTML = r"""<!DOCTYPE html>
 
 <script>
 const $ = id => document.getElementById(id);
-let ready=false, lastSeed=null, ENG=null, ENGINES=[], REFS=[], curEngine='higgs', DENOISE_AVAILABLE=false, ENHANCE_AVAILABLE=false, CAPTIONS_AVAILABLE=false;
+let ready=false, lastSeed=null, ENG=null, ENGINES=[], REFS=[], curEngine='higgs', DENOISE_AVAILABLE=false, ENHANCE_AVAILABLE=false, CAPTIONS_AVAILABLE=false, MEMORY_AVAILABLE=false, MEMORY_URL='', TRANSCRIPT_COLLECTION='video_transcripts';
 
 const STYLES = { clean:{temp:0.50,topp:0.90,topk:40}, natural:{temp:0.70,topp:0.95,topk:50}, expressive:{temp:0.95,topp:0.97,topk:80} };
 
@@ -2240,6 +2326,10 @@ async function loadEngines(){
   $('clEnhanceRow').style.display=ENHANCE_AVAILABLE?'':'none';
   CAPTIONS_AVAILABLE=!!d.captions_available;
   $('clCaptionsWrap').style.display=CAPTIONS_AVAILABLE?'':'none';
+  MEMORY_AVAILABLE=!!d.memory_available;
+  MEMORY_URL=d.memory_url||'';
+  TRANSCRIPT_COLLECTION=d.transcript_collection||'video_transcripts';
+  $('clMemRow').style.display=MEMORY_AVAILABLE?'':'none';
   $('format').innerHTML=d.formats.map(f=>`<option value="${f}">${f.toUpperCase()}</option>`).join('');
   const seg=$('engineSeg'); seg.innerHTML='';
   ENGINES.forEach(e=>{ const b=document.createElement('button'); b.textContent=e.label.split(' ')[0];
@@ -2407,6 +2497,23 @@ $('clEnhance').onchange=()=>{ const on=$('clEnhance').checked;
   $('clEnhanceFaceWrap').style.display=on?'':'none'; $('clEnhanceLevelWrap').style.display=on?'':'none'; };
 $('clAspect').onchange=()=>{ $('clAspectFitWrap').style.display=$('clAspect').value!=='original'?'':'none'; };
 $('clCaptions').onchange=()=>{ $('clTopicWrap').style.display=$('clCaptions').checked?'':'none'; };
+async function clMemSearch(){
+  const q=$('clMemQ').value.trim();
+  const box=$('clMemResults');
+  if(!q){ box.innerHTML=''; return; }
+  box.innerHTML='<div class="hint">Searching…</div>';
+  try{
+    const r=await fetch(MEMORY_URL+'/rag/search',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({query:q,k:6,collection:TRANSCRIPT_COLLECTION})});
+    const d=await r.json();
+    const res=(d.results||[]);
+    if(!res.length){ box.innerHTML='<div class="hint">No matches in your transcript library yet.</div>'; return; }
+    box.innerHTML='<div class="hint" style="margin-bottom:4px">Top matches:</div>'+res.map(x=>{
+      const src=clEsc(x.source||'clip'); const sc=Math.round((x.score||0)*100);
+      const snip=clEsc((x.text||'').replace(/\n+/g,' ').slice(0,220));
+      return `<div style="border:1px solid var(--bd,#333);border-radius:8px;padding:8px;margin-bottom:6px"><b>${src}</b> <span class="tag">${sc}%</span><div class="hint" style="margin-top:4px">${snip}…</div></div>`;
+    }).join('');
+  }catch(e){ box.innerHTML='<div class="hint err">Search failed: '+clEsc(e.message)+'</div>'; }
+}
 function clBusy(b){ $('clRun').disabled=b; $('clAnalyze').disabled=b; }
 function clBaseBody(){
   return {
@@ -2422,6 +2529,7 @@ function clBaseBody(){
     dynamic_edit:$('clDynamic').checked,
     captions:CAPTIONS_AVAILABLE&&$('clCaptions').checked,
     caption_topic:$('clTopic').value.trim(),
+    index_transcript:$('clIndex').checked,
     fillers:$('clFillerList').value,
     pad_ms:parseInt($('clPad').value,10)||60,
     max_silence_ms:parseInt($('clMaxSil').value,10)||700,
@@ -2551,6 +2659,7 @@ function renderCleanResult(res){
   if(res.punch_in) chips+=' <span class="tag">punch-in</span>';
   if(res.captioned) chips+=' <span class="tag">captions</span>';
   if(res.caption_error) chips+=' <span class="tag" style="opacity:.7">captions skipped</span>';
+  if(res.indexed) chips+=' <span class="tag">indexed \u2192 library</span>';
   if(res.aspect) chips+=` <span class="tag">${esc(res.aspect)}</span>`;
   chips+=` <span class="tag">${res.fillers_removed} fillers</span>`;
   if(res.silences_removed) chips+=` <span class="tag">${res.silences_removed} silences</span>`;
