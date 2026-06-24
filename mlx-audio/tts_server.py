@@ -1218,21 +1218,37 @@ def _composite_captions(video_path: str, items: list, base: str) -> str:
     return out
 
 
-def _render_punchin_video(src_video, src48, keeps, out_path, loudness, zoom=1.10):
-    """Render the kept segments with an alternating static punch-in (wide/zoom)
-    so jump-cuts read as intentional energy. Crisp cuts, high-quality encode."""
+def _render_punchin_video(src_video, src48, keeps, out_path, loudness, zoom=1.10,
+                          ramp_sec=0.22):
+    """Render kept segments with an alternating punch-in, but smooth the change
+    at each cut using a short eased zoom ramp instead of a hard jump."""
     info = _probe_media(src_video)
     W, H = info["width"], info["height"]
     if not (W and H):
         # Fall back to the plain select-based render.
         return _render_clean_video(src_video, src48, keeps, out_path, loudness)
-    zw, zh = (int(W / zoom) // 2) * 2, (int(H / zoom) // 2) * 2
     vparts, aparts, labels = [], [], []
     for idx, (a, b) in enumerate(keeps):
         zoomed = (idx % 2 == 1)
+        prev_zoomed = (idx % 2 == 0 and idx > 0)
+        s0 = zoom if prev_zoomed else 1.0
+        s1 = zoom if zoomed else 1.0
+        ramp = max(0.01, float(ramp_sec))
         v = f"[0:v]trim={a}:{b},setpts=PTS-STARTPTS"
-        if zoomed:
-            v += f",crop={zw}:{zh}:(iw-{zw})/2:(ih-{zh})/2,scale={W}:{H}"
+        if abs(s1 - 1.0) < 1e-4 and abs(s0 - 1.0) < 1e-4:
+            v += f",scale={W}:{H}:flags=lanczos"
+        else:
+            # Smoothstep easing: e=u*u*(3-2*u), u=clamp(t/ramp,0..1)
+            # scale(t)=s0 + (s1-s0)*e
+            scale_expr = (
+                f"({s0:.6f}+({s1:.6f}-{s0:.6f})*"
+                f"(min(t/{ramp:.3f},1)*min(t/{ramp:.3f},1)"
+                f"*(3-2*min(t/{ramp:.3f},1))))"
+            )
+            crop_w = f"trunc(iw/{scale_expr}/2)*2"
+            crop_h = f"trunc(ih/{scale_expr}/2)*2"
+            v += (f",crop={crop_w}:{crop_h}:(iw-ow)/2:(ih-oh)/2,"
+                  f"scale={W}:{H}:flags=lanczos")
         v += f",setsar=1[v{idx}]"
         a_ = f"[1:a]atrim={a}:{b},asetpts=PTS-STARTPTS[a{idx}]"
         vparts.append(v)
@@ -2232,7 +2248,7 @@ STUDIO_HTML = r"""<!DOCTYPE html>
             </select></div>
         </div>
         <div class="row" id="clViralRow" style="margin-top:6px">
-          <label class="toggle"><input type="checkbox" id="clDynamic"> Dynamic punch-in (alternating zoom on cuts, video only)</label>
+          <label class="toggle"><input type="checkbox" id="clDynamic"> Dynamic punch-in (smooth eased zoom on cuts, video only)</label>
           <label class="toggle" id="clCaptionsWrap" style="display:none"><input type="checkbox" id="clCaptions"> Smart captions + hook cards (LLM, video only)</label>
           <div class="field" id="clTopicWrap" style="display:none;flex:1"><label>Topic / voice hint (optional)</label>
             <input id="clTopic" type="text" placeholder="e.g. punchy founder talking about AI startups" style="width:100%"></div>
