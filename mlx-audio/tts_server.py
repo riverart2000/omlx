@@ -98,6 +98,8 @@ DEFAULT_FILLERS = [
 ]
 VIDEO_EXTS = {".mp4", ".mov", ".mkv", ".webm", ".avi", ".m4v"}
 CI_ENHANCE_BIN = os.path.join(BASE_DIR, "tools", "ci_enhance")
+ASPECTS = {"9:16": (9, 16), "16:9": (16, 9), "1:1": (1, 1),
+           "4:5": (4, 5), "original": None}
 
 os.makedirs(OUT_DIR, exist_ok=True)
 os.makedirs(REF_DIR, exist_ok=True)
@@ -674,17 +676,20 @@ def _clean_get(jid: str) -> dict:
 
 
 def _probe_media(path: str) -> dict:
-    info = {"duration": 0.0, "has_video": False, "has_audio": False}
+    info = {"duration": 0.0, "has_video": False, "has_audio": False,
+            "width": 0, "height": 0}
     try:
         out = subprocess.run(
             ["ffprobe", "-v", "error", "-show_entries",
-             "format=duration:stream=codec_type", "-of", "json", path],
+             "format=duration:stream=codec_type,width,height", "-of", "json", path],
             capture_output=True, text=True).stdout
         d = json.loads(out or "{}")
         info["duration"] = float(d.get("format", {}).get("duration") or 0.0)
         for s in d.get("streams", []):
             if s.get("codec_type") == "video":
                 info["has_video"] = True
+                info["width"] = int(s.get("width") or 0)
+                info["height"] = int(s.get("height") or 0)
             elif s.get("codec_type") == "audio":
                 info["has_audio"] = True
     except Exception:
@@ -880,6 +885,64 @@ def _apply_enhance(video_path: str, base: str, opts: dict) -> str:
     return out
 
 
+def _aspect_dims(sw: int, sh: int, ratio, fit: str):
+    """Return (W,H) output canvas for a target aspect ratio (tw,th), chosen from
+    the source dimensions so we never upscale. fit='fill' crops; 'pad'* fits."""
+    tw, th = ratio
+    a = tw / th          # target aspect (w/h)
+    s = (sw / sh) if sh else a
+    if fit == "fill":
+        if a < s:        # target narrower -> keep full height, crop width
+            H, W = sh, round(sh * a)
+        else:            # target wider -> keep full width, crop height
+            W, H = sw, round(sw / a)
+    else:                # pad: contain the whole frame, add bars
+        if a < s:        # target narrower -> keep full width, bars top/bottom
+            W, H = sw, round(sw / a)
+        else:            # target wider -> keep full height, bars left/right
+            H, W = sh, round(sh * a)
+    W -= W % 2
+    H -= H % 2
+    return max(2, W), max(2, H)
+
+
+def _apply_aspect(video_path: str, base: str, opts: dict) -> str:
+    """Reframe a video to a target aspect ratio. Returns the new file path."""
+    ratio = ASPECTS.get(opts.get("aspect"))
+    if not ratio:
+        return video_path
+    fit = opts.get("aspect_fit", "fill")
+    info = _probe_media(video_path)
+    sw, sh = info["width"], info["height"]
+    if not (sw and sh):
+        return video_path
+    W, H = _aspect_dims(sw, sh, ratio, fit)
+    out = base + ".aspect.mp4"
+    cmd = ["ffmpeg", "-y", "-loglevel", "error", "-i", video_path]
+    if fit == "fill":
+        vf = (f"scale={W}:{H}:force_original_aspect_ratio=increase,"
+              f"crop={W}:{H}")
+        cmd += ["-vf", vf, "-map", "0:v:0"]
+    elif fit == "pad_blur":
+        fc = (f"[0:v]split=2[bg][fg];"
+              f"[bg]scale={W}:{H}:force_original_aspect_ratio=increase,"
+              f"crop={W}:{H},gblur=sigma=24[bgb];"
+              f"[fg]scale={W}:{H}:force_original_aspect_ratio=decrease[fgs];"
+              f"[bgb][fgs]overlay=(W-w)/2:(H-h)/2[v]")
+        cmd += ["-filter_complex", fc, "-map", "[v]"]
+    else:                # pad_black
+        vf = (f"scale={W}:{H}:force_original_aspect_ratio=decrease,"
+              f"pad={W}:{H}:(ow-iw)/2:(oh-ih)/2:color=black")
+        cmd += ["-vf", vf, "-map", "0:v:0"]
+    if info["has_audio"]:
+        cmd += ["-map", "0:a:0", "-c:a", "copy"]
+    cmd += ["-c:v", "libx264", "-preset", "veryfast", "-pix_fmt", "yuv420p",
+            "-movflags", "+faststart", out]
+    _run(cmd)
+    _safe_rm(video_path)
+    return out
+
+
 def _run_cleanup(jid: str, opts: dict) -> None:
     tmps = []
     try:
@@ -1011,6 +1074,9 @@ def _run_cleanup(jid: str, opts: dict) -> None:
             if enhance:
                 _clean_set(jid, stage="enhancing light & colour", progress=92)
                 out = _apply_enhance(out, base, opts)
+            if ASPECTS.get(opts.get("aspect")):
+                _clean_set(jid, stage="reframing aspect ratio", progress=96)
+                out = _apply_aspect(out, base, opts)
         else:
             fmt = opts["format"]
             out = base + "." + fmt
@@ -1047,6 +1113,8 @@ def _run_cleanup(jid: str, opts: dict) -> None:
             "saved_seconds": round(max(0.0, dur - new_dur), 2),
             "denoised": denoised,
             "enhanced": enhance,
+            "aspect": (opts.get("aspect") if ASPECTS.get(opts.get("aspect"))
+                       else None),
             "fillers_removed": n_fillers,
             "filler_hits": hits[:300],
             "silences_removed": n_silences,
@@ -1245,6 +1313,11 @@ class Handler(BaseHTTPRequestHandler):
             "enhance_video": bool(data.get("enhance_video", False)),
             "enhance_face": bool(data.get("enhance_face", False)),
             "enhance_level": fnum("enhance_level", 1.0, 0.0, 1.0),
+            "aspect": (data.get("aspect") if data.get("aspect") in ASPECTS
+                       else "original"),
+            "aspect_fit": (data.get("aspect_fit")
+                           if data.get("aspect_fit") in
+                           ("fill", "pad_black", "pad_blur") else "fill"),
             "fillers": fillers,
             "pad": fnum("pad_ms", 60, 0, 500) / 1000.0,
             "max_silence": fnum("max_silence_ms", 700, 150, 10000) / 1000.0,
@@ -1264,6 +1337,7 @@ class Handler(BaseHTTPRequestHandler):
         else:
             any_step = (opts["denoise"] or opts["remove_fillers"]
                         or opts["remove_silences"] or opts["enhance_video"]
+                        or bool(ASPECTS.get(opts["aspect"]))
                         or cuts is not None)
             if not any_step:
                 return self._json(400, {"error": "enable at least one cleanup step"})
@@ -1760,6 +1834,22 @@ STUDIO_HTML = r"""<!DOCTYPE html>
           <div class="field" id="clEnhanceLevelWrap" style="display:none"><label>Strength</label>
             <input id="clEnhanceLevel" type="number" min="0" max="100" step="5" value="100" style="min-width:80px"> <span class="hint">%</span></div>
         </div>
+        <div class="row" id="clAspectRow" style="margin-top:6px">
+          <div class="field"><label>Aspect ratio (video)</label>
+            <select id="clAspect">
+              <option value="original" selected>Original</option>
+              <option value="9:16">9:16 — TikTok / Reels / Shorts</option>
+              <option value="16:9">16:9 — YouTube / landscape</option>
+              <option value="1:1">1:1 — Instagram square</option>
+              <option value="4:5">4:5 — Instagram portrait</option>
+            </select></div>
+          <div class="field" id="clAspectFitWrap" style="display:none"><label>Reframe</label>
+            <select id="clAspectFit">
+              <option value="fill" selected>Fill (crop to fit)</option>
+              <option value="pad_blur">Fit (blurred background)</option>
+              <option value="pad_black">Fit (black bars)</option>
+            </select></div>
+        </div>
         <details style="margin-top:8px"><summary>Advanced</summary>
           <div class="row" style="margin-top:8px">
             <div class="field" style="flex:1"><label>Filler words (comma/space separated)</label>
@@ -2002,6 +2092,7 @@ function fmtDur(s){ s=Math.max(0,Math.round(s||0)); const m=Math.floor(s/60); re
 function clEsc(s){ return String(s==null?'':s).replace(/[<>&]/g,c=>({'<':'&lt;','>':'&gt;','&':'&amp;'}[c])); }
 $('clEnhance').onchange=()=>{ const on=$('clEnhance').checked;
   $('clEnhanceFaceWrap').style.display=on?'':'none'; $('clEnhanceLevelWrap').style.display=on?'':'none'; };
+$('clAspect').onchange=()=>{ $('clAspectFitWrap').style.display=$('clAspect').value!=='original'?'':'none'; };
 function clBusy(b){ $('clRun').disabled=b; $('clAnalyze').disabled=b; }
 function clBaseBody(){
   return {
@@ -2012,6 +2103,8 @@ function clBaseBody(){
     enhance_video:ENHANCE_AVAILABLE&&$('clEnhance').checked,
     enhance_face:$('clEnhanceFace').checked,
     enhance_level:(parseInt($('clEnhanceLevel').value,10)||100)/100,
+    aspect:$('clAspect').value,
+    aspect_fit:$('clAspectFit').value,
     fillers:$('clFillerList').value,
     pad_ms:parseInt($('clPad').value,10)||60,
     max_silence_ms:parseInt($('clMaxSil').value,10)||700,
@@ -2038,7 +2131,7 @@ $('clAnalyze').onclick=async()=>{
 $('clRun').onclick=async()=>{
   const body=clBaseBody();
   if(!body.path){ clFlash('Paste a file path first.',true); return; }
-  if(!body.denoise&&!body.remove_fillers&&!body.remove_silences&&!body.enhance_video){ clFlash('Enable at least one cleanup step.',true); return; }
+  if(!body.denoise&&!body.remove_fillers&&!body.remove_silences&&!body.enhance_video&&body.aspect==='original'){ clFlash('Enable at least one cleanup step.',true); return; }
   body.mode='render';
   clBusy(true); $('clResult').innerHTML=''; $('clReview').innerHTML=''; clFlash('Starting…');
   try{
@@ -2138,6 +2231,7 @@ function renderCleanResult(res){
   if(res.saved_seconds>0) chips+=` <span class="tag">saved ${fmtDur(res.saved_seconds)}</span>`;
   if(res.denoised) chips+=' <span class="tag">denoised</span>';
   if(res.enhanced) chips+=' <span class="tag">enhanced</span>';
+  if(res.aspect) chips+=` <span class="tag">${esc(res.aspect)}</span>`;
   chips+=` <span class="tag">${res.fillers_removed} fillers</span>`;
   if(res.silences_removed) chips+=` <span class="tag">${res.silences_removed} silences</span>`;
   let hits='';
