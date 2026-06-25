@@ -1099,8 +1099,66 @@ def _segment_lines(words: list, max_line: float = 2.4, max_words: int = 6):
     return out
 
 
-def _llm_json(messages: list, max_tokens: int = 1400, temp: float = 0.7):
-    """Call the local oMLX LLM and parse a JSON object from the reply."""
+def _repair_json(txt: str):
+    """Best-effort parse of a JSON object from an LLM reply that may be wrapped
+    in markdown fences, prefixed with reasoning, or truncated mid-output."""
+    if not txt:
+        raise RuntimeError("empty reply")
+    # Strip ```json ... ``` fences.
+    txt = re.sub(r"```(?:json)?", "", txt)
+    start = txt.find("{")
+    if start < 0:
+        raise RuntimeError("no JSON object in reply")
+    frag = txt[start:]
+    # Fast path.
+    try:
+        return json.loads(frag)
+    except Exception:
+        pass
+    # Trim to the last complete object/array, then close open brackets.
+    last = max(frag.rfind("}"), frag.rfind("]"))
+    if last > 0:
+        candidate = frag[:last + 1]
+        try:
+            return json.loads(candidate)
+        except Exception:
+            pass
+    # Truncation repair: cut at the last comma, then balance brackets/quotes.
+    cut = frag.rfind(",")
+    body = frag[:cut] if cut > 0 else frag
+    # Balance quotes.
+    if body.count('"') % 2:
+        body += '"'
+    # Close any open braces/brackets in stack order.
+    stack = []
+    instr = False
+    esc = False
+    for ch in body:
+        if esc:
+            esc = False
+            continue
+        if ch == "\\":
+            esc = True
+            continue
+        if ch == '"':
+            instr = not instr
+            continue
+        if instr:
+            continue
+        if ch in "{[":
+            stack.append(ch)
+        elif ch == "}" and stack and stack[-1] == "{":
+            stack.pop()
+        elif ch == "]" and stack and stack[-1] == "[":
+            stack.pop()
+    for ch in reversed(stack):
+        body += "}" if ch == "{" else "]"
+    return json.loads(body)
+
+
+def _llm_json(messages: list, max_tokens: int = 6000, temp: float = 0.7):
+    """Call the local oMLX LLM and parse a JSON object from the reply. Tolerant
+    of markdown fences, leading reasoning, and truncated output."""
     import urllib.request
     body = json.dumps({"model": CAPTION_LLM, "messages": messages,
                        "temperature": temp, "max_tokens": max_tokens,
@@ -1110,41 +1168,76 @@ def _llm_json(messages: list, max_tokens: int = 1400, temp: float = 0.7):
     with urllib.request.urlopen(req, timeout=600) as r:
         data = json.loads(r.read())
     txt = data["choices"][0]["message"]["content"]
-    m = re.search(r"\{.*\}", txt, re.S)
-    if not m:
-        raise RuntimeError("LLM returned no JSON")
-    return json.loads(m.group(0))
+    return _repair_json(txt)
 
 
 def _gen_captions(lines: list, want_cards: bool, topic: str = "",
                   length_target: str = "auto") -> dict:
     """Use the LLM to rewrite transcript lines into punchy condensed captions
     plus a few concept/hook cards. Returns {captions:[...], cards:[...]} keyed
-    by line index 'i'."""
-    payload = [{"i": i, "t": ln["t"]} for i, ln in enumerate(lines)]
+    by line index 'i'. Lines are processed in batches so the model never has to
+    return more JSON than fits in one reply (avoids truncation on long videos)."""
     sys_msg = (
         "You are an elite short-form (TikTok/Reels/YouTube Shorts) video "
         "editor. You write on-screen captions that drive retention. Output "
         "ONLY one valid JSON object, no prose, no markdown.")
-    ask = (
-        "Rewrite each transcript line into a punchy on-screen caption that "
-        "captures the MEANING — condensed, 2 to 5 words, NOT a literal copy "
-        "of the words. Keep the speaker's intent. Pick 1 word per caption to "
-        "emphasise. Also choose " + ("3 to 6" if want_cards else "0") +
-        " standout moments for big concept 'hook cards' (a 2-5 word title + a "
-        "short punchy subtitle) that tease the idea.\n")
     lt = VIRAL_LENGTH_TARGETS.get(length_target, "")
-    if lt:
-        ask += "Edit goal: " + lt + "\n"
-    if topic:
-        ask += f"Video topic/voice: {topic}\n"
-    ask += ('Return JSON exactly: {"captions":[{"i":<int>,"text":"...",'
-            '"emphasis":["..."]}],"cards":[{"i":<int>,"title":"...",'
-            '"subtitle":"..."}]}\nLines: ' + json.dumps(payload))
-    out = _llm_json([{"role": "system", "content": sys_msg},
-                     {"role": "user", "content": ask}])
-    caps = {int(c["i"]): c for c in out.get("captions", []) if "i" in c}
-    cards = out.get("cards", []) if want_cards else []
+
+    def _caption_batch(batch_payload):
+        ask = (
+            "Rewrite each transcript line into a punchy on-screen caption that "
+            "captures the MEANING — condensed, 2 to 5 words, NOT a literal copy "
+            "of the words. Keep the speaker's intent. Pick 1 word per caption to "
+            "emphasise. Keep the SAME 'i' index for each line.\n")
+        if lt:
+            ask += "Edit goal: " + lt + "\n"
+        if topic:
+            ask += f"Video topic/voice: {topic}\n"
+        ask += ('Return JSON exactly: {"captions":[{"i":<int>,"text":"...",'
+                '"emphasis":["..."]}]}\nLines: ' + json.dumps(batch_payload))
+        return _llm_json([{"role": "system", "content": sys_msg},
+                          {"role": "user", "content": ask}])
+
+    payload = [{"i": i, "t": ln["t"]} for i, ln in enumerate(lines)]
+    caps = {}
+    batch = 18
+    for s in range(0, len(payload), batch):
+        chunk = payload[s:s + batch]
+        try:
+            out = _caption_batch(chunk)
+        except Exception:
+            # Retry this batch once; if it still fails, those lines fall back to
+            # literal transcript text in _build_overlays.
+            try:
+                out = _caption_batch(chunk)
+            except Exception:
+                continue
+        for c in out.get("captions", []):
+            if "i" in c:
+                try:
+                    caps[int(c["i"])] = c
+                except (TypeError, ValueError):
+                    pass
+
+    cards = []
+    if want_cards:
+        # Cards are few; one short call over a condensed view of the transcript.
+        try:
+            card_ask = (
+                "From this transcript, choose 3 to 6 standout moments for big "
+                "concept 'hook cards' (a 2-5 word title + a short punchy "
+                "subtitle that teases the idea). Use the line 'i' index where "
+                "each moment occurs.\n")
+            if topic:
+                card_ask += f"Video topic/voice: {topic}\n"
+            card_ask += ('Return JSON exactly: {"cards":[{"i":<int>,'
+                         '"title":"...","subtitle":"..."}]}\nLines: '
+                         + json.dumps(payload))
+            cout = _llm_json([{"role": "system", "content": sys_msg},
+                              {"role": "user", "content": card_ask}])
+            cards = cout.get("cards", []) or []
+        except Exception:
+            cards = []
     return {"captions": caps, "cards": cards}
 
 
@@ -1196,7 +1289,12 @@ def _render_captions_pngs(items: list, W: int, H: int, outdir: str) -> dict:
 
 def _composite_captions(video_path: str, items: list, base: str) -> str:
     """Overlay caption/card PNGs onto the video at their output-timeline times
-    with a quick pop-in. Returns the new file path."""
+    with a quick pop-in. Returns the new file path.
+
+    Overlays are applied in batches so the filter graph never gets so large that
+    ffmpeg stalls (long videos can have dozens of caption lines). Each batch
+    writes a near-lossless intermediate that feeds the next batch; only the final
+    pass encodes at delivery quality."""
     if not items:
         return video_path
     info = _probe_media(video_path)
@@ -1208,105 +1306,107 @@ def _composite_captions(video_path: str, items: list, base: str) -> str:
              if pngs.get(it["id"]) and os.path.exists(pngs[it["id"]])]
     if not valid:
         return video_path
-    inputs, fc, prev = ["-i", video_path], "", "0:v"
-    total = len(valid)
-    for n, it in enumerate(valid, start=1):
-        p = pngs[it["id"]]
-        inputs += ["-i", p]
-        a, b = it["a"], it["b"]
-        pop = 0.12
-        # Pop-in scale on the overlay, then steady; gated to [a,b].
-        scl = (f"[{n}:v]scale=iw*"
-               f"'min(1,0.82+0.18*(t-{a})/{pop})':-1:eval=frame[s{n}]")
-        outl = "[vout]" if n == total else f"[v{n}]"
-        fc += (scl + f";[{prev}][s{n}]overlay=(W-w)/2:(H-h)/2:"
-               f"enable='between(t,{a},{b})'{outl};")
-        prev = f"v{n}"
-    fc = fc.rstrip(";")
+
+    BATCH = 12
+    batches = [valid[i:i + BATCH] for i in range(0, len(valid), BATCH)]
+    src = video_path
+    tmps = []
+    last = len(batches) - 1
     out = base + ".caps.mp4"
-    cmd = ["ffmpeg", "-y", "-loglevel", "error"] + inputs + \
-        ["-filter_complex", fc, "-map", "[vout]"]
-    if info["has_audio"]:
-        cmd += ["-map", "0:a:0", "-c:a", "copy"]
-    cmd += ["-c:v", "libx264", "-preset", "medium", "-crf", "18",
-            "-pix_fmt", "yuv420p", "-movflags", "+faststart", out]
-    _run(cmd)
+    for bi, group in enumerate(batches):
+        final_pass = (bi == last)
+        inputs, fc, prev = ["-i", src], "", "0:v"
+        total = len(group)
+        for n, it in enumerate(group, start=1):
+            inputs += ["-i", pngs[it["id"]]]
+            a, b = it["a"], it["b"]
+            pop = 0.12
+            scl = (f"[{n}:v]scale=iw*"
+                   f"'min(1,0.82+0.18*(t-{a})/{pop})':-1:eval=frame[s{n}]")
+            outl = "[vout]" if n == total else f"[v{n}]"
+            fc += (scl + f";[{prev}][s{n}]overlay=(W-w)/2:(H-h)/2:"
+                   f"enable='between(t,{a},{b})'{outl};")
+            prev = f"v{n}"
+        fc = fc.rstrip(";")
+        dst = out if final_pass else (base + f".capb{bi}.mkv")
+        cmd = ["ffmpeg", "-y", "-loglevel", "error"] + inputs + \
+            ["-filter_complex", fc, "-map", "[vout]"]
+        if info["has_audio"]:
+            cmd += ["-map", "0:a:0", "-c:a", ("copy" if not final_pass else "aac")]
+        if final_pass:
+            cmd += ["-c:v", "libx264", "-preset", "medium", "-crf", "18",
+                    "-pix_fmt", "yuv420p", "-movflags", "+faststart", dst]
+        else:
+            # Near-lossless, fast intermediate to avoid generational quality loss.
+            cmd += ["-c:v", "libx264", "-preset", "ultrafast", "-crf", "12",
+                    "-pix_fmt", "yuv420p", dst]
+        _run(cmd)
+        if src != video_path:
+            tmps.append(src)
+        src = dst
+    for t in tmps:
+        _safe_rm(t)
     _safe_rm(video_path)
     return out
 
 
 def _render_punchin_video(src_video, src48, keeps, out_path, loudness, zoom=1.10,
                           ramp_sec=0.22):
-    """Render kept segments with an alternating punch-in, but smooth the change
-    at each cut using a short eased zoom ramp instead of a hard jump."""
+    """Join the kept segments and apply a single, continuous, gentle zoom motion
+    over the whole clip (a slow "breathing" Ken Burns push) instead of toggling
+    the zoom level on every cut. This keeps the energy of a punch-in while
+    eliminating the hard in/out jumps that read as jittery, and it scales to
+    long videos because the zoom is one filter, not one-per-segment."""
     info = _probe_media(src_video)
     W, H = info["width"], info["height"]
     if not (W and H):
         # Fall back to the plain select-based render.
         return _render_clean_video(src_video, src48, keeps, out_path, loudness)
-    zw, zh = (int(W / zoom) // 2) * 2, (int(H / zoom) // 2) * 2
-    # Smooth blend mode is expensive with many cut segments because each segment
-    # adds split+scale+crop+blend nodes. For long videos with lots of cuts, fall
-    # back to static alternating punch-in to avoid apparent "stuck at rendering".
-    smooth_limit = 28
-    smooth_mode = len(keeps) <= smooth_limit
-    # Avoid hyperactive in/out toggling by holding each zoom state for a few
-    # seconds before allowing a flip.
-    min_hold_sec = 7.0
-    zoom_states = []
-    hold = 0.0
-    zstate = False
-    for i, (a, b) in enumerate(keeps):
-        seg = max(0.0, float(b) - float(a))
-        if i == 0:
-            zstate = False
-            hold = seg
-        else:
-            if hold >= min_hold_sec:
-                zstate = not zstate
-                hold = 0.0
-            hold += seg
-        zoom_states.append(zstate)
+
+    # Source frame rate (for a smooth, non-resampled zoom pass).
+    fps = 30.0
+    try:
+        rate = subprocess.run(
+            ["ffprobe", "-v", "error", "-select_streams", "v:0",
+             "-show_entries", "stream=r_frame_rate", "-of",
+             "default=nw=1:nk=1", src_video],
+            capture_output=True, text=True).stdout.strip()
+        if "/" in rate:
+            num, den = rate.split("/")
+            if float(den) > 0:
+                fps = float(num) / float(den)
+        elif rate:
+            fps = float(rate)
+    except Exception:
+        pass
+    if not (1.0 <= fps <= 240.0):
+        fps = 30.0
+
+    # 1) Concatenate the kept segments (scaled to WxH, square pixels). No
+    #    per-segment zoom — the cuts are joined cleanly.
     vparts, aparts, labels = [], [], []
     for idx, (a, b) in enumerate(keeps):
-        zoomed = zoom_states[idx]
-        if smooth_mode:
-            prev_zoomed = zoom_states[idx - 1] if idx > 0 else False
-            s0 = zoom if prev_zoomed else 1.0
-            s1 = zoom if zoomed else 1.0
-            ramp = max(0.01, float(ramp_sec))
-            # Build a compatibility-safe smooth transition without crop eval=frame:
-            # blend between a wide and zoomed stream over the first `ramp` seconds.
-            u = f"(T/{ramp:.3f})"
-            m = f"((1+{u}-abs(1-{u}))/2)"
-            uc = f"(({m}+abs({m}))/2)"  # clamp(T/ramp, 0..1)
-            if abs(s1 - s0) < 1e-4:
-                mix = "1" if s1 > 1.001 else "0"
-            elif s1 > s0:
-                mix = uc
-            else:
-                mix = f"(1-{uc})"
-            blend_expr = f"A*(1-({mix}))+B*({mix})"
-            v = (
-                f"[0:v]trim={a}:{b},setpts=PTS-STARTPTS,split=2[vb{idx}][vz{idx}];"
-                f"[vb{idx}]scale={W}:{H}:flags=lanczos[vb2{idx}];"
-                f"[vz{idx}]crop={zw}:{zh}:(iw-{zw})/2:(ih-{zh})/2,"
-                f"scale={W}:{H}:flags=lanczos[vz2{idx}];"
-                f"[vb2{idx}][vz2{idx}]blend=all_expr='{blend_expr}',setsar=1[v{idx}]"
-            )
-        else:
-            v = f"[0:v]trim={a}:{b},setpts=PTS-STARTPTS"
-            if zoomed:
-                v += f",crop={zw}:{zh}:(iw-{zw})/2:(ih-{zh})/2,scale={W}:{H}:flags=lanczos"
-            else:
-                v += f",scale={W}:{H}:flags=lanczos"
-            v += f",setsar=1[v{idx}]"
+        v = (f"[0:v]trim={a}:{b},setpts=PTS-STARTPTS,"
+             f"scale={W}:{H}:flags=lanczos,setsar=1[v{idx}]")
         a_ = f"[1:a]atrim={a}:{b},asetpts=PTS-STARTPTS[a{idx}]"
         vparts.append(v)
         aparts.append(a_)
         labels.append(f"[v{idx}][a{idx}]")
     fc = ";".join(vparts + aparts)
-    fc += ";" + "".join(labels) + f"concat=n={len(keeps)}:v=1:a=1[v][a]"
+    fc += ";" + "".join(labels) + f"concat=n={len(keeps)}:v=1:a=1[vc][a]"
+
+    # 2) One continuous, gentle zoom oscillation over the joined video. zoompan
+    #    evaluates its own expressions per frame (no crop eval=frame needed, which
+    #    this ffmpeg build lacks). Amplitude stays subtle for a pro feel.
+    amp = max(0.0, min(0.12, float(zoom) - 1.0)) * 0.6  # e.g. 1.10 -> ~0.06
+    if amp < 0.005:
+        amp = 0.04
+    period = 9.0
+    z = f"1+{amp:.4f}+{amp:.4f}*sin(2*PI*in_time/{period})"
+    fc += (f";[vc]zoompan=z='{z}':d=1:"
+           f"x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':"
+           f"s={W}x{H}:fps={fps:.4f}[v]")
+
     lufs = LUFS_TARGETS.get(loudness)
     if lufs is not None:
         fc += f";[a]loudnorm=I={lufs}:TP=-1.5:LRA=11[aout]"
