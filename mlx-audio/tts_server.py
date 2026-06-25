@@ -32,6 +32,7 @@ Endpoints:
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 import os
 import queue
@@ -1445,6 +1446,552 @@ def _render_punchin_video(src_video, src48, keeps, out_path, loudness, zoom=1.10
     return cmd
 
 
+# ==========================================================================
+# LLM EDIT DIRECTOR — collaborative, stage-cached viral editing
+# --------------------------------------------------------------------------
+# Turns a source video + transcript into a structured, EDITABLE JSON edit plan
+# proposed by the oMLX LLM. The user tweaks fields (mostly dropdowns) and/or
+# gives freeform feedback and iterates with the model (/director/revise). When
+# happy, /director/render runs a STAGE-CACHED executor: each stage's output mp4
+# is content-addressed, so changing only (say) captions reuses every earlier
+# stage and re-runs just the overlay pass. Re-renders are therefore fast.
+# ==========================================================================
+DIR_CACHE = os.path.join(OUT_DIR, "_dir_cache")
+DIR_STYLES = ["high-energy", "clean & modern", "cinematic", "vlog",
+              "educational", "hype / meme", "calm / aesthetic"]
+DIR_SILENCE = {"max_silence": 0.6, "keep_silence": 0.15, "silence_db": -30.0}
+_dir_jobs: dict = {}
+_dir_lock = threading.Lock()
+_dir_plans: dict = {}   # session_id -> {plan, file_sig, history:[...]}
+
+
+def _dir_set(jid: str, **kw) -> None:
+    with _dir_lock:
+        _dir_jobs.setdefault(jid, {}).update(kw)
+
+
+def _dir_get(jid: str) -> dict:
+    with _dir_lock:
+        return dict(_dir_jobs.get(jid, {}))
+
+
+def _sig(*parts) -> str:
+    h = hashlib.sha1()
+    for p in parts:
+        h.update(repr(p).encode("utf-8", "ignore"))
+        h.update(b"\x00")
+    return h.hexdigest()[:16]
+
+
+def _file_sig(path: str) -> str:
+    st = os.stat(path)
+    return _sig(os.path.abspath(path), st.st_size, int(st.st_mtime))
+
+
+def _cache_path(stage: str, key: str, ext: str = "mp4") -> str:
+    os.makedirs(DIR_CACHE, exist_ok=True)
+    return os.path.join(DIR_CACHE, f"{stage}_{key}.{ext}")
+
+
+def _stage_mutate(in_path: str, out_path: str, fn) -> str:
+    """Copy a cached stage input to a scratch file, run fn(scratch) -> result
+    (fn may delete scratch), then move result to out_path. This preserves the
+    cached input so earlier stages stay reusable across re-renders."""
+    work = out_path + ".src.mp4"
+    shutil.copy2(in_path, work)
+    res = fn(work)
+    if os.path.abspath(res) != os.path.abspath(out_path):
+        os.replace(res, out_path)
+    return out_path
+
+
+# ---- Plan schema -----------------------------------------------------------
+def _plan_defaults() -> dict:
+    return {
+        "version": 1,
+        "meta": {"platform": "youtube", "aspect": "9:16", "aspect_fit": "fill",
+                 "length": "auto", "loudness": "youtube", "style": "high-energy"},
+        "stages": {"denoise": True, "remove_fillers": True,
+                   "remove_silences": True, "punch_in": True,
+                   "enhance": True, "enhance_face": False,
+                   "enhance_level": 1.0, "captions": True, "cards": True},
+        "gen": {"captions": {}, "cards": []},
+        "notes": "",
+    }
+
+
+def _plan_normalize(plan: dict) -> dict:
+    d = _plan_defaults()
+    plan = plan if isinstance(plan, dict) else {}
+    meta = {**d["meta"], **(plan.get("meta") or {})}
+    if meta.get("aspect") not in ASPECTS:
+        meta["aspect"] = "9:16"
+    if meta.get("aspect_fit") not in ("fill", "pad_blur", "pad_black"):
+        meta["aspect_fit"] = "fill"
+    if meta.get("length") not in VIRAL_LENGTH_TARGETS:
+        meta["length"] = "auto"
+    if meta.get("loudness") not in LUFS_TARGETS:
+        meta["loudness"] = "youtube"
+    meta["style"] = str(meta.get("style") or "high-energy")[:60]
+    meta["platform"] = str(meta.get("platform") or "youtube")[:30]
+    st = {**d["stages"], **(plan.get("stages") or {})}
+    for k in ("denoise", "remove_fillers", "remove_silences", "punch_in",
+              "enhance", "enhance_face", "captions", "cards"):
+        st[k] = bool(st.get(k))
+    try:
+        st["enhance_level"] = max(0.0, min(1.0, float(st.get("enhance_level", 1.0))))
+    except (TypeError, ValueError):
+        st["enhance_level"] = 1.0
+    gen = plan.get("gen") if isinstance(plan.get("gen"), dict) else {}
+    raw_caps = gen.get("captions") if isinstance(gen.get("captions"), dict) else {}
+    caps = {}
+    for k, v in raw_caps.items():
+        try:
+            ik = int(k)
+        except (TypeError, ValueError):
+            continue
+        if isinstance(v, dict):
+            caps[ik] = v
+    cards = gen.get("cards") if isinstance(gen.get("cards"), list) else []
+    return {"version": 1, "meta": meta, "stages": st,
+            "gen": {"captions": caps, "cards": cards},
+            "notes": str(plan.get("notes") or "")}
+
+
+def _plan_public(plan: dict, lines: list | None = None) -> dict:
+    """Editor-friendly view: caption/card dicts flattened to sorted lists, with
+    the original transcript line text alongside each caption for context."""
+    plan = _plan_normalize(plan)
+    caps = plan["gen"]["captions"]
+    cap_list = []
+    for i in sorted(caps):
+        c = caps[i]
+        emph = c.get("emphasis")
+        if isinstance(emph, list):
+            emph = " ".join(str(e) for e in emph)
+        orig = ""
+        if lines and 0 <= i < len(lines):
+            orig = lines[i].get("t", "")
+        cap_list.append({"i": i, "text": str(c.get("text") or ""),
+                         "emphasis": str(emph or ""), "orig": orig})
+    cards = []
+    for c in plan["gen"]["cards"]:
+        try:
+            i = int(c.get("i", 0))
+        except (TypeError, ValueError):
+            i = 0
+        cards.append({"i": i, "title": str(c.get("title") or ""),
+                      "subtitle": str(c.get("subtitle") or "")})
+    out = {"version": 1, "meta": plan["meta"], "stages": plan["stages"],
+           "notes": plan["notes"], "captions": cap_list, "cards": cards}
+    return out
+
+
+def _plan_from_public(raw: dict) -> dict:
+    """Inverse of _plan_public: fold the editable lists back into canonical gen."""
+    raw = raw if isinstance(raw, dict) else {}
+    caps = {}
+    for c in (raw.get("captions") or []):
+        try:
+            i = int(c.get("i"))
+        except (TypeError, ValueError):
+            continue
+        emph = c.get("emphasis")
+        if isinstance(emph, str):
+            emph = [w for w in emph.split() if w]
+        caps[i] = {"text": str(c.get("text") or ""), "emphasis": emph or []}
+    cards = []
+    for c in (raw.get("cards") or []):
+        try:
+            i = int(c.get("i", 0))
+        except (TypeError, ValueError):
+            i = 0
+        cards.append({"i": i, "title": str(c.get("title") or ""),
+                      "subtitle": str(c.get("subtitle") or "")})
+    return _plan_normalize({"meta": raw.get("meta"), "stages": raw.get("stages"),
+                            "notes": raw.get("notes"),
+                            "gen": {"captions": caps, "cards": cards}})
+
+
+# ---- Prep (cached transcription + clean audio) -----------------------------
+def _director_prep(jid: str, path: str, denoise_on: bool) -> dict:
+    """Extract 48k audio (denoise optional), transcribe words. Both the audio
+    and the ASR result are content-addressed and cached, so re-planning/
+    re-rendering the same source never re-transcribes."""
+    info = _probe_media(path)
+    if not info["has_video"]:
+        raise RuntimeError("Edit Director needs a video file (use Media Cleanup "
+                           "for audio-only).")
+    if not info["has_audio"]:
+        raise RuntimeError("no audio stream found in this video")
+    fsig = _file_sig(path)
+    denoise = bool(denoise_on) and _denoise_available()
+    prep_key = _sig(fsig, denoise)
+    aud = _cache_path("aud", prep_key, "wav")
+    if not os.path.exists(aud):
+        _dir_set(jid, stage="extracting audio", progress=12)
+        raw48 = aud + ".raw.wav"
+        _run(["ffmpeg", "-y", "-loglevel", "error", "-i", path, "-vn",
+              "-ar", "48000", "-ac", "1", "-c:a", "pcm_s16le", raw48])
+        if denoise:
+            _dir_set(jid, stage="denoising", progress=20)
+            _denoise_file(raw48, aud, 48000)
+            _safe_rm(raw48)
+        else:
+            os.replace(raw48, aud)
+    asr = _cache_path("asr", prep_key, "json")
+    if os.path.exists(asr):
+        with open(asr) as f:
+            data = json.load(f)
+    else:
+        _dir_set(jid, stage="transcribing", progress=40)
+        wav16 = aud + ".16k.wav"
+        _run(["ffmpeg", "-y", "-loglevel", "error", "-i", aud,
+              "-ar", "16000", "-ac", "1", "-c:a", "pcm_s16le", wav16])
+        res = _enqueue("transcribe_words", {"path": wav16}, timeout=3600)
+        _safe_rm(wav16)
+        if "error" in res:
+            raise RuntimeError(res["error"])
+        data = {"words": res["data"]["words"], "text": res["data"]["text"]}
+        with open(asr, "w") as f:
+            json.dump(data, f)
+    return {"info": info, "file_sig": fsig, "prep_key": prep_key,
+            "audio": aud, "words": data["words"], "text": data["text"],
+            "denoised": denoise}
+
+
+def _director_cuts(prep: dict, plan: dict):
+    """Compute keep-intervals from the plan's cut stages. Returns (keeps_or_None,
+    out_keeps, n_fillers, n_silences)."""
+    st = plan["stages"]
+    words = prep["words"]
+    dur = prep["info"]["duration"]
+    cuts = []
+    n_fillers = n_silences = 0
+    if st["remove_fillers"]:
+        fcuts, hits = _filler_cuts(words, DEFAULT_FILLERS, 0.04)
+        cuts += fcuts
+        n_fillers = len(hits)
+    if st["remove_silences"]:
+        scuts = _silence_cuts(prep["audio"], DIR_SILENCE["max_silence"],
+                              DIR_SILENCE["keep_silence"], DIR_SILENCE["silence_db"])
+        cuts += scuts
+        n_silences = len(scuts)
+    has_cuts = bool(cuts)
+    keeps = _keep_intervals(cuts, dur) if has_cuts else None
+    if has_cuts and not keeps:
+        raise RuntimeError("everything would be cut — loosen the settings")
+    out_keeps = keeps if has_cuts else [(0.0, dur)]
+    return keeps, out_keeps, n_fillers, n_silences
+
+
+# ---- Staged, content-addressed executor ------------------------------------
+def _director_execute(jid: str, path: str, plan: dict) -> dict:
+    plan = _plan_normalize(plan)
+    st = plan["stages"]
+    meta = plan["meta"]
+    loudness = meta["loudness"]
+    prep = _director_prep(jid, path, st["denoise"])
+    info = prep["info"]
+    dur = info["duration"]
+    aud = prep["audio"]
+    keeps, out_keeps, n_fillers, n_silences = _director_cuts(prep, plan)
+    has_cuts = keeps is not None
+    punch = st["punch_in"]
+
+    # Stage 1: base video (cuts + optional continuous breathing zoom).
+    base_key = _sig(prep["prep_key"], out_keeps, has_cuts, punch, loudness)
+    base_path = _cache_path("base", base_key)
+    if not os.path.exists(base_path):
+        _dir_set(jid, stage="rendering base cut", progress=58)
+        if punch:
+            _render_punchin_video(path, aud, out_keeps, base_path, loudness)
+        elif has_cuts:
+            _render_clean_video(path, aud, keeps, base_path, loudness)
+        else:
+            _remux_video(path, aud, base_path, loudness)
+    cur = base_path
+
+    # Stage 2: light & colour enhance.
+    if st["enhance"] and _ci_enhance_available():
+        enh_key = _sig(base_key, st["enhance_face"], round(st["enhance_level"], 3))
+        enh_path = _cache_path("enh", enh_key)
+        if not os.path.exists(enh_path):
+            _dir_set(jid, stage="enhancing light & colour", progress=70)
+            opts = {"enhance_level": st["enhance_level"],
+                    "enhance_face": st["enhance_face"]}
+            _stage_mutate(cur, enh_path,
+                          lambda w: _apply_enhance(w, enh_path + ".t", opts))
+        cur = enh_path
+
+    # Stage 3: aspect reframe.
+    if ASPECTS.get(meta["aspect"]):
+        asp_key = _sig(_file_sig(cur), meta["aspect"], meta["aspect_fit"])
+        asp_path = _cache_path("asp", asp_key)
+        if not os.path.exists(asp_path):
+            _dir_set(jid, stage="reframing aspect ratio", progress=80)
+            opts = {"aspect": meta["aspect"], "aspect_fit": meta["aspect_fit"]}
+            _stage_mutate(cur, asp_path,
+                          lambda w: _apply_aspect(w, asp_path + ".t", opts))
+        cur = asp_path
+
+    # Stage 4: caption / hook-card overlays.
+    captioned = False
+    cap_err = None
+    if st["captions"] or st["cards"]:
+        lines = _segment_lines(prep["words"])
+        gen = plan["gen"]
+        ovl_key = _sig(_file_sig(cur), st["captions"], st["cards"],
+                       gen["captions"], gen["cards"], out_keeps)
+        ovl_path = _cache_path("ovl", ovl_key)
+        if os.path.exists(ovl_path):
+            cur = ovl_path
+            captioned = True
+        else:
+            items = _build_overlays(lines, gen, out_keeps,
+                                    include_captions=st["captions"],
+                                    include_cards=st["cards"])
+            if items:
+                _dir_set(jid, stage="compositing captions", progress=90)
+                try:
+                    _stage_mutate(cur, ovl_path,
+                                  lambda w: _composite_captions(w, items, ovl_path + ".t"))
+                    cur = ovl_path
+                    captioned = True
+                except Exception as ce:
+                    cap_err = f"{type(ce).__name__}: {ce}"
+
+    # Deliver: served copy + a copy next to the original.
+    _dir_set(jid, stage="finalizing", progress=96)
+    eid = "director_" + uuid.uuid4().hex[:12]
+    final = os.path.join(OUT_DIR, eid + ".mp4")
+    shutil.copy2(cur, final)
+    # Clean stray per-stage scratch (caption PNG dirs, copy-in sources).
+    try:
+        for n in os.listdir(DIR_CACHE):
+            if n.endswith(("_caps", ".src.mp4")) or ".t." in n or n.endswith(".t"):
+                fp = os.path.join(DIR_CACHE, n)
+                shutil.rmtree(fp, ignore_errors=True) if os.path.isdir(fp) else _safe_rm(fp)
+    except Exception:
+        pass
+    new_dur = _audio_seconds(final)
+    saved_to, save_error = None, None
+    try:
+        src_dir = os.path.dirname(path)
+        stem = os.path.splitext(os.path.basename(path))[0]
+        cand = os.path.join(src_dir, f"{stem} viral.mp4")
+        i = 2
+        while os.path.exists(cand):
+            cand = os.path.join(src_dir, f"{stem} viral ({i}).mp4")
+            i += 1
+        shutil.copy2(final, cand)
+        saved_to = cand
+    except Exception as e:
+        save_error = f"{type(e).__name__}: {e}"
+    return {
+        "filename": os.path.basename(final),
+        "url": f"/files/{os.path.basename(final)}",
+        "kind": "video",
+        "source": os.path.basename(path),
+        "saved_to": saved_to,
+        "save_error": save_error,
+        "orig_seconds": round(dur, 2),
+        "new_seconds": round(new_dur, 2),
+        "saved_seconds": round(max(0.0, dur - new_dur), 2),
+        "denoised": prep["denoised"],
+        "enhanced": bool(st["enhance"] and _ci_enhance_available()),
+        "punch_in": punch,
+        "captioned": captioned,
+        "caption_error": cap_err,
+        "aspect": meta["aspect"] if ASPECTS.get(meta["aspect"]) else None,
+        "fillers_removed": n_fillers,
+        "silences_removed": n_silences,
+        "plan": _plan_public(plan, _segment_lines(prep["words"])),
+    }
+
+
+# ---- LLM: propose & revise the edit plan -----------------------------------
+def _director_decisions(text: str, dur: float, meta_hint: dict,
+                        feedback: str = "", cur: dict | None = None) -> dict:
+    """Ask the oMLX LLM for high-level edit DECISIONS (stages, style, aspect,
+    length, rationale, hook-card ideas). Cheap single call; captions handled
+    separately by _gen_captions."""
+    sys_msg = (
+        "You are an award-winning short-form video editor and creative director "
+        "for viral YouTube/TikTok/Reels content. Decide how to edit a talking "
+        "video for maximum retention and a professional, high-quality feel. "
+        "Output ONLY one valid JSON object, no prose, no markdown.")
+    schema = (
+        '{"stages":{"denoise":bool,"remove_fillers":bool,"remove_silences":bool,'
+        '"punch_in":bool,"enhance":bool,"enhance_face":bool,"captions":bool,'
+        '"cards":bool},"meta":{"aspect":"9:16|16:9|1:1|4:5|original",'
+        '"aspect_fit":"fill|pad_blur|pad_black","length":'
+        '"auto|original|15_30|30_45|45_60|60_90|90_120","loudness":'
+        '"youtube|podcast|broadcast|off","style":"short label","platform":'
+        '"youtube|tiktok|reels"},"cards":[{"i":<line index int>,"title":"2-5 '
+        'words","subtitle":"short tease"}],"notes":"2-4 sentence rationale of '
+        'your creative choices"}')
+    ask = (f"Source video is {dur:.0f}s of talking-to-camera. Target platform "
+           f"hint: {meta_hint.get('platform','youtube')}. Decide the edit. "
+           f"Favour punchy retention pacing, remove fillers/dead-air, add a "
+           f"gentle continuous push-in, smart captions and a few hook cards. "
+           f"Pick 3-6 hook cards at the strongest transcript moments.\n")
+    if feedback:
+        ask += ("The creator gave this feedback on your current plan — honour "
+                f"it precisely: \"{feedback}\"\n")
+    if cur:
+        ask += ("Current plan to revise (keep what works, change per feedback): "
+                + json.dumps({"stages": cur.get("stages"),
+                              "meta": cur.get("meta")}) + "\n")
+    ask += ("Transcript:\n" + text[:6000] + "\n\nReturn JSON exactly: " + schema)
+    return _llm_json([{"role": "system", "content": sys_msg},
+                      {"role": "user", "content": ask}], temp=0.6)
+
+
+def _merge_decisions(plan: dict, dec: dict) -> dict:
+    p = _plan_normalize(plan)
+    dec = dec if isinstance(dec, dict) else {}
+    if isinstance(dec.get("meta"), dict):
+        p["meta"].update({k: v for k, v in dec["meta"].items() if v is not None})
+    if isinstance(dec.get("stages"), dict):
+        for k, v in dec["stages"].items():
+            if k in p["stages"] and isinstance(v, bool):
+                p["stages"][k] = v
+    if isinstance(dec.get("cards"), list) and dec["cards"]:
+        p["gen"]["cards"] = dec["cards"]
+    if dec.get("notes"):
+        p["notes"] = str(dec["notes"])
+    return _plan_normalize(p)
+
+
+def _run_director_plan(jid: str, opts: dict) -> None:
+    try:
+        path = opts["path"]
+        sess = opts.get("session", jid)
+        _dir_set(jid, status="running", stage="probing", progress=5)
+        prep = _director_prep(jid, path, denoise_on=True)
+        lines = _segment_lines(prep["words"])
+        _dir_set(jid, stage="directing the edit", progress=55)
+        plan = _plan_defaults()
+        plan["meta"]["platform"] = opts.get("platform", "youtube")
+        try:
+            dec = _director_decisions(prep["text"], prep["info"]["duration"],
+                                      plan["meta"])
+            plan = _merge_decisions(plan, dec)
+        except Exception as e:
+            plan["notes"] = f"(auto defaults — director call failed: {e})"
+        # Honour an explicit user length/aspect choice from the launch form.
+        if opts.get("length"):
+            plan["meta"]["length"] = opts["length"]
+        if opts.get("aspect"):
+            plan["meta"]["aspect"] = opts["aspect"]
+        if plan["stages"]["captions"] or plan["stages"]["cards"]:
+            _dir_set(jid, stage="writing smart captions", progress=72)
+            try:
+                gen = _gen_captions(lines,
+                                    want_captions=plan["stages"]["captions"],
+                                    want_cards=plan["stages"]["cards"],
+                                    topic=opts.get("topic", ""),
+                                    length_target=plan["meta"]["length"])
+                plan["gen"]["captions"] = {int(k): v for k, v in
+                                           gen.get("captions", {}).items()}
+                if gen.get("cards"):
+                    plan["gen"]["cards"] = gen["cards"]
+            except Exception as e:
+                _dir_set(jid, stage=f"captions skipped: {e}")
+        plan = _plan_normalize(plan)
+        with _dir_lock:
+            _dir_plans[sess] = {"plan": plan, "path": path,
+                                "file_sig": prep["file_sig"], "history": []}
+        pub = _plan_public(plan, lines)
+        pub["duration"] = round(prep["info"]["duration"], 2)
+        pub["transcript"] = prep["text"][:8000]
+        _dir_set(jid, stage="done", progress=100, status="done",
+                 result={"kind": "plan", "plan": pub, "session": sess})
+    except Exception as e:
+        _dir_set(jid, status="error", stage="error",
+                 error=f"{type(e).__name__}: {e}")
+
+
+def _run_director_revise(jid: str, opts: dict) -> None:
+    try:
+        sess = opts["session"]
+        with _dir_lock:
+            entry = _dir_plans.get(sess)
+        if not entry:
+            raise RuntimeError("no active plan for this session — run Plan first")
+        path = entry["path"]
+        _dir_set(jid, status="running", stage="applying your edits", progress=20)
+        # Start from the user's edited plan (their explicit dropdown/text edits win).
+        base_plan = _plan_from_public(opts.get("plan") or {})
+        feedback = (opts.get("feedback") or "").strip()
+        regen_caps = bool(opts.get("regen_captions"))
+        if feedback:
+            _dir_set(jid, stage="consulting the director", progress=45)
+            prep = _director_prep(jid, path, base_plan["stages"]["denoise"])
+            try:
+                dec = _director_decisions(prep["text"], prep["info"]["duration"],
+                                          base_plan["meta"], feedback=feedback,
+                                          cur=base_plan)
+                base_plan = _merge_decisions(base_plan, dec)
+            except Exception as e:
+                base_plan["notes"] = (base_plan.get("notes", "") +
+                                      f"\n(director revise failed: {e})")
+            lines = _segment_lines(prep["words"])
+            if regen_caps and (base_plan["stages"]["captions"]
+                               or base_plan["stages"]["cards"]):
+                _dir_set(jid, stage="rewriting captions", progress=70)
+                try:
+                    gen = _gen_captions(
+                        lines, want_captions=base_plan["stages"]["captions"],
+                        want_cards=base_plan["stages"]["cards"],
+                        topic=feedback, length_target=base_plan["meta"]["length"])
+                    base_plan["gen"]["captions"] = {int(k): v for k, v in
+                                                    gen.get("captions", {}).items()}
+                    if gen.get("cards"):
+                        base_plan["gen"]["cards"] = gen["cards"]
+                except Exception:
+                    pass
+        else:
+            with _dir_lock:
+                lines = None
+            try:
+                prep = _director_prep(jid, path, base_plan["stages"]["denoise"])
+                lines = _segment_lines(prep["words"])
+            except Exception:
+                lines = None
+        base_plan = _plan_normalize(base_plan)
+        with _dir_lock:
+            entry["history"].append(entry["plan"])
+            entry["plan"] = base_plan
+        pub = _plan_public(base_plan, lines)
+        _dir_set(jid, stage="done", progress=100, status="done",
+                 result={"kind": "plan", "plan": pub, "session": sess})
+    except Exception as e:
+        _dir_set(jid, status="error", stage="error",
+                 error=f"{type(e).__name__}: {e}")
+
+
+def _run_director_render(jid: str, opts: dict) -> None:
+    try:
+        sess = opts["session"]
+        with _dir_lock:
+            entry = _dir_plans.get(sess)
+        if not entry:
+            raise RuntimeError("no active plan for this session — run Plan first")
+        path = entry["path"]
+        plan = _plan_from_public(opts.get("plan") or {})
+        with _dir_lock:
+            entry["plan"] = plan
+        _dir_set(jid, status="running", stage="starting render", progress=8)
+        report = _director_execute(jid, path, plan)
+        _dir_set(jid, stage="done", progress=100, status="done",
+                 result={"kind": "render", **report})
+    except Exception as e:
+        _dir_set(jid, status="error", stage="error",
+                 error=f"{type(e).__name__}: {e}")
+
+
 def _run_cleanup(jid: str, opts: dict) -> None:
     tmps = []
     try:
@@ -1767,6 +2314,10 @@ class Handler(BaseHTTPRequestHandler):
                 "denoise_available": _denoise_available(),
                 "enhance_available": _ci_enhance_available(),
                 "captions_available": _captions_available(),
+                "director_available": _captions_available(),
+                "director_styles": DIR_STYLES,
+                "viral_lengths": list(VIRAL_LENGTH_TARGETS.keys()),
+                "aspects": list(ASPECTS.keys()),
                 "memory_available": _memory_available(),
                 "memory_url": MEMORY_URL,
                 "transcript_collection": TRANSCRIPT_COLLECTION,
@@ -1780,6 +2331,16 @@ class Handler(BaseHTTPRequestHandler):
             qs = parse_qs(urlparse(self.path).query)
             jid = (qs.get("id") or [""])[0]
             job = _clean_get(jid)
+            if not job:
+                self._json(404, {"error": "job not found"})
+                return
+            self._json(200, job)
+            return
+        if path == "/director/status":
+            from urllib.parse import parse_qs
+            qs = parse_qs(urlparse(self.path).query)
+            jid = (qs.get("id") or [""])[0]
+            job = _dir_get(jid)
             if not job:
                 self._json(404, {"error": "job not found"})
                 return
@@ -1850,7 +2411,46 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(200, {"ok": _ref_delete(data.get("id", ""))})
         if path == "/cleanup":
             return self._cleanup(data)
+        if path in ("/director/plan", "/director/revise", "/director/render"):
+            return self._director(path, data)
         self._json(404, {"error": "not found"})
+
+    # ---- LLM edit director orchestration ----
+    def _director(self, path: str, data: dict):
+        if not _worker_started.is_set():
+            return self._json(503, {"error": "starting up, try again shortly"})
+        jid = "dir_" + uuid.uuid4().hex[:12]
+        if path == "/director/plan":
+            mpath = _resolve_media_path(data.get("path", ""))
+            if not mpath or not os.path.isfile(mpath):
+                return self._json(400, {"error": f"file not found: {mpath or '(empty)'}"})
+            opts = {
+                "path": mpath,
+                "session": data.get("session") or ("sess_" + uuid.uuid4().hex[:8]),
+                "platform": data.get("platform", "youtube"),
+                "topic": (data.get("topic") or "")[:400],
+                "length": (data.get("length")
+                           if data.get("length") in VIRAL_LENGTH_TARGETS else None),
+                "aspect": (data.get("aspect") if data.get("aspect") in ASPECTS else None),
+            }
+            target = _run_director_plan
+        elif path == "/director/revise":
+            if not data.get("session"):
+                return self._json(400, {"error": "session required"})
+            opts = {"session": data["session"], "plan": data.get("plan") or {},
+                    "feedback": (data.get("feedback") or "")[:2000],
+                    "regen_captions": bool(data.get("regen_captions"))}
+            target = _run_director_revise
+        else:  # /director/render
+            if not data.get("session"):
+                return self._json(400, {"error": "session required"})
+            opts = {"session": data["session"], "plan": data.get("plan") or {}}
+            target = _run_director_render
+        _dir_set(jid, status="running", stage="queued", progress=0,
+                 result=None, error=None)
+        threading.Thread(target=target, args=(jid, opts), daemon=True).start()
+        return self._json(200, {"ok": True, "job_id": jid,
+                                "session": opts.get("session")})
 
     # ---- media cleanup orchestration ----
     def _cleanup(self, data: dict):
@@ -2504,6 +3104,78 @@ STUDIO_HTML = r"""<!DOCTYPE html>
   </div>
 
   <div class="card">
+    <details id="dirPanel" open>
+      <summary>🎬 Edit Director &mdash; let the AI direct a viral edit (collaborative)</summary>
+      <div style="margin-top:12px">
+        <div class="hint">The local LLM watches your video, proposes a full edit plan (cuts, framing, motion, captions, hook cards), and you refine it together &mdash; tweak the dropdowns or just tell it what to change &mdash; then hit <b>Make it happen</b>. Re-renders are incremental: only the parts you change are re-done.</div>
+        <div class="row" style="margin-top:10px">
+          <div class="field" style="flex:1">
+            <label>Video path</label>
+            <input id="dPath" type="text" placeholder="/Users/you/Movies/clip.mp4" style="width:100%">
+            <div class="hint">Finder &rarr; right-click &rarr; hold &#8997; Option &rarr; &ldquo;Copy as Pathname&rdquo;.</div>
+          </div>
+        </div>
+        <div class="row" style="margin-top:6px">
+          <div class="field"><label>Platform</label>
+            <select id="dPlatform">
+              <option value="youtube">YouTube</option>
+              <option value="tiktok">TikTok</option>
+              <option value="reels">Instagram Reels</option>
+            </select></div>
+          <div class="field"><label>Length</label><select id="dLength"></select></div>
+          <div class="field"><label>Aspect</label><select id="dAspect"></select></div>
+          <div class="field" style="flex:1"><label>Topic / voice hint (optional)</label>
+            <input id="dTopic" type="text" placeholder="e.g. founder talking about AI startups" style="width:100%"></div>
+        </div>
+        <div class="row" style="margin-top:10px">
+          <div class="spacer"></div>
+          <button class="primary" id="dPlanBtn">Direct the edit &rarr;</button>
+        </div>
+        <div class="status" id="dStatus" style="margin-top:10px"></div>
+        <div id="dPlanWrap" style="margin-top:12px;display:none">
+          <div class="card" style="margin:0;background:#161a22">
+            <div style="font-weight:600;margin-bottom:8px">The director's plan <span class="hint" id="dDur"></span></div>
+            <div id="dNotesBox" class="hint" style="white-space:pre-wrap;border-left:3px solid #f5c518;padding-left:8px;margin-bottom:10px"></div>
+            <div class="row">
+              <div class="field"><label>Aspect</label><select id="pAspect"></select></div>
+              <div class="field"><label>Reframe</label><select id="pFit">
+                <option value="fill">Fill (crop)</option><option value="pad_blur">Fit (blur bg)</option><option value="pad_black">Fit (black bars)</option></select></div>
+              <div class="field"><label>Length</label><select id="pLength"></select></div>
+              <div class="field"><label>Loudness</label><select id="pLoud">
+                <option value="youtube">YouTube (-14)</option><option value="podcast">Podcast (-16)</option><option value="broadcast">Broadcast (-23)</option><option value="off">Off</option></select></div>
+              <div class="field"><label>Style</label><select id="pStyle"></select></div>
+            </div>
+            <div class="row" style="margin-top:8px;flex-wrap:wrap">
+              <label class="toggle"><input type="checkbox" id="sDenoise"> Denoise</label>
+              <label class="toggle"><input type="checkbox" id="sFillers"> Cut fillers</label>
+              <label class="toggle"><input type="checkbox" id="sSilence"> Trim silences</label>
+              <label class="toggle"><input type="checkbox" id="sPunch"> Push-in motion</label>
+              <label class="toggle"><input type="checkbox" id="sEnhance"> Enhance colour</label>
+              <label class="toggle"><input type="checkbox" id="sFace"> Face-aware</label>
+              <label class="toggle"><input type="checkbox" id="sCaptions"> Smart captions</label>
+              <label class="toggle"><input type="checkbox" id="sCards"> Hook cards</label>
+            </div>
+            <details id="dCapDetails" style="margin-top:10px"><summary>Captions (<span id="dCapCount">0</span>) &mdash; edit any line</summary>
+              <div id="dCaptions" style="margin-top:8px;max-height:260px;overflow:auto"></div></details>
+            <details id="dCardDetails" style="margin-top:8px"><summary>Hook cards (<span id="dCardCount">0</span>)</summary>
+              <div id="dCards" style="margin-top:8px"></div>
+              <button class="ghost" type="button" id="dAddCard" style="margin-top:6px">+ Add card</button></details>
+            <div class="field" style="margin-top:12px"><label>Tell the director what to change (freeform)</label>
+              <textarea id="dFeedback" rows="2" placeholder="e.g. punchier hook, keep it under 30s, warmer colours, drop the cards" style="width:100%"></textarea></div>
+            <div class="row" style="margin-top:8px">
+              <label class="toggle"><input type="checkbox" id="dRegenCaps"> Rewrite captions too</label>
+              <div class="spacer"></div>
+              <button class="ghost" id="dReviseBtn">Revise with AI &#8635;</button>
+              <button class="primary" id="dRenderBtn">Make it happen &#9889;</button>
+            </div>
+          </div>
+        </div>
+        <div id="dResult" style="margin-top:12px"></div>
+      </div>
+    </details>
+  </div>
+
+  <div class="card">
     <details id="histPanel">
       <summary>History</summary>
       <div id="history" style="margin-top:10px"></div>
@@ -2546,6 +3218,17 @@ async function loadEngines(){
   CAPTIONS_AVAILABLE=!!d.captions_available;
   $('clCaptionsWrap').style.display='';
   $('clCardsWrap').style.display='';
+  // ---- Edit Director dropdowns ----
+  const LEN_LABELS={auto:'Auto (from source)',original:'Original length','15_30':'15-30s (aggressive)','30_45':'30-45s (tight)','45_60':'45-60s (balanced)','60_90':'60-90s (story)','90_120':'90-120s (deeper)'};
+  const ASP_LABELS={'9:16':'9:16 — Reels/Shorts','16:9':'16:9 — YouTube','1:1':'1:1 — square','4:5':'4:5 — IG portrait','original':'Original'};
+  const lens=(d.viral_lengths||['auto']), asps=(d.aspects||['9:16']);
+  const lenOpts=lens.map(v=>`<option value="${v}">${LEN_LABELS[v]||v}</option>`).join('');
+  const aspOpts=asps.map(v=>`<option value="${v}">${ASP_LABELS[v]||v}</option>`).join('');
+  const styOpts=(d.director_styles||['high-energy']).map(v=>`<option value="${v}">${v}</option>`).join('');
+  $('dLength').innerHTML=lenOpts; $('pLength').innerHTML=lenOpts;
+  $('dAspect').innerHTML=aspOpts; $('pAspect').innerHTML=aspOpts;
+  $('pStyle').innerHTML=styOpts;
+  $('dAspect').value='9:16';
   MEMORY_AVAILABLE=!!d.memory_available;
   MEMORY_URL=d.memory_url||'';
   TRANSCRIPT_COLLECTION=d.transcript_collection||'video_transcripts';
@@ -2908,6 +3591,131 @@ function renderCleanResult(res){
   $('clResult').innerHTML=`<div class="card" style="margin:0">${media}<div style="margin-top:8px">${chips}</div>
     <div class="row" style="margin-top:8px"><a class="mini" href="${res.url}" download="${esc(dlName)}">Download cleaned ${isVid?'video':'audio'}</a></div>${saved}${hits}${tx}</div>`;
 }
+
+// ================= Edit Director =================
+let DSESS=null, DPLAN=null, DBUSY=false;
+function dMsg(t,err){ const s=$('dStatus'); s.className='status'+(err?' err':''); s.textContent=t||''; }
+function dBusy(b){ DBUSY=b; ['dPlanBtn','dReviseBtn','dRenderBtn'].forEach(id=>{const e=$(id); if(e)e.disabled=b;}); }
+async function dPoll(jobId){
+  while(true){
+    await new Promise(r=>setTimeout(r,1500));
+    let j; try{ j=await (await fetch('/director/status?id='+encodeURIComponent(jobId))).json(); }catch(e){ continue; }
+    if(j.stage) dMsg((j.stage||'')+(j.progress?(' — '+j.progress+'%'):''));
+    if(j.status==='done') return j.result;
+    if(j.status==='error') throw new Error(j.error||'failed');
+  }
+}
+async function dPlanRun(){
+  const path=$('dPath').value.trim();
+  if(!path){ dMsg('Paste a video path first.',true); return; }
+  dBusy(true); $('dResult').innerHTML=''; dMsg('Sending to the director…');
+  try{
+    const body={path,platform:$('dPlatform').value,length:$('dLength').value,aspect:$('dAspect').value,topic:$('dTopic').value.trim()};
+    const r=await fetch('/director/plan',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+    const d=await r.json(); if(!r.ok||d.error) throw new Error(d.error||('HTTP '+r.status));
+    DSESS=d.session;
+    const res=await dPoll(d.job_id);
+    dShowPlan(res.plan); dMsg('Plan ready — tweak it or tell the director what to change.');
+  }catch(e){ dMsg('Error: '+e.message,true); }
+  dBusy(false);
+}
+function dShowPlan(plan){
+  DPLAN=plan; const m=plan.meta||{}, s=plan.stages||{};
+  $('dPlanWrap').style.display='';
+  if(plan.duration) $('dDur').textContent='— source '+fmtDur(plan.duration);
+  $('dNotesBox').textContent=plan.notes||'';
+  $('pAspect').value=m.aspect||'9:16'; $('pFit').value=m.aspect_fit||'fill';
+  $('pLength').value=m.length||'auto'; $('pLoud').value=m.loudness||'youtube';
+  if([...$('pStyle').options].some(o=>o.value===m.style)) $('pStyle').value=m.style;
+  else { const o=document.createElement('option'); o.value=m.style; o.textContent=m.style; $('pStyle').appendChild(o); $('pStyle').value=m.style; }
+  $('sDenoise').checked=!!s.denoise; $('sFillers').checked=!!s.remove_fillers;
+  $('sSilence').checked=!!s.remove_silences; $('sPunch').checked=!!s.punch_in;
+  $('sEnhance').checked=!!s.enhance; $('sFace').checked=!!s.enhance_face;
+  $('sCaptions').checked=!!s.captions; $('sCards').checked=!!s.cards;
+  dRenderCaps(plan.captions||[]); dRenderCards(plan.cards||[]);
+}
+function dRenderCaps(caps){
+  $('dCapCount').textContent=caps.length;
+  $('dCaptions').innerHTML=caps.map(c=>`<div class="dcap" data-i="${c.i}" style="margin-bottom:8px">
+    <div class="hint" title="original line">${clEsc(c.orig||'')}</div>
+    <div style="display:flex;gap:6px;margin-top:2px">
+      <input class="dcap-text" value="${clEsc(c.text||'')}" style="flex:1">
+      <input class="dcap-emph" value="${clEsc(c.emphasis||'')}" placeholder="emphasis" style="width:130px">
+    </div></div>`).join('')||'<div class="hint">No captions.</div>';
+}
+function dRenderCards(cards){
+  $('dCardCount').textContent=cards.length;
+  $('dCards').innerHTML=cards.map(c=>`<div class="dcard" data-i="${c.i}" style="display:flex;gap:6px;margin-bottom:6px;align-items:center">
+    <input class="dcard-i" type="number" value="${c.i}" style="width:64px" title="line index">
+    <input class="dcard-title" value="${clEsc(c.title||'')}" placeholder="title" style="flex:1">
+    <input class="dcard-sub" value="${clEsc(c.subtitle||'')}" placeholder="subtitle" style="flex:2">
+    <button class="mini dcard-del" type="button">&times;</button></div>`).join('');
+  document.querySelectorAll('.dcard-del').forEach(b=>b.onclick=()=>{ b.closest('.dcard').remove(); $('dCardCount').textContent=document.querySelectorAll('.dcard').length; });
+}
+function dCollect(){
+  const caps=[...document.querySelectorAll('.dcap')].map(d=>({i:parseInt(d.dataset.i,10),
+    text:d.querySelector('.dcap-text').value, emphasis:d.querySelector('.dcap-emph').value}));
+  const cards=[...document.querySelectorAll('.dcard')].map(d=>({i:parseInt(d.querySelector('.dcard-i').value,10)||0,
+    title:d.querySelector('.dcard-title').value, subtitle:d.querySelector('.dcard-sub').value}));
+  return {version:1,
+    meta:{platform:$('dPlatform').value,aspect:$('pAspect').value,aspect_fit:$('pFit').value,
+      length:$('pLength').value,loudness:$('pLoud').value,style:$('pStyle').value},
+    stages:{denoise:$('sDenoise').checked,remove_fillers:$('sFillers').checked,remove_silences:$('sSilence').checked,
+      punch_in:$('sPunch').checked,enhance:$('sEnhance').checked,enhance_face:$('sFace').checked,
+      enhance_level:(DPLAN&&DPLAN.stages?DPLAN.stages.enhance_level:1.0),
+      captions:$('sCaptions').checked,cards:$('sCards').checked},
+    notes:$('dNotesBox').textContent, captions:caps, cards:cards};
+}
+async function dRevise(){
+  if(!DSESS){ dMsg('Run the director first.',true); return; }
+  dBusy(true); dMsg('Revising with the director…');
+  try{
+    const body={session:DSESS,plan:dCollect(),feedback:$('dFeedback').value.trim(),regen_captions:$('dRegenCaps').checked};
+    const r=await fetch('/director/revise',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+    const d=await r.json(); if(!r.ok||d.error) throw new Error(d.error||('HTTP '+r.status));
+    const res=await dPoll(d.job_id); dShowPlan(res.plan); $('dFeedback').value='';
+    dMsg('Updated — review the changes, revise again, or make it happen.');
+  }catch(e){ dMsg('Error: '+e.message,true); }
+  dBusy(false);
+}
+async function dRender(){
+  if(!DSESS){ dMsg('Run the director first.',true); return; }
+  dBusy(true); $('dResult').innerHTML=''; dMsg('Rendering…');
+  try{
+    const body={session:DSESS,plan:dCollect()};
+    const r=await fetch('/director/render',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+    const d=await r.json(); if(!r.ok||d.error) throw new Error(d.error||('HTTP '+r.status));
+    const res=await dPoll(d.job_id); dShowResult(res); dMsg('Done.');
+  }catch(e){ dMsg('Error: '+e.message,true); }
+  dBusy(false);
+}
+function dShowResult(res){
+  if(res.plan) dShowPlan(res.plan);
+  let chips=`<span class="tag">${fmtDur(res.orig_seconds)} &rarr; ${fmtDur(res.new_seconds)}</span>`;
+  if(res.saved_seconds>0) chips+=` <span class="tag">saved ${fmtDur(res.saved_seconds)}</span>`;
+  if(res.denoised) chips+=' <span class="tag">denoised</span>';
+  if(res.enhanced) chips+=' <span class="tag">enhanced</span>';
+  if(res.punch_in) chips+=' <span class="tag">push-in</span>';
+  if(res.captioned) chips+=' <span class="tag">captions</span>';
+  if(res.aspect) chips+=` <span class="tag">${clEsc(res.aspect)}</span>`;
+  if(res.fillers_removed) chips+=` <span class="tag">${res.fillers_removed} fillers</span>`;
+  if(res.silences_removed) chips+=` <span class="tag">${res.silences_removed} silences</span>`;
+  if(res.caption_error) chips+=' <span class="tag" style="opacity:.7">captions skipped</span>';
+  let saved=''; if(res.saved_to) saved=`<div class="hint" style="margin-top:8px">Saved next to original: <code>${clEsc(res.saved_to)}</code></div>`;
+  $('dResult').innerHTML=`<div class="card" style="margin:0">
+    <video src="${res.url}" controls style="width:100%;max-height:380px;border-radius:8px;background:#000"></video>
+    <div style="margin-top:8px">${chips}</div>
+    <div class="row" style="margin-top:8px"><a class="mini" href="${res.url}" download>Download</a></div>
+    ${saved}<div class="hint" style="margin-top:6px">Tweak options above and hit <b>Make it happen</b> again — unchanged stages are reused, so it's fast.</div></div>`;
+}
+$('dPlanBtn').onclick=dPlanRun;
+$('dReviseBtn').onclick=dRevise;
+$('dRenderBtn').onclick=dRender;
+$('dAddCard').onclick=()=>{ const wrap=$('dCards'); const div=document.createElement('div');
+  div.className='dcard'; div.dataset.i=0; div.style.cssText='display:flex;gap:6px;margin-bottom:6px;align-items:center';
+  div.innerHTML=`<input class="dcard-i" type="number" value="0" style="width:64px"><input class="dcard-title" placeholder="title" style="flex:1"><input class="dcard-sub" placeholder="subtitle" style="flex:2"><button class="mini dcard-del" type="button">&times;</button>`;
+  wrap.appendChild(div); div.querySelector('.dcard-del').onclick=()=>{ div.remove(); $('dCardCount').textContent=document.querySelectorAll('.dcard').length; };
+  $('dCardCount').textContent=document.querySelectorAll('.dcard').length; };
 
 syncLabels(); applyStyle('natural'); loadEngines(); loadHistory(); poll(); setInterval(poll,2500);
 $('clEnhance').onchange();
