@@ -1678,6 +1678,48 @@ def _director_prep(jid: str, path: str, denoise_on: bool) -> dict:
             "denoised": denoise}
 
 
+def _store_prep(sess: str | None, path: str, denoise: bool, prep: dict) -> None:
+    """Persist the FULL first-pass payload on the session so any later edit
+    (revise, render, re-render) reuses it without re-opening the video:
+      • probe/info (duration, w/h, fps, has_video/has_audio)
+      • the cleaned 48k audio path + cache keys
+      • the word-level transcription WITH timings (prep['words'])
+      • the segmented caption lines (with per-line start/end)
+      • the plain transcript text."""
+    if not sess:
+        return
+    lines = _segment_lines(prep["words"])
+    with _dir_lock:
+        entry = _dir_plans.get(sess) or {}
+        entry["prep"] = {"denoise": bool(denoise), "path": path, "data": prep}
+        entry.update({
+            "info": prep["info"],
+            "file_sig": prep["file_sig"],
+            "prep_key": prep["prep_key"],
+            "audio": prep["audio"],
+            "duration": prep["info"]["duration"],
+            "words": prep["words"],
+            "lines": lines,
+            "text": prep["text"],
+            "denoised": prep["denoised"],
+        })
+        _dir_plans[sess] = entry
+
+
+def _session_prep(jid: str, sess: str | None, path: str, denoise: bool) -> dict:
+    """Return the prep payload for (path, denoise), reusing the session-cached
+    one when present. Only re-runs _director_prep (itself disk-cached) when the
+    source or the denoise choice actually changes."""
+    if sess:
+        with _dir_lock:
+            c = (_dir_plans.get(sess) or {}).get("prep")
+        if c and c.get("path") == path and c.get("denoise") == bool(denoise):
+            return c["data"]
+    prep = _director_prep(jid, path, denoise)
+    _store_prep(sess, path, denoise, prep)
+    return prep
+
+
 def _director_foundation(jid: str, path: str, prep: dict, st: dict) -> dict:
     """Build STAGE 1: the cached 'foundation' the whole edit is built on —
     denoised audio (already in prep) + a light/colour-enhanced full-length
@@ -1822,12 +1864,12 @@ def _director_cuts(prep: dict, plan: dict):
 
 
 # ---- Staged, content-addressed executor ------------------------------------
-def _director_execute(jid: str, path: str, plan: dict) -> dict:
+def _director_execute(jid: str, path: str, plan: dict, sess: str | None = None) -> dict:
     plan = _plan_normalize(plan)
     st = plan["stages"]
     meta = plan["meta"]
     loudness = meta["loudness"]
-    prep = _director_prep(jid, path, st["denoise"])
+    prep = _session_prep(jid, sess, path, st["denoise"])
     info = prep["info"]
     dur = info["duration"]
     aud = prep["audio"]
@@ -2007,7 +2049,7 @@ def _run_director_prep(jid: str, opts: dict) -> None:
         sess = opts.get("session", jid)
         _dir_set(jid, status="running", stage="probing", progress=5)
         denoise = bool(opts.get("denoise", True))
-        prep = _director_prep(jid, path, denoise_on=denoise)
+        prep = _session_prep(jid, sess, path, denoise)
         found_st = {
             "denoise": denoise,
             "enhance": bool(opts.get("enhance", True)),
@@ -2030,7 +2072,9 @@ def _run_director_prep(jid: str, opts: dict) -> None:
             entry.update({"plan": plan, "path": path,
                           "file_sig": prep["file_sig"],
                           "history": entry.get("history", []),
-                          "prepped": True})
+                          "prepped": True,
+                          "words": prep["words"], "text": prep["text"],
+                          "duration": prep["info"]["duration"]})
             _dir_plans[sess] = entry
         result = {"kind": "prep", "session": sess, "url": url,
                   "duration": round(prep["info"]["duration"], 2),
@@ -2055,7 +2099,7 @@ def _run_director_plan(jid: str, opts: dict) -> None:
             found_st = {k: prev_entry["plan"]["stages"][k] for k in
                         ("denoise", "enhance", "enhance_face", "enhance_level")}
         denoise = found_st["denoise"] if found_st else True
-        prep = _director_prep(jid, path, denoise_on=denoise)
+        prep = _session_prep(jid, sess, path, denoise)
         lines = _segment_lines(prep["words"])
         _dir_set(jid, stage="directing the edit", progress=55)
         plan = _plan_defaults()
@@ -2098,7 +2142,9 @@ def _run_director_plan(jid: str, opts: dict) -> None:
             entry = _dir_plans.get(sess) or {}
             entry.update({"plan": plan, "path": path,
                           "file_sig": prep["file_sig"],
-                          "history": entry.get("history", [])})
+                          "history": entry.get("history", []),
+                          "words": prep["words"], "text": prep["text"],
+                          "duration": prep["info"]["duration"]})
             _dir_plans[sess] = entry
         pub = _plan_public(plan, lines)
         pub["duration"] = round(prep["info"]["duration"], 2)
@@ -2123,12 +2169,22 @@ def _run_director_revise(jid: str, opts: dict) -> None:
         base_plan = _plan_from_public(opts.get("plan") or {})
         feedback = (opts.get("feedback") or "").strip()
         regen_caps = bool(opts.get("regen_captions"))
-        prep = _director_prep(jid, path, base_plan["stages"]["denoise"])
-        lines = _segment_lines(prep["words"])
+        # Revise is a pure LLM + metadata step — reuse the transcript & word
+        # timeline captured during prep/plan; never re-open or re-watch the video.
+        words = entry.get("words")
+        text = entry.get("text")
+        dur = entry.get("duration")
+        lines = entry.get("lines")
+        if words is None or text is None or dur is None:
+            prep = _session_prep(jid, sess, path, base_plan["stages"]["denoise"])
+            words, text, dur = prep["words"], prep["text"], prep["info"]["duration"]
+            lines = _segment_lines(words)
+        if lines is None:
+            lines = _segment_lines(words)
         if feedback:
             _dir_set(jid, stage="consulting the director", progress=45)
             try:
-                dec = _director_decisions(prep["text"], prep["info"]["duration"],
+                dec = _director_decisions(text, dur,
                                           base_plan["meta"], feedback=feedback,
                                           cur=base_plan)
                 base_plan = _merge_decisions(base_plan, dec)
@@ -2152,8 +2208,7 @@ def _run_director_revise(jid: str, opts: dict) -> None:
         base_plan = _plan_normalize(base_plan)
         # Recompute the highlight cut if the length target changed.
         _dir_set(jid, stage="updating length cut", progress=82)
-        _ensure_highlights(base_plan, lines, prep["info"]["duration"],
-                           topic=feedback)
+        _ensure_highlights(base_plan, lines, dur, topic=feedback)
         with _dir_lock:
             entry["history"].append(entry["plan"])
             entry["plan"] = base_plan
@@ -2177,7 +2232,7 @@ def _run_director_render(jid: str, opts: dict) -> None:
         with _dir_lock:
             entry["plan"] = plan
         _dir_set(jid, status="running", stage="starting render", progress=8)
-        report = _director_execute(jid, path, plan)
+        report = _director_execute(jid, path, plan, sess)
         _dir_set(jid, stage="done", progress=100, status="done",
                  result={"kind": "render", **report})
     except Exception as e:
