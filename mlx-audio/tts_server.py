@@ -401,7 +401,11 @@ def _denoise_file(in_path: str, out_path: str, sr_out: int = 48000) -> str:
 # Audio helpers (ffmpeg) - run off the worker thread.
 # --------------------------------------------------------------------------
 def _run(cmd: list) -> None:
-    subprocess.run(cmd, check=True, capture_output=True)
+    p = subprocess.run(cmd, capture_output=True, text=True)
+    if p.returncode != 0:
+        detail = (p.stderr or p.stdout or "").strip()
+        tail = "\n".join(detail.splitlines()[-20:]) if detail else "(no stderr)"
+        raise RuntimeError(f"command failed (exit {p.returncode}):\n{tail}")
 
 
 def _fmt_cmd(cmd) -> str:
@@ -1251,12 +1255,16 @@ def _render_punchin_video(src_video, src48, keeps, out_path, loudness, zoom=1.10
         if abs(s1 - 1.0) < 1e-4 and abs(s0 - 1.0) < 1e-4:
             v += f",scale={W}:{H}:flags=lanczos"
         else:
-            # Smoothstep easing: e=u*u*(3-2*u), u=clamp(t/ramp,0..1)
-            # scale(t)=s0 + (s1-s0)*e
+            # Smoothstep easing without commas in expr syntax (ffmpeg filter
+            # args use commas as separators). We compute u=t/ramp, clamp to
+            # [0,1] via abs-only arithmetic, then e=u*u*(3-2*u).
+            # m=(1+u-abs(1-u))/2 is min(1,u), uc=(m+abs(m))/2 is max(0,m).
+            u = f"(t/{ramp:.3f})"
+            m = f"((1+{u}-abs(1-{u}))/2)"
+            uc = f"(({m}+abs({m}))/2)"
             scale_expr = (
                 f"({s0:.6f}+({s1:.6f}-{s0:.6f})*"
-                f"(min(t/{ramp:.3f},1)*min(t/{ramp:.3f},1)"
-                f"*(3-2*min(t/{ramp:.3f},1))))"
+                f"({uc}*{uc}*(3-2*{uc})))"
             )
             crop_w = f"trunc(iw/{scale_expr}/2)*2"
             crop_h = f"trunc(ih/{scale_expr}/2)*2"
