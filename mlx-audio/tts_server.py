@@ -1246,9 +1246,22 @@ def _build_overlays(lines: list, gen: dict, keeps: list) -> list:
     overlay items: {id,type,text/title/subtitle,emphasis,a,b}."""
     items = []
     caps = gen.get("captions", {})
+
+    def _txt(v):
+        if isinstance(v, str):
+            return v.strip()
+        if isinstance(v, (list, tuple)):
+            return " ".join(_txt(x) for x in v).strip()
+        return ("" if v is None else str(v)).strip()
+
+    def _emph(v):
+        if isinstance(v, str):
+            v = [v]
+        return [_txt(e) for e in (v or []) if _txt(e)]
+
     for i, ln in enumerate(lines):
         c = caps.get(i)
-        text = (c.get("text") if c else "") or ln["t"]
+        text = (_txt(c.get("text")) if c else "") or ln["t"]
         a = _remap_time(ln["start"], keeps)
         b = _remap_time(ln["end"], keeps)
         if a is None:
@@ -1258,10 +1271,13 @@ def _build_overlays(lines: list, gen: dict, keeps: list) -> list:
         if a is None or b is None or b - a < 0.25:
             continue
         items.append({"id": f"cap{i}", "type": "caption", "text": text,
-                      "emphasis": (c.get("emphasis") if c else []) or [],
+                      "emphasis": _emph(c.get("emphasis")) if c else [],
                       "a": round(a, 2), "b": round(b, 2)})
     for j, card in enumerate(gen.get("cards", [])):
-        i = int(card.get("i", 0))
+        try:
+            i = int(card.get("i", 0))
+        except (TypeError, ValueError):
+            continue
         if i >= len(lines):
             continue
         ln = lines[i]
@@ -1270,8 +1286,8 @@ def _build_overlays(lines: list, gen: dict, keeps: list) -> list:
             continue
         b = a + 2.2
         items.append({"id": f"card{j}", "type": "card",
-                      "title": card.get("title", ""),
-                      "subtitle": card.get("subtitle", ""),
+                      "title": _txt(card.get("title", "")),
+                      "subtitle": _txt(card.get("subtitle", "")),
                       "a": round(a, 2), "b": round(b, 2)})
     return items
 

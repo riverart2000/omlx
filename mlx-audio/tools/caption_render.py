@@ -63,16 +63,31 @@ def _draw_outlined_word(draw, x, y, word, font, fill, ow):
     draw.text((x, y), word, font=font, fill=fill)
 
 
+def _as_text(v):
+    """Coerce an LLM-supplied value to a clean string. The model sometimes emits
+    a caption as a list of words/tokens rather than a string."""
+    if v is None:
+        return ""
+    if isinstance(v, str):
+        return v.strip()
+    if isinstance(v, (list, tuple)):
+        return " ".join(_as_text(x) for x in v).strip()
+    return str(v).strip()
+
+
 def render_caption(spec, item, path):
     W, H = spec["width"], spec["height"]
     img = Image.new("RGBA", (W, H), (0, 0, 0, 0))
     d = ImageDraw.Draw(img)
 
-    text = (item.get("text") or "").strip()
+    text = _as_text(item.get("text"))
     if not text:
         img.save(path)
         return
-    emph = {e.strip().lower() for e in (item.get("emphasis") or []) if e.strip()}
+    _emph_raw = item.get("emphasis")
+    if isinstance(_emph_raw, str):
+        _emph_raw = [_emph_raw]
+    emph = {_as_text(e).lower() for e in (_emph_raw or []) if _as_text(e)}
 
     # Caption sits in the lower third (safe area), scales with canvas height.
     size = max(34, int(H * 0.052))
@@ -105,8 +120,8 @@ def render_card(spec, item, path):
     img = Image.new("RGBA", (W, H), (0, 0, 0, 0))
     d = ImageDraw.Draw(img)
 
-    title = (item.get("title") or "").strip()
-    subtitle = (item.get("subtitle") or "").strip()
+    title = _as_text(item.get("title"))
+    subtitle = _as_text(item.get("subtitle"))
     if not title:
         img.save(path)
         return
