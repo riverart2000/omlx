@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.joebains.omlx-video</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/joebains/omlx-video/.venv/bin/python</string>
+        <string>/Users/joebains/omlx-video/video_server.py</string>
+    </array>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>VIDEO_PORT</key>
+        <string>8500</string>
+        <key>WAN_MODEL_DIR</key>
+        <string>/Users/joebains/.omlx/models/Anes1032/Wan2.2-TI2V-5B-mlx-q8</string>
+    </dict>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>StandardOutPath</key>
+    <string>/Users/joebains/omlx-video/service.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/joebains/omlx-video/service.err</string>
+</dict>
+</plist>

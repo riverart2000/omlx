@@ -19,3 +19,8 @@
 /Users/joebains/omlx-image/image.sh|omlx-image/image.sh
 /Users/joebains/omlx-image/requirements.txt|omlx-image/requirements.txt
 /Users/joebains/Library/LaunchAgents/com.joebains.omlx-image.plist|launchagents/com.joebains.omlx-image.plist
+# oMLX Video Studio (Wan2.2-TI2V-5B microservice, port 8500)
+/Users/joebains/omlx-video/video_server.py|omlx-video/video_server.py
+/Users/joebains/omlx-video/video.sh|omlx-video/video.sh
+/Users/joebains/omlx-video/requirements.txt|omlx-video/requirements.txt
+/Users/joebains/Library/LaunchAgents/com.joebains.omlx-video.plist|launchagents/com.joebains.omlx-video.plist
