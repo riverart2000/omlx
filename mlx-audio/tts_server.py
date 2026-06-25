@@ -1172,19 +1172,43 @@ def _llm_json(messages: list, max_tokens: int = 6000, temp: float = 0.7):
     return _repair_json(txt)
 
 
+def _kept_line_indices(lines: list, keeps: list | None) -> set:
+    """Indices of caption lines that actually survive the kept windows — the same
+    remap test the renderer uses in _build_overlays. keeps=None → every line.
+    Lets us generate & display captions ONLY for content that ends up in the
+    video (saves LLM compute and avoids showing captions for cut footage)."""
+    if not keeps:
+        return set(range(len(lines)))
+    kept = set()
+    for i, ln in enumerate(lines):
+        a = _remap_time(ln["start"], keeps)
+        b = _remap_time(ln["end"], keeps)
+        if a is None:
+            a = _remap_time(ln["start"] + 0.05, keeps)
+        if b is None:
+            b = _remap_time(ln["end"] - 0.05, keeps)
+        if a is not None and b is not None and b - a >= 0.25:
+            kept.add(i)
+    return kept
+
+
 def _gen_captions(lines: list, want_captions: bool = True, want_cards: bool = True,
-                  topic: str = "", length_target: str = "auto") -> dict:
+                  topic: str = "", length_target: str = "auto",
+                  keep_idx: set | None = None) -> dict:
     """Use the LLM to rewrite transcript lines into punchy condensed captions
     and/or a few concept/hook cards. Returns {captions:[...], cards:[...]} keyed
     by line index 'i'. Captions are processed in batches so the model never has
     to return more JSON than fits in one reply (avoids truncation on long
-    videos). Either pass can be skipped independently."""
+    videos). Either pass can be skipped independently. When keep_idx is given,
+    only those line indices are sent to the LLM — so we never spend compute
+    writing captions for footage the edit cuts out."""
     sys_msg = (
         "You are an elite short-form (TikTok/Reels/YouTube Shorts) video "
         "editor. You write on-screen captions that drive retention. Output "
         "ONLY one valid JSON object, no prose, no markdown.")
     lt = VIRAL_LENGTH_TARGETS.get(length_target, "")
-    payload = [{"i": i, "t": ln["t"]} for i, ln in enumerate(lines)]
+    idxs = (sorted(keep_idx) if keep_idx is not None else list(range(len(lines))))
+    payload = [{"i": i, "t": lines[i]["t"]} for i in idxs if 0 <= i < len(lines)]
 
     def _caption_batch(batch_payload):
         ask = (
@@ -1574,11 +1598,18 @@ def _plan_normalize(plan: dict) -> dict:
 
 def _plan_public(plan: dict, lines: list | None = None) -> dict:
     """Editor-friendly view: caption/card dicts flattened to sorted lists, with
-    the original transcript line text alongside each caption for context."""
+    the original transcript line text alongside each caption for context. Only
+    captions/cards on lines that survive the highlight cut are shown — the editor
+    should reflect what actually ends up in the video, not the whole transcript."""
     plan = _plan_normalize(plan)
     caps = plan["gen"]["captions"]
+    keep = None
+    if lines and plan.get("highlights"):
+        keep = _kept_line_indices(lines, plan["highlights"])
     cap_list = []
     for i in sorted(caps):
+        if keep is not None and i not in keep:
+            continue
         c = caps[i]
         emph = c.get("emphasis")
         if isinstance(emph, list):
@@ -1594,6 +1625,8 @@ def _plan_public(plan: dict, lines: list | None = None) -> dict:
             i = int(c.get("i", 0))
         except (TypeError, ValueError):
             i = 0
+        if keep is not None and i not in keep:
+            continue
         cards.append({"i": i, "title": str(c.get("title") or ""),
                       "subtitle": str(c.get("subtitle") or "")})
     out = {"version": 1, "meta": plan["meta"], "stages": plan["stages"],
@@ -2125,12 +2158,14 @@ def _run_director_plan(jid: str, opts: dict) -> None:
                                topic=opts.get("topic", ""))
         if plan["stages"]["captions"] or plan["stages"]["cards"]:
             _dir_set(jid, stage="writing smart captions", progress=72)
+            keep_idx = _kept_line_indices(lines, plan.get("highlights"))
             try:
                 gen = _gen_captions(lines,
                                     want_captions=plan["stages"]["captions"],
                                     want_cards=plan["stages"]["cards"],
                                     topic=opts.get("topic", ""),
-                                    length_target=plan["meta"]["length"])
+                                    length_target=plan["meta"]["length"],
+                                    keep_idx=keep_idx)
                 plan["gen"]["captions"] = {int(k): v for k, v in
                                            gen.get("captions", {}).items()}
                 if gen.get("cards"):
@@ -2191,24 +2226,28 @@ def _run_director_revise(jid: str, opts: dict) -> None:
             except Exception as e:
                 base_plan["notes"] = (base_plan.get("notes", "") +
                                       f"\n(director revise failed: {e})")
-            if regen_caps and (base_plan["stages"]["captions"]
-                               or base_plan["stages"]["cards"]):
-                _dir_set(jid, stage="rewriting captions", progress=70)
-                try:
-                    gen = _gen_captions(
-                        lines, want_captions=base_plan["stages"]["captions"],
-                        want_cards=base_plan["stages"]["cards"],
-                        topic=feedback, length_target=base_plan["meta"]["length"])
-                    base_plan["gen"]["captions"] = {int(k): v for k, v in
-                                                    gen.get("captions", {}).items()}
-                    if gen.get("cards"):
-                        base_plan["gen"]["cards"] = gen["cards"]
-                except Exception:
-                    pass
         base_plan = _plan_normalize(base_plan)
-        # Recompute the highlight cut if the length target changed.
-        _dir_set(jid, stage="updating length cut", progress=82)
+        # Recompute the highlight cut FIRST, so any caption rewrite below only
+        # spends LLM compute on the lines that survive the new cut.
+        _dir_set(jid, stage="updating length cut", progress=68)
         _ensure_highlights(base_plan, lines, dur, topic=feedback)
+        if feedback and regen_caps and (base_plan["stages"]["captions"]
+                                        or base_plan["stages"]["cards"]):
+            _dir_set(jid, stage="rewriting captions", progress=78)
+            keep_idx = _kept_line_indices(lines, base_plan.get("highlights"))
+            try:
+                gen = _gen_captions(
+                    lines, want_captions=base_plan["stages"]["captions"],
+                    want_cards=base_plan["stages"]["cards"],
+                    topic=feedback, length_target=base_plan["meta"]["length"],
+                    keep_idx=keep_idx)
+                base_plan["gen"]["captions"] = {int(k): v for k, v in
+                                                gen.get("captions", {}).items()}
+                if gen.get("cards"):
+                    base_plan["gen"]["cards"] = gen["cards"]
+            except Exception:
+                pass
+        base_plan = _plan_normalize(base_plan)
         with _dir_lock:
             entry["history"].append(entry["plan"])
             entry["plan"] = base_plan
@@ -2443,7 +2482,8 @@ def _run_cleanup(jid: str, opts: dict) -> None:
                     gen = _gen_captions(lines, want_captions=want_caps,
                                         want_cards=want_cards,
                                         topic=opts.get("caption_topic", ""),
-                                        length_target=opts.get("viral_length", "auto"))
+                                        length_target=opts.get("viral_length", "auto"),
+                                        keep_idx=_kept_line_indices(lines, out_keeps))
                 except Exception as ce:
                     _clean_set(jid, stage="smart captions failed, using fallback", progress=98)
                     opts["_caption_error"] = f"{type(ce).__name__}: {ce}"
