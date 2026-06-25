@@ -1171,17 +1171,19 @@ def _llm_json(messages: list, max_tokens: int = 6000, temp: float = 0.7):
     return _repair_json(txt)
 
 
-def _gen_captions(lines: list, want_cards: bool, topic: str = "",
-                  length_target: str = "auto") -> dict:
+def _gen_captions(lines: list, want_captions: bool = True, want_cards: bool = True,
+                  topic: str = "", length_target: str = "auto") -> dict:
     """Use the LLM to rewrite transcript lines into punchy condensed captions
-    plus a few concept/hook cards. Returns {captions:[...], cards:[...]} keyed
-    by line index 'i'. Lines are processed in batches so the model never has to
-    return more JSON than fits in one reply (avoids truncation on long videos)."""
+    and/or a few concept/hook cards. Returns {captions:[...], cards:[...]} keyed
+    by line index 'i'. Captions are processed in batches so the model never has
+    to return more JSON than fits in one reply (avoids truncation on long
+    videos). Either pass can be skipped independently."""
     sys_msg = (
         "You are an elite short-form (TikTok/Reels/YouTube Shorts) video "
         "editor. You write on-screen captions that drive retention. Output "
         "ONLY one valid JSON object, no prose, no markdown.")
     lt = VIRAL_LENGTH_TARGETS.get(length_target, "")
+    payload = [{"i": i, "t": ln["t"]} for i, ln in enumerate(lines)]
 
     def _caption_batch(batch_payload):
         ask = (
@@ -1198,26 +1200,26 @@ def _gen_captions(lines: list, want_cards: bool, topic: str = "",
         return _llm_json([{"role": "system", "content": sys_msg},
                           {"role": "user", "content": ask}])
 
-    payload = [{"i": i, "t": ln["t"]} for i, ln in enumerate(lines)]
     caps = {}
-    batch = 18
-    for s in range(0, len(payload), batch):
-        chunk = payload[s:s + batch]
-        try:
-            out = _caption_batch(chunk)
-        except Exception:
-            # Retry this batch once; if it still fails, those lines fall back to
-            # literal transcript text in _build_overlays.
+    if want_captions:
+        batch = 18
+        for s in range(0, len(payload), batch):
+            chunk = payload[s:s + batch]
             try:
                 out = _caption_batch(chunk)
             except Exception:
-                continue
-        for c in out.get("captions", []):
-            if "i" in c:
+                # Retry this batch once; if it still fails, those lines fall back
+                # to literal transcript text in _build_overlays.
                 try:
-                    caps[int(c["i"])] = c
-                except (TypeError, ValueError):
-                    pass
+                    out = _caption_batch(chunk)
+                except Exception:
+                    continue
+            for c in out.get("captions", []):
+                if "i" in c:
+                    try:
+                        caps[int(c["i"])] = c
+                    except (TypeError, ValueError):
+                        pass
 
     cards = []
     if want_cards:
@@ -1241,9 +1243,12 @@ def _gen_captions(lines: list, want_cards: bool, topic: str = "",
     return {"captions": caps, "cards": cards}
 
 
-def _build_overlays(lines: list, gen: dict, keeps: list) -> list:
+def _build_overlays(lines: list, gen: dict, keeps: list,
+                    include_captions: bool = True,
+                    include_cards: bool = True) -> list:
     """Combine LLM text with ASR timing, remap to the output timeline, and emit
-    overlay items: {id,type,text/title/subtitle,emphasis,a,b}."""
+    overlay items: {id,type,text/title/subtitle,emphasis,a,b}. Line captions and
+    hook cards can be included independently."""
     items = []
     caps = gen.get("captions", {})
 
@@ -1259,36 +1264,38 @@ def _build_overlays(lines: list, gen: dict, keeps: list) -> list:
             v = [v]
         return [_txt(e) for e in (v or []) if _txt(e)]
 
-    for i, ln in enumerate(lines):
-        c = caps.get(i)
-        text = (_txt(c.get("text")) if c else "") or ln["t"]
-        a = _remap_time(ln["start"], keeps)
-        b = _remap_time(ln["end"], keeps)
-        if a is None:
-            a = _remap_time(ln["start"] + 0.05, keeps)
-        if b is None:
-            b = _remap_time(ln["end"] - 0.05, keeps)
-        if a is None or b is None or b - a < 0.25:
-            continue
-        items.append({"id": f"cap{i}", "type": "caption", "text": text,
-                      "emphasis": _emph(c.get("emphasis")) if c else [],
-                      "a": round(a, 2), "b": round(b, 2)})
-    for j, card in enumerate(gen.get("cards", [])):
-        try:
-            i = int(card.get("i", 0))
-        except (TypeError, ValueError):
-            continue
-        if i >= len(lines):
-            continue
-        ln = lines[i]
-        a = _remap_time(ln["start"], keeps)
-        if a is None:
-            continue
-        b = a + 2.2
-        items.append({"id": f"card{j}", "type": "card",
-                      "title": _txt(card.get("title", "")),
-                      "subtitle": _txt(card.get("subtitle", "")),
-                      "a": round(a, 2), "b": round(b, 2)})
+    if include_captions:
+        for i, ln in enumerate(lines):
+            c = caps.get(i)
+            text = (_txt(c.get("text")) if c else "") or ln["t"]
+            a = _remap_time(ln["start"], keeps)
+            b = _remap_time(ln["end"], keeps)
+            if a is None:
+                a = _remap_time(ln["start"] + 0.05, keeps)
+            if b is None:
+                b = _remap_time(ln["end"] - 0.05, keeps)
+            if a is None or b is None or b - a < 0.25:
+                continue
+            items.append({"id": f"cap{i}", "type": "caption", "text": text,
+                          "emphasis": _emph(c.get("emphasis")) if c else [],
+                          "a": round(a, 2), "b": round(b, 2)})
+    if include_cards:
+        for j, card in enumerate(gen.get("cards", [])):
+            try:
+                i = int(card.get("i", 0))
+            except (TypeError, ValueError):
+                continue
+            if i >= len(lines):
+                continue
+            ln = lines[i]
+            a = _remap_time(ln["start"], keeps)
+            if a is None:
+                continue
+            b = a + 2.2
+            items.append({"id": f"card{j}", "type": "card",
+                          "title": _txt(card.get("title", "")),
+                          "subtitle": _txt(card.get("subtitle", "")),
+                          "a": round(a, 2), "b": round(b, 2)})
     return items
 
 
@@ -1559,11 +1566,13 @@ def _run_cleanup(jid: str, opts: dict) -> None:
         # Viral-edit options (video only).
         want_punchin = bool(opts.get("dynamic_edit")) and info["has_video"]
         want_caps = bool(opts.get("captions")) and info["has_video"]
+        want_cards = bool(opts.get("cards")) and info["has_video"]
+        want_overlays = want_caps or want_cards
         # The keep-intervals that define the OUTPUT timeline (whole clip if no cuts).
         out_keeps = keeps if has_cuts else [(0.0, dur)]
 
         # Captions need word timestamps even when fillers aren't being removed.
-        if want_caps and words is None and render48 is not None:
+        if want_overlays and words is None and render48 is not None:
             _clean_set(jid, stage="transcribing for captions", progress=52)
             wav16c = base + ".caps16k.wav"
             tmps.append(wav16c)
@@ -1600,18 +1609,23 @@ def _run_cleanup(jid: str, opts: dict) -> None:
             if ASPECTS.get(opts.get("aspect")):
                 _clean_set(jid, stage="reframing aspect ratio", progress=95)
                 out = _apply_aspect(out, base, opts)
-            if want_caps and words:
+            if want_overlays and words:
                 lines = _segment_lines(words)
                 try:
-                    _clean_set(jid, stage="writing smart captions", progress=97)
-                    gen = _gen_captions(lines, want_cards=True,
+                    stage_msg = ("writing smart captions" if want_caps
+                                 else "writing hook cards")
+                    _clean_set(jid, stage=stage_msg, progress=97)
+                    gen = _gen_captions(lines, want_captions=want_caps,
+                                        want_cards=want_cards,
                                         topic=opts.get("caption_topic", ""),
                                         length_target=opts.get("viral_length", "auto"))
                 except Exception as ce:
                     _clean_set(jid, stage="smart captions failed, using fallback", progress=98)
                     opts["_caption_error"] = f"{type(ce).__name__}: {ce}"
                     gen = {"captions": {}, "cards": []}
-                items = _build_overlays(lines, gen, out_keeps)
+                items = _build_overlays(lines, gen, out_keeps,
+                                        include_captions=want_caps,
+                                        include_cards=want_cards)
                 if items:
                     try:
                         out = _composite_captions(out, items, base)
@@ -1885,6 +1899,7 @@ class Handler(BaseHTTPRequestHandler):
                            ("fill", "pad_black", "pad_blur") else "fill"),
             "dynamic_edit": bool(data.get("dynamic_edit", False)),
             "captions": bool(data.get("captions", False)),
+            "cards": bool(data.get("cards", False)),
             "caption_topic": (data.get("caption_topic") or "")[:400],
             "viral_length": (data.get("viral_length")
                              if data.get("viral_length") in VIRAL_LENGTH_TARGETS
@@ -1911,6 +1926,7 @@ class Handler(BaseHTTPRequestHandler):
                         or opts["remove_silences"] or opts["enhance_video"]
                         or bool(ASPECTS.get(opts["aspect"]))
                         or opts["dynamic_edit"] or opts["captions"]
+                        or opts["cards"]
                         or cuts is not None)
             if not any_step:
                 return self._json(400, {"error": "enable at least one cleanup step"})
@@ -2425,7 +2441,8 @@ STUDIO_HTML = r"""<!DOCTYPE html>
         </div>
         <div class="row" id="clViralRow" style="margin-top:6px">
           <label class="toggle"><input type="checkbox" id="clDynamic" checked> Dynamic punch-in (smooth eased zoom on cuts, video only)</label>
-          <label class="toggle" id="clCaptionsWrap" style="display:none"><input type="checkbox" id="clCaptions" checked> Smart captions + hook cards (LLM, video only)</label>
+          <label class="toggle" id="clCaptionsWrap" style="display:none"><input type="checkbox" id="clCaptions" checked> Smart captions (LLM, video only)</label>
+          <label class="toggle" id="clCardsWrap" style="display:none"><input type="checkbox" id="clCards" checked> Hook cards (LLM, video only)</label>
           <div class="field" id="clLenWrap" style="display:none"><label>Viral length target</label>
             <select id="clViralLength">
               <option value="auto" selected>Auto (from source)</option>
@@ -2528,6 +2545,7 @@ async function loadEngines(){
   $('clEnhanceRow').style.display=ENHANCE_AVAILABLE?'':'none';
   CAPTIONS_AVAILABLE=!!d.captions_available;
   $('clCaptionsWrap').style.display='';
+  $('clCardsWrap').style.display='';
   MEMORY_AVAILABLE=!!d.memory_available;
   MEMORY_URL=d.memory_url||'';
   TRANSCRIPT_COLLECTION=d.transcript_collection||'video_transcripts';
@@ -2698,8 +2716,9 @@ function clEsc(s){ return String(s==null?'':s).replace(/[<>&]/g,c=>({'<':'&lt;',
 $('clEnhance').onchange=()=>{ const on=$('clEnhance').checked;
   $('clEnhanceFaceWrap').style.display=on?'':'none'; $('clEnhanceLevelWrap').style.display=on?'':'none'; };
 $('clAspect').onchange=()=>{ $('clAspectFitWrap').style.display=$('clAspect').value!=='original'?'':'none'; };
-$('clCaptions').onchange=()=>{ const on=$('clCaptions').checked;
+$('clCaptions').onchange=()=>{ const on=$('clCaptions').checked||$('clCards').checked;
   $('clTopicWrap').style.display=on?'':'none'; $('clLenWrap').style.display=on?'':'none'; };
+$('clCards').onchange=$('clCaptions').onchange;
 async function clMemSearch(){
   const q=$('clMemQ').value.trim();
   const box=$('clMemResults');
@@ -2731,6 +2750,7 @@ function clBaseBody(){
     aspect_fit:$('clAspectFit').value,
     dynamic_edit:$('clDynamic').checked,
     captions:$('clCaptions').checked,
+    cards:$('clCards').checked,
     caption_topic:$('clTopic').value.trim(),
     viral_length:$('clViralLength').value,
     index_transcript:$('clIndex').checked,
@@ -2760,7 +2780,7 @@ $('clAnalyze').onclick=async()=>{
 $('clRun').onclick=async()=>{
   const body=clBaseBody();
   if(!body.path){ clFlash('Paste a file path first.',true); return; }
-  if(!body.denoise&&!body.remove_fillers&&!body.remove_silences&&!body.enhance_video&&body.aspect==='original'&&!body.dynamic_edit&&!body.captions){ clFlash('Enable at least one cleanup step.',true); return; }
+  if(!body.denoise&&!body.remove_fillers&&!body.remove_silences&&!body.enhance_video&&body.aspect==='original'&&!body.dynamic_edit&&!body.captions&&!body.cards){ clFlash('Enable at least one cleanup step.',true); return; }
   body.mode='render';
   clBusy(true); $('clResult').innerHTML=''; $('clReview').innerHTML=''; clFlash('Starting…');
   try{
