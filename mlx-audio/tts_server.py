@@ -1244,6 +1244,7 @@ def _render_punchin_video(src_video, src48, keeps, out_path, loudness, zoom=1.10
     if not (W and H):
         # Fall back to the plain select-based render.
         return _render_clean_video(src_video, src48, keeps, out_path, loudness)
+    zw, zh = (int(W / zoom) // 2) * 2, (int(H / zoom) // 2) * 2
     vparts, aparts, labels = [], [], []
     for idx, (a, b) in enumerate(keeps):
         zoomed = (idx % 2 == 1)
@@ -1251,26 +1252,25 @@ def _render_punchin_video(src_video, src48, keeps, out_path, loudness, zoom=1.10
         s0 = zoom if prev_zoomed else 1.0
         s1 = zoom if zoomed else 1.0
         ramp = max(0.01, float(ramp_sec))
-        v = f"[0:v]trim={a}:{b},setpts=PTS-STARTPTS"
-        if abs(s1 - 1.0) < 1e-4 and abs(s0 - 1.0) < 1e-4:
-            v += f",scale={W}:{H}:flags=lanczos"
+        # Build a compatibility-safe smooth transition without crop eval=frame:
+        # blend between a wide and zoomed stream over the first `ramp` seconds.
+        u = f"(T/{ramp:.3f})"
+        m = f"((1+{u}-abs(1-{u}))/2)"
+        uc = f"(({m}+abs({m}))/2)"  # clamp(T/ramp, 0..1)
+        if abs(s1 - s0) < 1e-4:
+            mix = "1" if s1 > 1.001 else "0"
+        elif s1 > s0:
+            mix = uc
         else:
-            # Smoothstep easing without commas in expr syntax (ffmpeg filter
-            # args use commas as separators). We compute u=t/ramp, clamp to
-            # [0,1] via abs-only arithmetic, then e=u*u*(3-2*u).
-            # m=(1+u-abs(1-u))/2 is min(1,u), uc=(m+abs(m))/2 is max(0,m).
-            u = f"(t/{ramp:.3f})"
-            m = f"((1+{u}-abs(1-{u}))/2)"
-            uc = f"(({m}+abs({m}))/2)"
-            scale_expr = (
-                f"({s0:.6f}+({s1:.6f}-{s0:.6f})*"
-                f"({uc}*{uc}*(3-2*{uc})))"
-            )
-            crop_w = f"trunc(iw/{scale_expr}/2)*2"
-            crop_h = f"trunc(ih/{scale_expr}/2)*2"
-            v += (f",crop={crop_w}:{crop_h}:(iw-ow)/2:(ih-oh)/2:eval=frame,"
-                  f"scale={W}:{H}:flags=lanczos")
-        v += f",setsar=1[v{idx}]"
+            mix = f"(1-{uc})"
+        blend_expr = f"A*(1-({mix}))+B*({mix})"
+        v = (
+            f"[0:v]trim={a}:{b},setpts=PTS-STARTPTS,split=2[vb{idx}][vz{idx}];"
+            f"[vb{idx}]scale={W}:{H}:flags=lanczos[vb2{idx}];"
+            f"[vz{idx}]crop={zw}:{zh}:(iw-{zw})/2:(ih-{zh})/2,"
+            f"scale={W}:{H}:flags=lanczos[vz2{idx}];"
+            f"[vb2{idx}][vz2{idx}]blend=all_expr='{blend_expr}',setsar=1[v{idx}]"
+        )
         a_ = f"[1:a]atrim={a}:{b},asetpts=PTS-STARTPTS[a{idx}]"
         vparts.append(v)
         aparts.append(a_)
