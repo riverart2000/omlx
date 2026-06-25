@@ -1268,7 +1268,7 @@ def _render_punchin_video(src_video, src48, keeps, out_path, loudness, zoom=1.10
             )
             crop_w = f"trunc(iw/{scale_expr}/2)*2"
             crop_h = f"trunc(ih/{scale_expr}/2)*2"
-            v += (f",crop={crop_w}:{crop_h}:(iw-ow)/2:(ih-oh)/2,"
+            v += (f",crop={crop_w}:{crop_h}:(iw-ow)/2:(ih-oh)/2:eval=frame,"
                   f"scale={W}:{H}:flags=lanczos")
         v += f",setsar=1[v{idx}]"
         a_ = f"[1:a]atrim={a}:{b},asetpts=PTS-STARTPTS[a{idx}]"
@@ -2249,11 +2249,11 @@ STUDIO_HTML = r"""<!DOCTYPE html>
         <div class="row" style="margin-top:6px">
           <label class="toggle"><input type="checkbox" id="clDenoise" checked> Denoise (DeepFilterNet)</label>
           <label class="toggle"><input type="checkbox" id="clFillers" checked> Remove fillers (um/uh/er…)</label>
-          <label class="toggle"><input type="checkbox" id="clSilence"> Trim long silences</label>
+          <label class="toggle"><input type="checkbox" id="clSilence" checked> Trim long silences</label>
         </div>
         <div class="row" id="clEnhanceRow" style="margin-top:6px;display:none">
-          <label class="toggle"><input type="checkbox" id="clEnhance"> Enhance light &amp; colour (Core Image, video only)</label>
-          <label class="toggle" id="clEnhanceFaceWrap" style="display:none"><input type="checkbox" id="clEnhanceFace"> Face-aware</label>
+          <label class="toggle"><input type="checkbox" id="clEnhance" checked> Enhance light &amp; colour (Core Image, video only)</label>
+          <label class="toggle" id="clEnhanceFaceWrap" style="display:none"><input type="checkbox" id="clEnhanceFace" checked> Face-aware</label>
           <div class="field" id="clEnhanceLevelWrap" style="display:none"><label>Strength</label>
             <input id="clEnhanceLevel" type="number" min="0" max="100" step="5" value="100" style="min-width:80px"> <span class="hint">%</span></div>
         </div>
@@ -2274,8 +2274,8 @@ STUDIO_HTML = r"""<!DOCTYPE html>
             </select></div>
         </div>
         <div class="row" id="clViralRow" style="margin-top:6px">
-          <label class="toggle"><input type="checkbox" id="clDynamic"> Dynamic punch-in (smooth eased zoom on cuts, video only)</label>
-          <label class="toggle" id="clCaptionsWrap" style="display:none"><input type="checkbox" id="clCaptions"> Smart captions + hook cards (LLM, video only)</label>
+          <label class="toggle"><input type="checkbox" id="clDynamic" checked> Dynamic punch-in (smooth eased zoom on cuts, video only)</label>
+          <label class="toggle" id="clCaptionsWrap" style="display:none"><input type="checkbox" id="clCaptions" checked> Smart captions + hook cards (LLM, video only)</label>
           <div class="field" id="clLenWrap" style="display:none"><label>Viral length target</label>
             <select id="clViralLength">
               <option value="auto" selected>Auto (from source)</option>
@@ -2739,6 +2739,9 @@ function renderCleanResult(res){
 }
 
 syncLabels(); applyStyle('natural'); loadEngines(); loadHistory(); poll(); setInterval(poll,2500);
+$('clEnhance').onchange();
+$('clAspect').onchange();
+$('clCaptions').onchange();
 </script>
 </body>
 </html>
