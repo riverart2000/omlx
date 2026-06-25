@@ -1250,11 +1250,28 @@ def _render_punchin_video(src_video, src48, keeps, out_path, loudness, zoom=1.10
     # back to static alternating punch-in to avoid apparent "stuck at rendering".
     smooth_limit = 28
     smooth_mode = len(keeps) <= smooth_limit
+    # Avoid hyperactive in/out toggling by holding each zoom state for a few
+    # seconds before allowing a flip.
+    min_hold_sec = 7.0
+    zoom_states = []
+    hold = 0.0
+    zstate = False
+    for i, (a, b) in enumerate(keeps):
+        seg = max(0.0, float(b) - float(a))
+        if i == 0:
+            zstate = False
+            hold = seg
+        else:
+            if hold >= min_hold_sec:
+                zstate = not zstate
+                hold = 0.0
+            hold += seg
+        zoom_states.append(zstate)
     vparts, aparts, labels = [], [], []
     for idx, (a, b) in enumerate(keeps):
-        zoomed = (idx % 2 == 1)
+        zoomed = zoom_states[idx]
         if smooth_mode:
-            prev_zoomed = (idx % 2 == 0 and idx > 0)
+            prev_zoomed = zoom_states[idx - 1] if idx > 0 else False
             s0 = zoom if prev_zoomed else 1.0
             s1 = zoom if zoomed else 1.0
             ramp = max(0.01, float(ramp_sec))
@@ -1468,20 +1485,24 @@ def _run_cleanup(jid: str, opts: dict) -> None:
                 _clean_set(jid, stage="reframing aspect ratio", progress=95)
                 out = _apply_aspect(out, base, opts)
             if want_caps and words:
+                lines = _segment_lines(words)
                 try:
                     _clean_set(jid, stage="writing smart captions", progress=97)
-                    lines = _segment_lines(words)
                     gen = _gen_captions(lines, want_cards=True,
                                         topic=opts.get("caption_topic", ""),
                                         length_target=opts.get("viral_length", "auto"))
-                    items = _build_overlays(lines, gen, out_keeps)
-                    if items:
+                except Exception as ce:
+                    _clean_set(jid, stage="smart captions failed, using fallback", progress=98)
+                    opts["_caption_error"] = f"{type(ce).__name__}: {ce}"
+                    gen = {"captions": {}, "cards": []}
+                items = _build_overlays(lines, gen, out_keeps)
+                if items:
+                    try:
                         out = _composite_captions(out, items, base)
                         captioned = True
-                except Exception as ce:
-                    _clean_set(jid, stage="captions skipped", progress=98)
-                    captioned = False
-                    opts["_caption_error"] = f"{type(ce).__name__}: {ce}"
+                    except Exception as ce2:
+                        captioned = False
+                        opts["_caption_error"] = f"{type(ce2).__name__}: {ce2}"
         else:
             fmt = opts["format"]
             out = base + "." + fmt
@@ -2390,7 +2411,7 @@ async function loadEngines(){
   ENHANCE_AVAILABLE=!!d.enhance_available;
   $('clEnhanceRow').style.display=ENHANCE_AVAILABLE?'':'none';
   CAPTIONS_AVAILABLE=!!d.captions_available;
-  $('clCaptionsWrap').style.display=CAPTIONS_AVAILABLE?'':'none';
+  $('clCaptionsWrap').style.display='';
   MEMORY_AVAILABLE=!!d.memory_available;
   MEMORY_URL=d.memory_url||'';
   TRANSCRIPT_COLLECTION=d.transcript_collection||'video_transcripts';
@@ -2593,7 +2614,7 @@ function clBaseBody(){
     aspect:$('clAspect').value,
     aspect_fit:$('clAspectFit').value,
     dynamic_edit:$('clDynamic').checked,
-    captions:CAPTIONS_AVAILABLE&&$('clCaptions').checked,
+    captions:$('clCaptions').checked,
     caption_topic:$('clTopic').value.trim(),
     viral_length:$('clViralLength').value,
     index_transcript:$('clIndex').checked,
@@ -2741,6 +2762,7 @@ function renderCleanResult(res){
   }
   let tx='';
   if(res.transcript){ tx='<details style="margin-top:8px"><summary>Transcript</summary><pre style="white-space:pre-wrap;margin-top:6px">'+esc(res.transcript)+'</pre></details>'; }
+  if(res.caption_error){ tx += '<div class="hint" style="margin-top:8px">Caption note: '+esc(res.caption_error)+'</div>'; }
   let saved='';
   if(res.saved_to){ saved=`<div class="hint" style="margin-top:8px">Saved next to original: <code>${esc(res.saved_to)}</code></div>`; }
   else if(res.save_error){ saved=`<div class="status err" style="margin-top:8px">Couldn't save next to original: ${esc(res.save_error)}</div>`; }
