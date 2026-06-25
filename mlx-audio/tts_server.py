@@ -1516,6 +1516,8 @@ def _plan_defaults() -> dict:
                    "enhance": True, "enhance_face": False,
                    "enhance_level": 1.0, "captions": True, "cards": True},
         "gen": {"captions": {}, "cards": []},
+        "highlights": [],
+        "highlights_for": "",
         "notes": "",
     }
 
@@ -1553,8 +1555,20 @@ def _plan_normalize(plan: dict) -> dict:
         if isinstance(v, dict):
             caps[ik] = v
     cards = gen.get("cards") if isinstance(gen.get("cards"), list) else []
+    hl = plan.get("highlights")
+    hlw = []
+    if isinstance(hl, list):
+        for pair in hl:
+            try:
+                a, b = float(pair[0]), float(pair[1])
+            except (TypeError, ValueError, IndexError):
+                continue
+            if b > a:
+                hlw.append([round(a, 2), round(b, 2)])
     return {"version": 1, "meta": meta, "stages": st,
             "gen": {"captions": caps, "cards": cards},
+            "highlights": hlw,
+            "highlights_for": str(plan.get("highlights_for") or ""),
             "notes": str(plan.get("notes") or "")}
 
 
@@ -1583,7 +1597,9 @@ def _plan_public(plan: dict, lines: list | None = None) -> dict:
         cards.append({"i": i, "title": str(c.get("title") or ""),
                       "subtitle": str(c.get("subtitle") or "")})
     out = {"version": 1, "meta": plan["meta"], "stages": plan["stages"],
-           "notes": plan["notes"], "captions": cap_list, "cards": cards}
+           "notes": plan["notes"], "captions": cap_list, "cards": cards,
+           "highlights": plan["highlights"],
+           "highlights_for": plan["highlights_for"]}
     return out
 
 
@@ -1610,6 +1626,8 @@ def _plan_from_public(raw: dict) -> dict:
                       "subtitle": str(c.get("subtitle") or "")})
     return _plan_normalize({"meta": raw.get("meta"), "stages": raw.get("stages"),
                             "notes": raw.get("notes"),
+                            "highlights": raw.get("highlights"),
+                            "highlights_for": raw.get("highlights_for"),
                             "gen": {"captions": caps, "cards": cards}})
 
 
@@ -1660,14 +1678,132 @@ def _director_prep(jid: str, path: str, denoise_on: bool) -> dict:
             "denoised": denoise}
 
 
+def _director_foundation(jid: str, path: str, prep: dict, st: dict) -> dict:
+    """Build STAGE 1: the cached 'foundation' the whole edit is built on —
+    denoised audio (already in prep) + a light/colour-enhanced full-length
+    picture. Cached by source + enhance params ONLY (independent of any editing
+    decision), so re-planning and re-rendering never re-enhances. Returns the
+    video to draw the picture from (enhanced file, or the original source)."""
+    enhance = bool(st.get("enhance")) and prep["info"]["has_video"] \
+        and _ci_enhance_available()
+    if not enhance:
+        return {"video": path, "enhanced": False, "key": prep["file_sig"]}
+    level = round(float(st.get("enhance_level", 1.0)), 3)
+    face = bool(st.get("enhance_face"))
+    found_key = _sig(prep["file_sig"], "enh", face, level)
+    found_path = _cache_path("found", found_key)
+    if not os.path.exists(found_path):
+        _dir_set(jid, stage="enhancing light & colour (foundation)", progress=46)
+        opts = {"enhance_level": level, "enhance_face": face}
+        _stage_mutate(path, found_path,
+                      lambda w: _apply_enhance(w, found_path + ".t", opts))
+    return {"video": found_path, "enhanced": True, "key": found_key}
+
+
+def _length_target_seconds(length: str):
+    """Midpoint seconds for a viral length bucket, or None for auto/original."""
+    return {"15_30": 24, "30_45": 38, "45_60": 52,
+            "60_90": 75, "90_120": 105}.get(length)
+
+
+def _cuts_from_keeps(keeps: list, dur: float) -> list:
+    """Return the complement (the gaps to CUT) of a set of keep windows."""
+    keeps = sorted((max(0.0, float(a)), min(dur, float(b)))
+                   for a, b in keeps if float(b) > float(a))
+    cuts, prev = [], 0.0
+    for a, b in keeps:
+        if a > prev:
+            cuts.append((prev, a))
+        prev = max(prev, b)
+    if prev < dur:
+        cuts.append((prev, dur))
+    return cuts
+
+
+def _lines_to_intervals(lines: list, idx: list, dur: float, pad: float = 0.15):
+    """Merge the kept line indices into continuous time windows."""
+    iv = []
+    for i in sorted(set(idx)):
+        if not (0 <= i < len(lines)):
+            continue
+        a = max(0.0, lines[i]["start"] - pad)
+        b = min(dur, lines[i]["end"] + pad)
+        if iv and a <= iv[-1][1] + 0.30:
+            iv[-1][1] = max(iv[-1][1], b)
+        else:
+            iv.append([a, b])
+    return [(a, b) for a, b in iv if b - a > 0.05]
+
+
+def _director_highlights(lines: list, target_sec: int, topic: str = "") -> list:
+    """Ask the LLM to pick the line indices that form the strongest viral story
+    at roughly the target length. Returns a sorted list of kept line indices."""
+    payload = [{"i": i, "t": ln["t"], "s": round(ln["start"], 1),
+                "e": round(ln["end"], 1)} for i, ln in enumerate(lines)]
+    sys_msg = (
+        "You are an elite short-form video editor assembling a HIGHLIGHT cut. "
+        "Choose the lines that tell the most engaging, coherent viral story at "
+        "the target length: a strong hook up front, momentum in the middle, a "
+        "clear payoff. Drop rambling, repetition and weak filler. Output ONLY "
+        "one valid JSON object.")
+    ask = (f"Target final length: about {target_sec} seconds. From the numbered "
+           f"transcript lines (with start 's' / end 'e' seconds), select the "
+           f"line indices to KEEP so the kept duration is close to the target "
+           f"and the result is punchy and coherent. Prefer contiguous runs.\n")
+    if topic:
+        ask += f"Topic/voice: {topic}\n"
+    ask += ('Return JSON exactly: {"keep":[<int>,...]}\nLines: '
+            + json.dumps(payload))
+    out = _llm_json([{"role": "system", "content": sys_msg},
+                     {"role": "user", "content": ask}], temp=0.5)
+    keep = out.get("keep") or out.get("keeps") or []
+    idx = []
+    for k in keep:
+        try:
+            ki = int(k)
+        except (TypeError, ValueError):
+            continue
+        if 0 <= ki < len(lines):
+            idx.append(ki)
+    return sorted(set(idx))
+
+
+def _ensure_highlights(plan: dict, lines: list, dur: float, topic: str = "") -> dict:
+    """Compute (or reuse) the highlight windows for the plan's length target.
+    Stored on the plan so renders stay deterministic and cacheable; only
+    recomputed when the length target changes."""
+    length = plan["meta"]["length"]
+    target = _length_target_seconds(length)
+    if not target:
+        plan["highlights"] = []
+        plan["highlights_for"] = length
+        return plan
+    if plan.get("highlights") and plan.get("highlights_for") == length:
+        return plan
+    try:
+        idx = _director_highlights(lines, target, topic)
+        iv = _lines_to_intervals(lines, idx, dur)
+        plan["highlights"] = [[round(a, 2), round(b, 2)] for a, b in (iv or [])]
+    except Exception:
+        plan["highlights"] = []
+    plan["highlights_for"] = length
+    return plan
+
+
 def _director_cuts(prep: dict, plan: dict):
-    """Compute keep-intervals from the plan's cut stages. Returns (keeps_or_None,
-    out_keeps, n_fillers, n_silences)."""
+    """Compute keep-intervals from the plan's length target + cut stages. Returns
+    (keeps_or_None, out_keeps, n_fillers, n_silences)."""
     st = plan["stages"]
     words = prep["words"]
     dur = prep["info"]["duration"]
     cuts = []
     n_fillers = n_silences = 0
+    # Length target -> keep only the selected highlight windows (cut the rest).
+    hl = plan.get("highlights") or []
+    if hl:
+        keeps_hl = [(float(a), float(b)) for a, b in hl if float(b) > float(a)]
+        if keeps_hl:
+            cuts += _cuts_from_keeps(keeps_hl, dur)
     if st["remove_fillers"]:
         fcuts, hits = _filler_cuts(words, DEFAULT_FILLERS, 0.04)
         cuts += fcuts
@@ -1695,36 +1831,32 @@ def _director_execute(jid: str, path: str, plan: dict) -> dict:
     info = prep["info"]
     dur = info["duration"]
     aud = prep["audio"]
+    # STAGE 1 — foundation: denoise (in prep) + enhance light/colour, cached and
+    # reused across every plan/render iteration.
+    found = _director_foundation(jid, path, prep, st)
+    fvideo = found["video"]
+    # Honour the length target even if it changed since the last revise.
+    if _length_target_seconds(meta["length"]):
+        _ensure_highlights(plan, _segment_lines(prep["words"]), dur)
     keeps, out_keeps, n_fillers, n_silences = _director_cuts(prep, plan)
     has_cuts = keeps is not None
     punch = st["punch_in"]
 
-    # Stage 1: base video (cuts + optional continuous breathing zoom).
-    base_key = _sig(prep["prep_key"], out_keeps, has_cuts, punch, loudness)
+    # STAGE 3 — editing. Base video: cuts + optional continuous breathing zoom,
+    # drawn from the enhanced foundation picture + denoised audio.
+    base_key = _sig(found["key"], out_keeps, has_cuts, punch, loudness)
     base_path = _cache_path("base", base_key)
     if not os.path.exists(base_path):
         _dir_set(jid, stage="rendering base cut", progress=58)
         if punch:
-            _render_punchin_video(path, aud, out_keeps, base_path, loudness)
+            _render_punchin_video(fvideo, aud, out_keeps, base_path, loudness)
         elif has_cuts:
-            _render_clean_video(path, aud, keeps, base_path, loudness)
+            _render_clean_video(fvideo, aud, keeps, base_path, loudness)
         else:
-            _remux_video(path, aud, base_path, loudness)
+            _remux_video(fvideo, aud, base_path, loudness)
     cur = base_path
 
-    # Stage 2: light & colour enhance.
-    if st["enhance"] and _ci_enhance_available():
-        enh_key = _sig(base_key, st["enhance_face"], round(st["enhance_level"], 3))
-        enh_path = _cache_path("enh", enh_key)
-        if not os.path.exists(enh_path):
-            _dir_set(jid, stage="enhancing light & colour", progress=70)
-            opts = {"enhance_level": st["enhance_level"],
-                    "enhance_face": st["enhance_face"]}
-            _stage_mutate(cur, enh_path,
-                          lambda w: _apply_enhance(w, enh_path + ".t", opts))
-        cur = enh_path
-
-    # Stage 3: aspect reframe.
+    # Aspect reframe.
     if ASPECTS.get(meta["aspect"]):
         asp_key = _sig(_file_sig(cur), meta["aspect"], meta["aspect_fit"])
         asp_path = _cache_path("asp", asp_key)
@@ -1806,6 +1938,8 @@ def _director_execute(jid: str, path: str, plan: dict) -> dict:
         "aspect": meta["aspect"] if ASPECTS.get(meta["aspect"]) else None,
         "fillers_removed": n_fillers,
         "silences_removed": n_silences,
+        "length_target": meta["length"],
+        "highlights": len(plan.get("highlights") or []),
         "plan": _plan_public(plan, _segment_lines(prep["words"])),
     }
 
@@ -1864,12 +1998,64 @@ def _merge_decisions(plan: dict, dec: dict) -> dict:
     return _plan_normalize(p)
 
 
+def _run_director_prep(jid: str, opts: dict) -> None:
+    """STAGE 1 — build & cache the foundation (denoise audio + enhance light/
+    colour), return a picture-preview URL + transcript so the user can lock the
+    look before directing the edit."""
+    try:
+        path = opts["path"]
+        sess = opts.get("session", jid)
+        _dir_set(jid, status="running", stage="probing", progress=5)
+        denoise = bool(opts.get("denoise", True))
+        prep = _director_prep(jid, path, denoise_on=denoise)
+        found_st = {
+            "denoise": denoise,
+            "enhance": bool(opts.get("enhance", True)),
+            "enhance_face": bool(opts.get("enhance_face", False)),
+            "enhance_level": float(opts.get("enhance_level", 1.0)),
+        }
+        found = _director_foundation(jid, path, prep, found_st)
+        url = None
+        if found["enhanced"]:
+            _dir_set(jid, stage="preparing preview", progress=92)
+            pv = "found_" + uuid.uuid4().hex[:12] + ".mp4"
+            shutil.copy2(found["video"], os.path.join(OUT_DIR, pv))
+            url = "/files/" + pv
+        # Seed (or update) the session with the locked foundation settings.
+        with _dir_lock:
+            entry = _dir_plans.get(sess) or {}
+            plan = entry.get("plan") or _plan_defaults()
+            plan["meta"]["platform"] = opts.get("platform", plan["meta"]["platform"])
+            plan["stages"].update(found_st)
+            entry.update({"plan": plan, "path": path,
+                          "file_sig": prep["file_sig"],
+                          "history": entry.get("history", []),
+                          "prepped": True})
+            _dir_plans[sess] = entry
+        result = {"kind": "prep", "session": sess, "url": url,
+                  "duration": round(prep["info"]["duration"], 2),
+                  "has_video": bool(prep["info"]["has_video"]),
+                  "denoised": prep["denoised"], "enhanced": found["enhanced"],
+                  "transcript": prep["text"][:8000]}
+        _dir_set(jid, stage="done", progress=100, status="done", result=result)
+    except Exception as e:
+        _dir_set(jid, status="error", stage="error", error=str(e))
+
+
 def _run_director_plan(jid: str, opts: dict) -> None:
     try:
         path = opts["path"]
         sess = opts.get("session", jid)
         _dir_set(jid, status="running", stage="probing", progress=5)
-        prep = _director_prep(jid, path, denoise_on=True)
+        # Reuse a prepped foundation (denoise/enhance settings) if present.
+        with _dir_lock:
+            prev_entry = _dir_plans.get(sess)
+        found_st = None
+        if prev_entry and prev_entry.get("path") == path:
+            found_st = {k: prev_entry["plan"]["stages"][k] for k in
+                        ("denoise", "enhance", "enhance_face", "enhance_level")}
+        denoise = found_st["denoise"] if found_st else True
+        prep = _director_prep(jid, path, denoise_on=denoise)
         lines = _segment_lines(prep["words"])
         _dir_set(jid, stage="directing the edit", progress=55)
         plan = _plan_defaults()
@@ -1885,6 +2071,14 @@ def _run_director_plan(jid: str, opts: dict) -> None:
             plan["meta"]["length"] = opts["length"]
         if opts.get("aspect"):
             plan["meta"]["aspect"] = opts["aspect"]
+        # Keep the locked foundation settings from Stage 1.
+        if found_st:
+            plan["stages"].update(found_st)
+        plan = _plan_normalize(plan)
+        if _length_target_seconds(plan["meta"]["length"]):
+            _dir_set(jid, stage="selecting highlights for length", progress=64)
+            _ensure_highlights(plan, lines, prep["info"]["duration"],
+                               topic=opts.get("topic", ""))
         if plan["stages"]["captions"] or plan["stages"]["cards"]:
             _dir_set(jid, stage="writing smart captions", progress=72)
             try:
@@ -1901,8 +2095,11 @@ def _run_director_plan(jid: str, opts: dict) -> None:
                 _dir_set(jid, stage=f"captions skipped: {e}")
         plan = _plan_normalize(plan)
         with _dir_lock:
-            _dir_plans[sess] = {"plan": plan, "path": path,
-                                "file_sig": prep["file_sig"], "history": []}
+            entry = _dir_plans.get(sess) or {}
+            entry.update({"plan": plan, "path": path,
+                          "file_sig": prep["file_sig"],
+                          "history": entry.get("history", [])})
+            _dir_plans[sess] = entry
         pub = _plan_public(plan, lines)
         pub["duration"] = round(prep["info"]["duration"], 2)
         pub["transcript"] = prep["text"][:8000]
@@ -1926,9 +2123,10 @@ def _run_director_revise(jid: str, opts: dict) -> None:
         base_plan = _plan_from_public(opts.get("plan") or {})
         feedback = (opts.get("feedback") or "").strip()
         regen_caps = bool(opts.get("regen_captions"))
+        prep = _director_prep(jid, path, base_plan["stages"]["denoise"])
+        lines = _segment_lines(prep["words"])
         if feedback:
             _dir_set(jid, stage="consulting the director", progress=45)
-            prep = _director_prep(jid, path, base_plan["stages"]["denoise"])
             try:
                 dec = _director_decisions(prep["text"], prep["info"]["duration"],
                                           base_plan["meta"], feedback=feedback,
@@ -1937,7 +2135,6 @@ def _run_director_revise(jid: str, opts: dict) -> None:
             except Exception as e:
                 base_plan["notes"] = (base_plan.get("notes", "") +
                                       f"\n(director revise failed: {e})")
-            lines = _segment_lines(prep["words"])
             if regen_caps and (base_plan["stages"]["captions"]
                                or base_plan["stages"]["cards"]):
                 _dir_set(jid, stage="rewriting captions", progress=70)
@@ -1952,15 +2149,11 @@ def _run_director_revise(jid: str, opts: dict) -> None:
                         base_plan["gen"]["cards"] = gen["cards"]
                 except Exception:
                     pass
-        else:
-            with _dir_lock:
-                lines = None
-            try:
-                prep = _director_prep(jid, path, base_plan["stages"]["denoise"])
-                lines = _segment_lines(prep["words"])
-            except Exception:
-                lines = None
         base_plan = _plan_normalize(base_plan)
+        # Recompute the highlight cut if the length target changed.
+        _dir_set(jid, stage="updating length cut", progress=82)
+        _ensure_highlights(base_plan, lines, prep["info"]["duration"],
+                           topic=feedback)
         with _dir_lock:
             entry["history"].append(entry["plan"])
             entry["plan"] = base_plan
@@ -2104,6 +2297,36 @@ def _run_cleanup(jid: str, opts: dict) -> None:
                                     opts["keep_silence"], opts["silence_db"])
                 cuts += sil
                 n_silences = len(sil)
+
+        # Viral length target: keep only the LLM-selected highlight windows
+        # (video only; skipped when the user is applying manual review cuts).
+        vlen = (_length_target_seconds(opts.get("viral_length"))
+                if explicit is None else None)
+        if vlen and info["has_video"] and render48 is not None:
+            if words is None:
+                _clean_set(jid, stage="transcribing for length cut", progress=50)
+                wav16l = base + ".len16k.wav"
+                tmps.append(wav16l)
+                _run(["ffmpeg", "-y", "-loglevel", "error", "-i", render48,
+                      "-ar", "16000", "-ac", "1", "-c:a", "pcm_s16le", wav16l])
+                res = _enqueue("transcribe_words",
+                               {"path": wav16l, "initial_prompt": opts.get("prompt")},
+                               timeout=3600)
+                if "error" not in res:
+                    words = res["data"]["words"]
+                    if not text:
+                        text = res["data"]["text"]
+            if words:
+                _clean_set(jid, stage="selecting highlights for length", progress=58)
+                try:
+                    hl_lines = _segment_lines(words)
+                    idx = _director_highlights(hl_lines, vlen,
+                                               opts.get("caption_topic", ""))
+                    iv = _lines_to_intervals(hl_lines, idx, dur)
+                    if iv:
+                        cuts += _cuts_from_keeps(iv, dur)
+                except Exception:
+                    pass
 
         has_cuts = bool(cuts)
         keeps = _keep_intervals(cuts, dur) if has_cuts else None
@@ -2411,7 +2634,7 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(200, {"ok": _ref_delete(data.get("id", ""))})
         if path == "/cleanup":
             return self._cleanup(data)
-        if path in ("/director/plan", "/director/revise", "/director/render"):
+        if path in ("/director/prep", "/director/plan", "/director/revise", "/director/render"):
             return self._director(path, data)
         self._json(404, {"error": "not found"})
 
@@ -2420,7 +2643,21 @@ class Handler(BaseHTTPRequestHandler):
         if not _worker_started.is_set():
             return self._json(503, {"error": "starting up, try again shortly"})
         jid = "dir_" + uuid.uuid4().hex[:12]
-        if path == "/director/plan":
+        if path == "/director/prep":
+            mpath = _resolve_media_path(data.get("path", ""))
+            if not mpath or not os.path.isfile(mpath):
+                return self._json(400, {"error": f"file not found: {mpath or '(empty)'}"})
+            opts = {
+                "path": mpath,
+                "session": data.get("session") or ("sess_" + uuid.uuid4().hex[:8]),
+                "platform": data.get("platform", "youtube"),
+                "denoise": bool(data.get("denoise", True)),
+                "enhance": bool(data.get("enhance", True)),
+                "enhance_face": bool(data.get("enhance_face", False)),
+                "enhance_level": data.get("enhance_level", 1.0),
+            }
+            target = _run_director_prep
+        elif path == "/director/plan":
             mpath = _resolve_media_path(data.get("path", ""))
             if not mpath or not os.path.isfile(mpath):
                 return self._json(400, {"error": f"file not found: {mpath or '(empty)'}"})
@@ -3002,13 +3239,13 @@ STUDIO_HTML = r"""<!DOCTYPE html>
 
   <div class="card">
     <details id="cleanPanel">
-      <summary>Media cleanup &mdash; denoise &amp; remove &ldquo;um / uh&rdquo; fillers (audio or video)</summary>
+      <summary>🔊 Audio cleanup &mdash; denoise &amp; remove &ldquo;um / uh&rdquo; fillers (audio files)</summary>
       <div style="margin-top:12px">
-        <div class="hint">Point it at a file on this Mac. Video files are cleaned and re-exported as video (picture stays in sync); audio files export as audio.</div>
+        <div class="hint">For audio-only files (voiceovers, podcasts, music beds). Denoise, strip fillers &amp; dead air, preview, then export clean audio. For video editing use <b>Viral Studio</b> above.</div>
         <div class="row" style="margin-top:10px">
           <div class="field" style="flex:1">
-            <label>File path</label>
-            <input id="clPath" type="text" placeholder="/Users/you/Movies/interview.mp4  (or .wav .mp3 .mov ...)" style="width:100%">
+            <label>Audio file path</label>
+            <input id="clPath" type="text" placeholder="/Users/you/Audio/voiceover.wav  (or .mp3 .m4a .flac ...)" style="width:100%">
             <div class="hint">Tip: in Finder, right-click the file, hold &#8997; Option, then &ldquo;Copy as Pathname&rdquo; and paste here.</div>
           </div>
         </div>
@@ -3105,72 +3342,98 @@ STUDIO_HTML = r"""<!DOCTYPE html>
 
   <div class="card">
     <details id="dirPanel" open>
-      <summary>🎬 Edit Director &mdash; let the AI direct a viral edit (collaborative)</summary>
+      <summary>🎬 Viral Studio &mdash; AI-directed viral edit (3 stages, collaborative)</summary>
       <div style="margin-top:12px">
-        <div class="hint">The local LLM watches your video, proposes a full edit plan (cuts, framing, motion, captions, hook cards), and you refine it together &mdash; tweak the dropdowns or just tell it what to change &mdash; then hit <b>Make it happen</b>. Re-renders are incremental: only the parts you change are re-done.</div>
-        <div class="row" style="margin-top:10px">
+        <div class="hint">Turn a plain video into a viral clip in three cached stages. <b>1)</b> Lock the look (denoise + light/colour). <b>2)</b> Let the AI direct the edit &mdash; refine it together. <b>3)</b> Pick your editing options and render. Each stage is cached, so iterating is fast.</div>
+
+        <!-- STAGE 1 — FOUNDATION -->
+        <div class="card" style="margin:12px 0 0;background:#161a22;border-left:3px solid #4ea1ff">
+          <div style="font-weight:600;margin-bottom:8px">① Foundation &mdash; clean the source <span class="hint">denoise + light/colour, built once &amp; reused</span></div>
           <div class="field" style="flex:1">
             <label>Video path</label>
-            <input id="dPath" type="text" placeholder="/Users/you/Movies/clip.mp4" style="width:100%">
+            <input id="dPath" type="text" placeholder="/Users/you/Movies/clip.mov" style="width:100%">
             <div class="hint">Finder &rarr; right-click &rarr; hold &#8997; Option &rarr; &ldquo;Copy as Pathname&rdquo;.</div>
           </div>
+          <div class="row" style="margin-top:8px;flex-wrap:wrap;align-items:center">
+            <label class="toggle"><input type="checkbox" id="fDenoise" checked> Denoise audio</label>
+            <label class="toggle"><input type="checkbox" id="fEnhance" checked> Enhance light &amp; colour</label>
+            <label class="toggle"><input type="checkbox" id="fFace"> Face-aware</label>
+            <div class="field"><label>Strength</label>
+              <input id="fLevel" type="number" min="0" max="100" step="5" value="100" style="min-width:80px"> <span class="hint">%</span></div>
+            <div class="spacer"></div>
+            <button class="primary" id="dPrepBtn">Prep foundation &rarr;</button>
+          </div>
+          <div id="fResult" style="margin-top:10px"></div>
         </div>
-        <div class="row" style="margin-top:6px">
-          <div class="field"><label>Platform</label>
-            <select id="dPlatform">
-              <option value="youtube">YouTube</option>
-              <option value="tiktok">TikTok</option>
-              <option value="reels">Instagram Reels</option>
-            </select></div>
-          <div class="field"><label>Length</label><select id="dLength"></select></div>
-          <div class="field"><label>Aspect</label><select id="dAspect"></select></div>
-          <div class="field" style="flex:1"><label>Topic / voice hint (optional)</label>
-            <input id="dTopic" type="text" placeholder="e.g. founder talking about AI startups" style="width:100%"></div>
-        </div>
-        <div class="row" style="margin-top:10px">
-          <div class="spacer"></div>
-          <button class="primary" id="dPlanBtn">Direct the edit &rarr;</button>
-        </div>
-        <div class="status" id="dStatus" style="margin-top:10px"></div>
-        <div id="dPlanWrap" style="margin-top:12px;display:none">
-          <div class="card" style="margin:0;background:#161a22">
-            <div style="font-weight:600;margin-bottom:8px">The director's plan <span class="hint" id="dDur"></span></div>
-            <div id="dNotesBox" class="hint" style="white-space:pre-wrap;border-left:3px solid #f5c518;padding-left:8px;margin-bottom:10px"></div>
-            <div class="row">
-              <div class="field"><label>Aspect</label><select id="pAspect"></select></div>
-              <div class="field"><label>Reframe</label><select id="pFit">
-                <option value="fill">Fill (crop)</option><option value="pad_blur">Fit (blur bg)</option><option value="pad_black">Fit (black bars)</option></select></div>
-              <div class="field"><label>Length</label><select id="pLength"></select></div>
-              <div class="field"><label>Loudness</label><select id="pLoud">
-                <option value="youtube">YouTube (-14)</option><option value="podcast">Podcast (-16)</option><option value="broadcast">Broadcast (-23)</option><option value="off">Off</option></select></div>
-              <div class="field"><label>Style</label><select id="pStyle"></select></div>
-            </div>
-            <div class="row" style="margin-top:8px;flex-wrap:wrap">
-              <label class="toggle"><input type="checkbox" id="sDenoise"> Denoise</label>
-              <label class="toggle"><input type="checkbox" id="sFillers"> Cut fillers</label>
-              <label class="toggle"><input type="checkbox" id="sSilence"> Trim silences</label>
-              <label class="toggle"><input type="checkbox" id="sPunch"> Push-in motion</label>
-              <label class="toggle"><input type="checkbox" id="sEnhance"> Enhance colour</label>
-              <label class="toggle"><input type="checkbox" id="sFace"> Face-aware</label>
-              <label class="toggle"><input type="checkbox" id="sCaptions"> Smart captions</label>
-              <label class="toggle"><input type="checkbox" id="sCards"> Hook cards</label>
-            </div>
-            <details id="dCapDetails" style="margin-top:10px"><summary>Captions (<span id="dCapCount">0</span>) &mdash; edit any line</summary>
-              <div id="dCaptions" style="margin-top:8px;max-height:260px;overflow:auto"></div></details>
-            <details id="dCardDetails" style="margin-top:8px"><summary>Hook cards (<span id="dCardCount">0</span>)</summary>
-              <div id="dCards" style="margin-top:8px"></div>
-              <button class="ghost" type="button" id="dAddCard" style="margin-top:6px">+ Add card</button></details>
-            <div class="field" style="margin-top:12px"><label>Tell the director what to change (freeform)</label>
-              <textarea id="dFeedback" rows="2" placeholder="e.g. punchier hook, keep it under 30s, warmer colours, drop the cards" style="width:100%"></textarea></div>
-            <div class="row" style="margin-top:8px">
-              <label class="toggle"><input type="checkbox" id="dRegenCaps"> Rewrite captions too</label>
-              <div class="spacer"></div>
-              <button class="ghost" id="dReviseBtn">Revise with AI &#8635;</button>
-              <button class="primary" id="dRenderBtn">Make it happen &#9889;</button>
+
+        <!-- STAGE 2 — DIRECTOR'S PLAN -->
+        <div class="card" id="dStage2" style="margin:12px 0 0;background:#161a22;border-left:3px solid #f5c518;display:none">
+          <div style="font-weight:600;margin-bottom:8px">② Director's plan &mdash; the AI decides the edit</div>
+          <div class="row">
+            <div class="field"><label>Platform</label>
+              <select id="dPlatform">
+                <option value="youtube">YouTube</option>
+                <option value="tiktok">TikTok</option>
+                <option value="reels">Instagram Reels</option>
+              </select></div>
+            <div class="field"><label>Length</label><select id="dLength"></select></div>
+            <div class="field"><label>Aspect</label><select id="dAspect"></select></div>
+            <div class="field" style="flex:1"><label>Topic / voice hint (optional)</label>
+              <input id="dTopic" type="text" placeholder="e.g. founder talking about AI startups" style="width:100%"></div>
+          </div>
+          <div class="row" style="margin-top:10px">
+            <div class="spacer"></div>
+            <button class="primary" id="dPlanBtn">Direct the edit &rarr;</button>
+          </div>
+          <div id="dPlanWrap" style="margin-top:12px;display:none">
+            <div class="card" style="margin:0;background:#11151c">
+              <div style="font-weight:600;margin-bottom:8px">The director's plan <span class="hint" id="dDur"></span></div>
+              <div id="dNotesBox" class="hint" style="white-space:pre-wrap;border-left:3px solid #f5c518;padding-left:8px;margin-bottom:10px"></div>
+              <div id="dHl" class="hint" style="margin-bottom:10px"></div>
+              <div class="row">
+                <div class="field"><label>Aspect</label><select id="pAspect"></select></div>
+                <div class="field"><label>Reframe</label><select id="pFit">
+                  <option value="fill">Fill (crop)</option><option value="pad_blur">Fit (blur bg)</option><option value="pad_black">Fit (black bars)</option></select></div>
+                <div class="field"><label>Length</label><select id="pLength"></select></div>
+                <div class="field"><label>Loudness</label><select id="pLoud">
+                  <option value="youtube">YouTube (-14)</option><option value="podcast">Podcast (-16)</option><option value="broadcast">Broadcast (-23)</option><option value="off">Off</option></select></div>
+                <div class="field"><label>Style</label><select id="pStyle"></select></div>
+              </div>
+              <details id="dCapDetails" style="margin-top:10px"><summary>Captions (<span id="dCapCount">0</span>) &mdash; edit any line</summary>
+                <div id="dCaptions" style="margin-top:8px;max-height:260px;overflow:auto"></div></details>
+              <details id="dCardDetails" style="margin-top:8px"><summary>Hook cards (<span id="dCardCount">0</span>)</summary>
+                <div id="dCards" style="margin-top:8px"></div>
+                <button class="ghost" type="button" id="dAddCard" style="margin-top:6px">+ Add card</button></details>
+              <div class="field" style="margin-top:12px"><label>Tell the director what to change (freeform)</label>
+                <textarea id="dFeedback" rows="2" placeholder="e.g. punchier hook, keep it under 30s, warmer colours, drop the cards" style="width:100%"></textarea></div>
+              <div class="row" style="margin-top:8px">
+                <label class="toggle"><input type="checkbox" id="dRegenCaps"> Rewrite captions too</label>
+                <div class="spacer"></div>
+                <button class="ghost" id="dReviseBtn">Revise with AI &#8635;</button>
+              </div>
             </div>
           </div>
         </div>
-        <div id="dResult" style="margin-top:12px"></div>
+
+        <!-- STAGE 3 — RENDER -->
+        <div class="card" id="dStage3" style="margin:12px 0 0;background:#161a22;border-left:3px solid #2ecc71;display:none">
+          <div style="font-weight:600;margin-bottom:8px">③ Render &mdash; pick your editing options</div>
+          <div class="hint">Tick the touches you want. Length, aspect &amp; style come from the plan above. Re-render anytime &mdash; unchanged stages are reused, so it's fast.</div>
+          <div class="row" style="margin-top:8px;flex-wrap:wrap">
+            <label class="toggle"><input type="checkbox" id="sFillers"> Cut fillers (um/uh)</label>
+            <label class="toggle"><input type="checkbox" id="sSilence"> Trim silences</label>
+            <label class="toggle"><input type="checkbox" id="sPunch"> Push-in motion</label>
+            <label class="toggle"><input type="checkbox" id="sCaptions"> Smart captions</label>
+            <label class="toggle"><input type="checkbox" id="sCards"> Hook cards</label>
+          </div>
+          <div class="row" style="margin-top:10px">
+            <div class="spacer"></div>
+            <button class="primary" id="dRenderBtn">Make it happen &#9889;</button>
+          </div>
+          <div id="dResult" style="margin-top:12px"></div>
+        </div>
+
+        <div class="status" id="dStatus" style="margin-top:10px"></div>
       </div>
     </details>
   </div>
@@ -3214,10 +3477,11 @@ async function loadEngines(){
   DENOISE_AVAILABLE=!!d.denoise_available;
   $('denoiseField').style.display=DENOISE_AVAILABLE?'':'none';
   ENHANCE_AVAILABLE=!!d.enhance_available;
-  $('clEnhanceRow').style.display=ENHANCE_AVAILABLE?'':'none';
+  // Audio cleanup card is audio-only — keep all video controls hidden here.
+  $('clEnhanceRow').style.display='none';
+  $('clAspectRow').style.display='none';
+  $('clViralRow').style.display='none';
   CAPTIONS_AVAILABLE=!!d.captions_available;
-  $('clCaptionsWrap').style.display='';
-  $('clCardsWrap').style.display='';
   // ---- Edit Director dropdowns ----
   const LEN_LABELS={auto:'Auto (from source)',original:'Original length','15_30':'15-30s (aggressive)','30_45':'30-45s (tight)','45_60':'45-60s (balanced)','60_90':'60-90s (story)','90_120':'90-120s (deeper)'};
   const ASP_LABELS={'9:16':'9:16 — Reels/Shorts','16:9':'16:9 — YouTube','1:1':'1:1 — square','4:5':'4:5 — IG portrait','original':'Original'};
@@ -3592,10 +3856,10 @@ function renderCleanResult(res){
     <div class="row" style="margin-top:8px"><a class="mini" href="${res.url}" download="${esc(dlName)}">Download cleaned ${isVid?'video':'audio'}</a></div>${saved}${hits}${tx}</div>`;
 }
 
-// ================= Edit Director =================
-let DSESS=null, DPLAN=null, DBUSY=false;
+// ================= Viral Studio (3 stages) =================
+let DSESS=null, DPLAN=null, DBUSY=false, DPREPPED=false;
 function dMsg(t,err){ const s=$('dStatus'); s.className='status'+(err?' err':''); s.textContent=t||''; }
-function dBusy(b){ DBUSY=b; ['dPlanBtn','dReviseBtn','dRenderBtn'].forEach(id=>{const e=$(id); if(e)e.disabled=b;}); }
+function dBusy(b){ DBUSY=b; ['dPrepBtn','dPlanBtn','dReviseBtn','dRenderBtn'].forEach(id=>{const e=$(id); if(e)e.disabled=b;}); }
 async function dPoll(jobId){
   while(true){
     await new Promise(r=>setTimeout(r,1500));
@@ -3605,33 +3869,76 @@ async function dPoll(jobId){
     if(j.status==='error') throw new Error(j.error||'failed');
   }
 }
-async function dPlanRun(){
+// ---- Stage 1: foundation ----
+async function dPrep(){
   const path=$('dPath').value.trim();
   if(!path){ dMsg('Paste a video path first.',true); return; }
-  dBusy(true); $('dResult').innerHTML=''; dMsg('Sending to the director…');
+  dBusy(true); $('fResult').innerHTML=''; $('dResult').innerHTML='';
+  $('dStage2').style.display='none'; $('dStage3').style.display='none'; $('dPlanWrap').style.display='none';
+  DPREPPED=false; DPLAN=null;
+  dMsg('Building the foundation (denoise + light/colour)…');
   try{
-    const body={path,platform:$('dPlatform').value,length:$('dLength').value,aspect:$('dAspect').value,topic:$('dTopic').value.trim()};
+    const body={path,platform:$('dPlatform').value,
+      denoise:$('fDenoise').checked,enhance:$('fEnhance').checked,
+      enhance_face:$('fFace').checked,enhance_level:(parseFloat($('fLevel').value)||100)/100};
+    const r=await fetch('/director/prep',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+    const d=await r.json(); if(!r.ok||d.error) throw new Error(d.error||('HTTP '+r.status));
+    DSESS=d.session;
+    const res=await dPoll(d.job_id);
+    DPREPPED=true; dShowPrep(res);
+    $('dStage2').style.display='';
+    dMsg('Foundation ready — now let the AI direct the edit (stage 2).');
+  }catch(e){ dMsg('Error: '+e.message,true); }
+  dBusy(false);
+}
+function dShowPrep(res){
+  let chips='';
+  if(res.duration) chips+=`<span class="tag">${fmtDur(res.duration)}</span>`;
+  if(res.denoised) chips+=' <span class="tag">denoised</span>';
+  if(res.enhanced) chips+=' <span class="tag">enhanced</span>';
+  if(!res.has_video) chips+=' <span class="tag" style="opacity:.7">audio only</span>';
+  const vid=res.url?`<video src="${res.url}" controls style="width:100%;max-height:300px;border-radius:8px;background:#000"></video>`:'';
+  const tr=res.transcript?`<details style="margin-top:8px"><summary>Transcript</summary><div class="hint" style="white-space:pre-wrap;margin-top:6px">${clEsc(res.transcript)}</div></details>`:'';
+  $('fResult').innerHTML=`<div class="card" style="margin:0;background:#11151c">${vid}
+    <div style="margin-top:8px">${chips}</div>
+    <div class="hint" style="margin-top:6px">${res.enhanced?'This cleaned look is cached — every edit below builds on it without re-processing.':'Foundation cached.'}</div>${tr}</div>`;
+}
+// ---- Stage 2: director's plan ----
+async function dPlanRun(){
+  if(!DPREPPED||!DSESS){ dMsg('Prep the foundation first (stage 1).',true); return; }
+  dBusy(true); $('dResult').innerHTML=''; $('dStage3').style.display='none';
+  dMsg('Sending to the director…');
+  try{
+    const body={path:$('dPath').value.trim(),session:DSESS,platform:$('dPlatform').value,
+      length:$('dLength').value,aspect:$('dAspect').value,topic:$('dTopic').value.trim()};
     const r=await fetch('/director/plan',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
     const d=await r.json(); if(!r.ok||d.error) throw new Error(d.error||('HTTP '+r.status));
     DSESS=d.session;
     const res=await dPoll(d.job_id);
-    dShowPlan(res.plan); dMsg('Plan ready — tweak it or tell the director what to change.');
+    dShowPlan(res.plan); dMsg('Plan ready — tweak it, revise with the AI, or jump to stage 3 to render.');
   }catch(e){ dMsg('Error: '+e.message,true); }
   dBusy(false);
 }
 function dShowPlan(plan){
   DPLAN=plan; const m=plan.meta||{}, s=plan.stages||{};
-  $('dPlanWrap').style.display='';
+  $('dPlanWrap').style.display=''; $('dStage3').style.display='';
   if(plan.duration) $('dDur').textContent='— source '+fmtDur(plan.duration);
   $('dNotesBox').textContent=plan.notes||'';
   $('pAspect').value=m.aspect||'9:16'; $('pFit').value=m.aspect_fit||'fill';
   $('pLength').value=m.length||'auto'; $('pLoud').value=m.loudness||'youtube';
   if([...$('pStyle').options].some(o=>o.value===m.style)) $('pStyle').value=m.style;
   else { const o=document.createElement('option'); o.value=m.style; o.textContent=m.style; $('pStyle').appendChild(o); $('pStyle').value=m.style; }
-  $('sDenoise').checked=!!s.denoise; $('sFillers').checked=!!s.remove_fillers;
-  $('sSilence').checked=!!s.remove_silences; $('sPunch').checked=!!s.punch_in;
-  $('sEnhance').checked=!!s.enhance; $('sFace').checked=!!s.enhance_face;
-  $('sCaptions').checked=!!s.captions; $('sCards').checked=!!s.cards;
+  // Foundation toggles reflect what the AI chose (kept in sync with stage 1).
+  if(typeof s.denoise==='boolean') $('fDenoise').checked=s.denoise;
+  if(typeof s.enhance==='boolean') $('fEnhance').checked=s.enhance;
+  if(typeof s.enhance_face==='boolean') $('fFace').checked=s.enhance_face;
+  // Stage 3 editing toggles.
+  $('sFillers').checked=!!s.remove_fillers; $('sSilence').checked=!!s.remove_silences;
+  $('sPunch').checked=!!s.punch_in; $('sCaptions').checked=!!s.captions; $('sCards').checked=!!s.cards;
+  const hl=plan.highlights||[];
+  if(hl.length){ const secs=hl.reduce((t,p)=>t+(p[1]-p[0]),0);
+    $('dHl').innerHTML='✂ <b>Highlight cut active</b> — '+hl.length+' segment'+(hl.length>1?'s':'')+' kept (~'+Math.round(secs)+'s) to hit the length target. Change <b>Length</b> and Revise (or just Make it happen) to re-pick.'; }
+  else { $('dHl').textContent=''; }
   dRenderCaps(plan.captions||[]); dRenderCards(plan.cards||[]);
 }
 function dRenderCaps(caps){
@@ -3660,11 +3967,12 @@ function dCollect(){
   return {version:1,
     meta:{platform:$('dPlatform').value,aspect:$('pAspect').value,aspect_fit:$('pFit').value,
       length:$('pLength').value,loudness:$('pLoud').value,style:$('pStyle').value},
-    stages:{denoise:$('sDenoise').checked,remove_fillers:$('sFillers').checked,remove_silences:$('sSilence').checked,
-      punch_in:$('sPunch').checked,enhance:$('sEnhance').checked,enhance_face:$('sFace').checked,
-      enhance_level:(DPLAN&&DPLAN.stages?DPLAN.stages.enhance_level:1.0),
+    stages:{denoise:$('fDenoise').checked,remove_fillers:$('sFillers').checked,remove_silences:$('sSilence').checked,
+      punch_in:$('sPunch').checked,enhance:$('fEnhance').checked,enhance_face:$('fFace').checked,
+      enhance_level:(parseFloat($('fLevel').value)||100)/100,
       captions:$('sCaptions').checked,cards:$('sCards').checked},
-    notes:$('dNotesBox').textContent, captions:caps, cards:cards};
+    notes:$('dNotesBox').textContent, captions:caps, cards:cards,
+    highlights:(DPLAN&&DPLAN.highlights)||[], highlights_for:(DPLAN&&DPLAN.highlights_for)||''};
 }
 async function dRevise(){
   if(!DSESS){ dMsg('Run the director first.',true); return; }
@@ -3678,6 +3986,7 @@ async function dRevise(){
   }catch(e){ dMsg('Error: '+e.message,true); }
   dBusy(false);
 }
+// ---- Stage 3: render ----
 async function dRender(){
   if(!DSESS){ dMsg('Run the director first.',true); return; }
   dBusy(true); $('dResult').innerHTML=''; dMsg('Rendering…');
@@ -3700,14 +4009,20 @@ function dShowResult(res){
   if(res.aspect) chips+=` <span class="tag">${clEsc(res.aspect)}</span>`;
   if(res.fillers_removed) chips+=` <span class="tag">${res.fillers_removed} fillers</span>`;
   if(res.silences_removed) chips+=` <span class="tag">${res.silences_removed} silences</span>`;
+  if(res.length_target&&res.length_target!=='auto'){
+    const lbl=res.length_target==='original'?'original length':res.length_target.replace('_','-')+'s';
+    chips+=` <span class="tag">${clEsc(lbl)} target</span>`;
+    if(res.highlights) chips+=` <span class="tag">${res.highlights} highlights</span>`;
+  }
   if(res.caption_error) chips+=' <span class="tag" style="opacity:.7">captions skipped</span>';
   let saved=''; if(res.saved_to) saved=`<div class="hint" style="margin-top:8px">Saved next to original: <code>${clEsc(res.saved_to)}</code></div>`;
-  $('dResult').innerHTML=`<div class="card" style="margin:0">
+  $('dResult').innerHTML=`<div class="card" style="margin:0;background:#11151c">
     <video src="${res.url}" controls style="width:100%;max-height:380px;border-radius:8px;background:#000"></video>
     <div style="margin-top:8px">${chips}</div>
     <div class="row" style="margin-top:8px"><a class="mini" href="${res.url}" download>Download</a></div>
-    ${saved}<div class="hint" style="margin-top:6px">Tweak options above and hit <b>Make it happen</b> again — unchanged stages are reused, so it's fast.</div></div>`;
+    ${saved}<div class="hint" style="margin-top:6px">Toggle editing options above and hit <b>Make it happen</b> again — unchanged stages are reused, so it's fast.</div></div>`;
 }
+$('dPrepBtn').onclick=dPrep;
 $('dPlanBtn').onclick=dPlanRun;
 $('dReviseBtn').onclick=dRevise;
 $('dRenderBtn').onclick=dRender;
