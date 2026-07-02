@@ -6560,12 +6560,12 @@
         let imgPollTimer = null;
         function openImageStudio() {
             let ov = document.getElementById('omlx-image-overlay');
-            if (ov) { ov.style.display = 'flex'; return; }
+            if (ov) { ov.style.display = 'flex'; imgStartStats(); return; }
             ov = document.createElement('div');
             ov.id = 'omlx-image-overlay';
             ov.style.cssText = 'position:fixed;inset:0;z-index:9999;background:rgba(0,0,0,.55);' +
                 'display:flex;align-items:center;justify-content:center;backdrop-filter:blur(2px);';
-            ov.addEventListener('click', e => { if (e.target === ov) ov.style.display = 'none'; });
+            ov.addEventListener('click', e => { if (e.target === ov) { ov.style.display = 'none'; imgStopStats(); } });
 
             const panel = document.createElement('div');
             panel.style.cssText = 'width:min(880px,94vw);height:min(820px,94vh);background:#0d1117;' +
@@ -6581,7 +6581,12 @@
             closeBtn.innerHTML = '<i data-lucide="x" class="w-4 h-4"></i>';
             closeBtn.title = 'Close';
             closeBtn.style.cssText = 'background:transparent;border:none;color:#8b949e;cursor:pointer;padding:4px;border-radius:6px;';
-            closeBtn.onclick = () => { ov.style.display = 'none'; if (imgPollTimer) clearInterval(imgPollTimer); };
+            closeBtn.onclick = () => { ov.style.display = 'none'; if (imgPollTimer) clearInterval(imgPollTimer); imgStopStats(); };
+            const statsEl = document.createElement('span');
+            statsEl.id = 'imgSysStats';
+            statsEl.style.cssText = 'font-size:11px;color:#8b949e;margin-left:auto;margin-right:12px;' +
+                'font-variant-numeric:tabular-nums;white-space:nowrap';
+            bar.appendChild(statsEl);
             bar.appendChild(closeBtn);
 
             const body = document.createElement('div');
@@ -6678,7 +6683,7 @@
             document.body.appendChild(ov);
             if (window.lucide && lucide.createIcons) lucide.createIcons();
             document.addEventListener('keydown', function esc(e) {
-                if (e.key === 'Escape') { ov.style.display = 'none'; if (imgPollTimer) clearInterval(imgPollTimer); }
+                if (e.key === 'Escape') { ov.style.display = 'none'; if (imgPollTimer) clearInterval(imgPollTimer); imgStopStats(); }
             });
 
             const $ = id => document.getElementById(id);
@@ -6689,6 +6694,31 @@
             $('imgModeVideo').onclick = () => imgSetMode('video');
             imgEngineChanged();
             imgSetMode('image');
+            imgStartStats();
+        }
+
+        let imgStatsTimer = null;
+        function imgStatsUrl() { return (imgMode === 'video') ? VIDEO_URL : IMAGE_URL; }
+        async function imgPollStats() {
+            const el = document.getElementById('imgSysStats');
+            if (!el) return;
+            try {
+                const s = await (await fetch(imgStatsUrl() + '/stats')).json();
+                const parts = [];
+                if (s.gpu_util != null) parts.push('🎛 GPU ' + s.gpu_util + '%');
+                if (s.gpu_mem_gb != null) parts.push('VRAM ' + s.gpu_mem_gb + ' GB');
+                if (s.mem_used_gb != null && s.mem_total_gb != null)
+                    parts.push('RAM ' + s.mem_used_gb + '/' + s.mem_total_gb + ' GB');
+                el.textContent = parts.join('   ·   ');
+            } catch (e) { el.textContent = ''; }
+        }
+        function imgStartStats() {
+            if (imgStatsTimer) clearInterval(imgStatsTimer);
+            imgPollStats();
+            imgStatsTimer = setInterval(imgPollStats, 5000);
+        }
+        function imgStopStats() {
+            if (imgStatsTimer) { clearInterval(imgStatsTimer); imgStatsTimer = null; }
         }
 
         let imgMode = 'image';
@@ -6714,6 +6744,7 @@
                 if ($('imgRefLabel')) $('imgRefLabel').innerHTML = 'Reference image (required for Kontext)';
                 imgEngineChanged();
             }
+            imgPollStats();
         }
 
         function imgEngineChanged() {

@@ -114,6 +114,46 @@ def _even32(v: int) -> int:
     return (v // 32) * 32
 
 
+def _sys_stats():
+    """Best-effort Apple-Silicon GPU + unified-memory stats (no sudo needed)."""
+    out = {"gpu_util": None, "gpu_mem_gb": None,
+           "mem_used_gb": None, "mem_total_gb": None}
+    try:
+        io = subprocess.check_output(
+            ["ioreg", "-r", "-c", "IOAccelerator", "-d", "1"],
+            text=True, timeout=2, stderr=subprocess.DEVNULL)
+        m = re.search(r'"Device Utilization %"=(\d+)', io)
+        if m:
+            out["gpu_util"] = int(m.group(1))
+        m = re.search(r'"In use system memory"=(\d+)', io)
+        if m:
+            out["gpu_mem_gb"] = round(int(m.group(1)) / 1e9, 1)
+    except Exception:
+        pass
+    try:
+        total = int(subprocess.check_output(
+            ["sysctl", "-n", "hw.memsize"], text=True, timeout=2).strip())
+        out["mem_total_gb"] = round(total / 1e9, 1)
+    except Exception:
+        pass
+    try:
+        vm = subprocess.check_output(["vm_stat"], text=True, timeout=2)
+        page = 4096
+        pm = re.search(r'page size of (\d+) bytes', vm)
+        if pm:
+            page = int(pm.group(1))
+
+        def _pg(name):
+            mm = re.search(name + r':\s+(\d+)\.', vm)
+            return int(mm.group(1)) if mm else 0
+        used_pages = (_pg("Pages active") + _pg("Pages wired down")
+                      + _pg("Pages occupied by compressor"))
+        out["mem_used_gb"] = round(used_pages * page / 1e9, 1)
+    except Exception:
+        pass
+    return out
+
+
 def _decode_data_url_png(raw: str) -> bytes:
     s = (raw or "").strip()
     if not s:
@@ -319,6 +359,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(200, {k: job.get(k) for k in
                                     ("status", "stage", "progress",
                                      "result", "error")})
+        if path == "/stats":
+            return self._json(200, _sys_stats())
         if path.startswith("/files/"):
             return self._serve_file(os.path.basename(path))
         return self._json(404, {"error": "not found"})
