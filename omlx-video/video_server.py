@@ -26,6 +26,7 @@ import base64
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import threading
@@ -40,6 +41,7 @@ PORT = int(os.environ.get("VIDEO_PORT", "8500"))
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 OUT_DIR = os.path.join(BASE_DIR, "output")
 TMP_DIR = os.path.join(OUT_DIR, "_tmp")
+SAVE_DIR = os.environ.get("VIDEO_SAVE_DIR", "/Users/joebains/Movies")
 os.makedirs(OUT_DIR, exist_ok=True)
 os.makedirs(TMP_DIR, exist_ok=True)
 
@@ -564,6 +566,28 @@ class Handler(BaseHTTPRequestHandler):
                 _work_q.append(jid)
                 _work_cv.notify()
             return self._json(200, {"ok": True, "job_id": jid})
+        if path == "/save":
+            d = self._read_body()
+            name = os.path.basename(str(d.get("filename") or ""))
+            if not (name.endswith(".mp4") and re.fullmatch(r"[\w.\-]+", name)):
+                return self._json(400, {"error": "invalid filename"})
+            src = os.path.join(OUT_DIR, name)
+            if not os.path.isfile(src):
+                return self._json(404, {"error": "clip not found (may have been cleaned up)"})
+            dest_dir = str(d.get("dest") or SAVE_DIR)
+            try:
+                os.makedirs(dest_dir, exist_ok=True)
+                dest = os.path.join(dest_dir, name)
+                # Avoid clobbering an existing file with the same name.
+                if os.path.exists(dest):
+                    stem, ext = os.path.splitext(name)
+                    dest = os.path.join(
+                        dest_dir,
+                        f"{stem}_{datetime.now().strftime('%Y%m%d-%H%M%S')}{ext}")
+                shutil.copy2(src, dest)
+            except Exception as e:
+                return self._json(500, {"error": f"{type(e).__name__}: {e}"})
+            return self._json(200, {"ok": True, "path": dest})
         return self._json(404, {"error": "not found"})
 
 

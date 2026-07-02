@@ -6937,9 +6937,10 @@
                         $('imgStage').textContent = 'Done in ' + res.seconds + 's — ' + res.width + '×' + res.height + ', ' + res.duration + 's ' + res.mode;
                         $('imgResult').innerHTML =
                             '<video src="' + url + '" controls autoplay loop muted playsinline style="max-width:100%;border-radius:10px;border:1px solid #30363d;background:#000"></video>' +
-                            '<div style="margin-top:8px;display:flex;gap:8px">' +
-                              '<a href="' + url + '" download="' + res.filename + '" style="background:#21262d;border:1px solid #30363d;border-radius:8px;color:#e6edf3;padding:7px 12px;text-decoration:none;font-size:12px">⬇ Download</a>' +
+                            '<div style="margin-top:8px;display:flex;gap:8px;align-items:center">' +
+                              '<button type="button" onclick="vidSaveToDisk(\'' + res.filename + '\', this)" style="background:#238636;border:none;border-radius:8px;color:#fff;padding:7px 12px;cursor:pointer;font-size:12px">⬇ Save to Movies</button>' +
                               '<a href="' + url + '" target="_blank" style="background:#21262d;border:1px solid #30363d;border-radius:8px;color:#e6edf3;padding:7px 12px;text-decoration:none;font-size:12px">↗ Open</a>' +
+                              '<span id="vidSaveMsg" style="font-size:12px;color:#8b949e"></span>' +
                             '</div>';
                     } else if (d.status === 'error') {
                         clearInterval(imgPollTimer); imgPollTimer = null;
@@ -6950,7 +6951,26 @@
             }, 1500);
         }
 
-        if (synth) { loadVoices(); if (typeof synth.onvoiceschanged !== 'undefined') synth.onvoiceschanged = loadVoices; }
+        async function vidSaveToDisk(filename, btn) {
+            const msg = document.getElementById('vidSaveMsg');
+            if (btn) btn.disabled = true;
+            if (msg) { msg.textContent = 'Saving…'; msg.style.color = '#8b949e'; }
+            try {
+                const r = await fetch(VIDEO_URL + '/save', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ filename: filename })
+                });
+                const d = await r.json();
+                if (!r.ok || d.error) throw new Error(d.error || ('HTTP ' + r.status));
+                if (msg) { msg.textContent = '✓ Saved to ' + d.path; msg.style.color = '#3fb950'; }
+            } catch (e) {
+                if (msg) { msg.textContent = 'Save failed: ' + e.message; msg.style.color = '#f85149'; }
+            } finally {
+                if (btn) btn.disabled = false;
+            }
+        }
+        window.vidSaveToDisk = vidSaveToDisk;
         injectControls();
     });
 })();
