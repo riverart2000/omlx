@@ -55,6 +55,7 @@ MODEL_LABEL = "Wan2.2-I2V-A14B (MLX q8)"
 MODEL_WEIGHT_FILES = ["high_noise_model.safetensors", "low_noise_model.safetensors",
                       "t5_encoder.safetensors", "vae.safetensors", "config.json"]
 I2V_ONLY = True  # this model has no pure text-to-video path; a start image is required
+DUAL_MODEL = True  # A14B is a high/low-noise dual model; guide_scale must be a pair
 
 FPS = 16  # Wan2.2-I2V-A14B native output is 16fps.
 # Quality-first defaults. Target 512p (short side 512), all quality knobs maxed.
@@ -289,6 +290,18 @@ def _worker():
 _STEP_RE = re.compile(r"(\d+)\s*/\s*(\d+)")
 
 
+def _guide_arg(g):
+    """Wan2.2-A14B is a dual model — its sampler indexes guide_scale[0]/[1], so a
+    single float crashes. Emit a "low,high" pair (same value for both boundaries)."""
+    try:
+        gv = float(g)
+    except (TypeError, ValueError):
+        gv = DEF_GUIDE
+    if DUAL_MODEL:
+        return f"{gv},{gv}"
+    return str(gv)
+
+
 def _run_generate(jid, opts):
     out_name = "vid_" + uuid.uuid4().hex[:12] + ".mp4"
     out_path = os.path.join(OUT_DIR, out_name)
@@ -300,7 +313,7 @@ def _run_generate(jid, opts):
         "--height", str(opts["height"]),
         "--num-frames", str(opts["num_frames"]),
         "--steps", str(opts["steps"]),
-        "--guide-scale", str(opts["guide_scale"]),
+        "--guide-scale", _guide_arg(opts["guide_scale"]),
         "--scheduler", opts["scheduler"],
         "--seed", str(opts["seed"]),
         "--output-path", out_path,
