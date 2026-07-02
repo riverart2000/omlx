@@ -24,3 +24,4 @@
 /Users/joebains/omlx-video/video.sh|omlx-video/video.sh
 /Users/joebains/omlx-video/requirements.txt|omlx-video/requirements.txt
 /Users/joebains/Library/LaunchAgents/com.joebains.omlx-video.plist|launchagents/com.joebains.omlx-video.plist
+/Users/joebains/omlx-stack.sh|omlx-stack.sh
