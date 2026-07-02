@@ -6652,13 +6652,13 @@
                       '<input id="vidGuide" type="number" step="0.1" value="5.0" style="width:90px;background:#010409;border:1px solid #30363d;border-radius:8px;color:#e6edf3;padding:6px"></div>' +
                     '<div><label style="display:block;font-size:12px;color:#8b949e">VAE tiling</label>' +
                       '<select id="vidTiling" style="background:#010409;border:1px solid #30363d;border-radius:8px;color:#e6edf3;padding:6px">' +
-                        '<option value="none" selected>None (max quality)</option>' +
-                        '<option value="auto">Auto (safe memory)</option>' +
+                        '<option value="auto" selected>Auto (safe — recommended)</option>' +
                         '<option value="conservative">Conservative</option>' +
                         '<option value="aggressive">Aggressive (low mem)</option>' +
+                        '<option value="none">None (max quality — short clips only)</option>' +
                       '</select></div>' +
                   '</div>' +
-                  '<div style="font-size:11px;color:#8b949e;margin-top:8px">💡 Highest-quality knobs are on by default. Reference image below seeds image-to-video (used as the <b>first frame</b>). Wan2.2-TI2V-5B doesn\'t support a separate last frame.</div>' +
+                  '<div style="font-size:11px;color:#8b949e;margin-top:8px">💡 Quality knobs are maxed by default. VAE tiling <b>Auto</b> keeps memory safe; <b>None</b> is highest fidelity but only for short/low-res clips — heavy clips are auto-switched to Auto to avoid exhausting memory. Reference image below seeds image-to-video (first frame). Wan2.2-TI2V-5B has no separate last frame.</div>' +
                 '</div>' +
                 // ---- shared: seed + generate ----
                 '<div style="display:flex;gap:10px;flex-wrap:wrap;margin-top:10px;align-items:flex-end">' +
@@ -6706,6 +6706,13 @@
                 const s = await (await fetch(imgStatsUrl() + '/stats')).json();
                 const parts = [];
                 if (s.gpu_util != null) parts.push('🎛 GPU ' + s.gpu_util + '%');
+                if (s.gpu_watts != null || s.total_watts != null) {
+                    let w = '⚡ ';
+                    if (s.gpu_watts != null) w += 'GPU ' + s.gpu_watts + 'W';
+                    if (s.total_watts != null) w += (s.gpu_watts != null ? ' / ' : '') + s.total_watts + 'W total';
+                    parts.push(w);
+                }
+                if (s.gpu_temp != null) parts.push('🌡 ' + s.gpu_temp + '°C');
                 if (s.gpu_mem_gb != null) parts.push('VRAM ' + s.gpu_mem_gb + ' GB');
                 if (s.mem_used_gb != null && s.mem_total_gb != null)
                     parts.push('RAM ' + s.mem_used_gb + '/' + s.mem_total_gb + ' GB');
@@ -6893,7 +6900,7 @@
                 steps: parseInt(($('vidSteps') && $('vidSteps').value), 10) || 60,
                 scheduler: ($('vidScheduler') && $('vidScheduler').value) || 'unipc',
                 guide_scale: parseFloat(($('vidGuide') && $('vidGuide').value) || '5.0') || 5.0,
-                tiling: ($('vidTiling') && $('vidTiling').value) || 'none',
+                tiling: ($('vidTiling') && $('vidTiling').value) || 'auto',
                 seed: parseInt($('imgSeed').value, 10) || 42,
             };
             if (refImage) body.image = refImage;

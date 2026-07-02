@@ -52,13 +52,22 @@ DEF_HEIGHT = 512
 DEF_STEPS = 60           # max-quality by default (server clamps to [10,60])
 DEF_GUIDE = 5.0
 DEF_SCHEDULER = "unipc"  # official / highest-quality 2nd-order solver
-DEF_TILING = "none"      # no VAE tiling => no seams => highest fidelity (64GB M5)
+DEF_TILING = "auto"      # SAFE default: bounds VAE-decode peak memory so a
+                         # long/high-res clip can't exhaust unified memory and
+                         # hang the machine. "none" (seam-free max fidelity) is
+                         # still selectable for short/low-res clips.
 DEF_TRIM_FIRST = 0       # extra discarded temporal chunks (first-frame artifact fix)
 DEF_SECONDS = 3.5  # ~81 frames
 MAX_SECONDS = 8.0  # keep render time + memory sane on 64GB M5
 MIN_SECONDS = 1.0
 MAX_DIM = 1280
 MIN_DIM = 256
+
+# VAE decode with tiling="none" materializes all frames at once. Empirically a
+# 512x896x49 clip (~22.5M px*frames) decodes near ~30GB and is the crash edge on
+# a 64GB machine that's also running the LLM/app. Cap tiling="none" to clips
+# below this pixel*frame budget; heavier clips are forced to safe tiling.
+NONE_TILING_PX_BUDGET = 512 * 512 * 33  # ~8.6M px*frames (short/low-res only)
 
 TILING_MODES = ("auto", "none", "default", "aggressive", "conservative",
                 "spatial", "temporal")
@@ -117,7 +126,9 @@ def _even32(v: int) -> int:
 def _sys_stats():
     """Best-effort Apple-Silicon GPU + unified-memory stats (no sudo needed)."""
     out = {"gpu_util": None, "gpu_mem_gb": None,
-           "mem_used_gb": None, "mem_total_gb": None}
+           "mem_used_gb": None, "mem_total_gb": None,
+           "cpu_watts": None, "gpu_watts": None, "total_watts": None,
+           "gpu_temp": None}
     try:
         io = subprocess.check_output(
             ["ioreg", "-r", "-c", "IOAccelerator", "-d", "1"],
@@ -151,7 +162,84 @@ def _sys_stats():
         out["mem_used_gb"] = round(used_pages * page / 1e9, 1)
     except Exception:
         pass
+    # Power (watts) + GPU temp from the sudoless macmon streamer, if running.
+    p = _power_latest()
+    if p:
+        out["cpu_watts"] = p.get("cpu_watts")
+        out["gpu_watts"] = p.get("gpu_watts")
+        out["total_watts"] = p.get("total_watts")
+        out["gpu_temp"] = p.get("gpu_temp")
     return out
+
+
+# --- Sudoless power monitor via `macmon pipe` (Apple Silicon) --------------
+_MACMON_CANDIDATES = ("/opt/homebrew/bin/macmon", "/usr/local/bin/macmon",
+                      "macmon")
+_power_lock = threading.Lock()
+_power_data = {}
+
+
+def _power_latest():
+    with _power_lock:
+        return dict(_power_data)
+
+
+def _macmon_bin():
+    for c in _MACMON_CANDIDATES:
+        if os.path.sep in c:
+            if os.path.isfile(c) and os.access(c, os.X_OK):
+                return c
+        else:
+            try:
+                subprocess.check_output([c, "--version"], text=True, timeout=3,
+                                        stderr=subprocess.DEVNULL)
+                return c
+            except Exception:
+                pass
+    return None
+
+
+def _power_worker():
+    """Stream `macmon pipe` JSON lines; cache latest watts + GPU temp.
+
+    macmon reports SoC power without root. Runs forever, auto-restarting the
+    child if it dies. If macmon is missing, exits quietly (watts stay null).
+    """
+    binp = _macmon_bin()
+    if not binp:
+        return
+    while True:
+        try:
+            proc = subprocess.Popen(
+                [binp, "pipe", "-i", "2000"], stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL, text=True, bufsize=1)
+            for line in proc.stdout:
+                line = line.strip()
+                if not line or line[0] != "{":
+                    continue
+                try:
+                    d = json.loads(line)
+                except Exception:
+                    continue
+                cpu = d.get("cpu_power")
+                gpu = d.get("gpu_power")
+                ane = d.get("ane_power") or 0.0
+                total = d.get("all_power")
+                if total is None and cpu is not None and gpu is not None:
+                    total = cpu + gpu + ane
+                temp = (d.get("temp") or {}).get("gpu_temp_avg")
+                with _power_lock:
+                    _power_data.clear()
+                    _power_data.update({
+                        "cpu_watts": round(cpu, 1) if cpu is not None else None,
+                        "gpu_watts": round(gpu, 1) if gpu is not None else None,
+                        "total_watts": round(total, 1) if total is not None else None,
+                        "gpu_temp": round(temp) if temp is not None else None,
+                    })
+            proc.wait()
+        except Exception:
+            pass
+        time.sleep(5)  # child died; back off then relaunch
 
 
 def _decode_data_url_png(raw: str) -> bytes:
@@ -276,6 +364,8 @@ def _run_job(jid):
             "mode": "i2v" if opts.get("image") else "t2v",
             "prompt": opts["prompt"],
             "seconds": elapsed,
+            "tiling": opts.get("tiling"),
+            "tiling_forced": opts.get("tiling_forced", False),
             "created": datetime.now().isoformat(timespec="seconds"),
         }
         _set(jid, status="done", stage="done", progress=100, result=result)
@@ -404,6 +494,15 @@ class Handler(BaseHTTPRequestHandler):
             tiling = str(d.get("tiling", DEF_TILING))
             if tiling not in TILING_MODES:
                 tiling = DEF_TILING
+            # Memory guardrail: VAE decode with tiling="none" holds the whole
+            # frame stack in unified memory at once. On large clips that peak can
+            # exceed physical RAM and hang the whole machine. If the requested
+            # pixel*frame budget is heavy, force a safe tiling mode.
+            tiling_forced = False
+            px_frames = w * h * num_frames
+            if tiling == "none" and px_frames > NONE_TILING_PX_BUDGET:
+                tiling = "auto"
+                tiling_forced = True
             shift = d.get("shift", None)
             try:
                 shift = float(shift) if shift not in (None, "") else None
@@ -422,6 +521,7 @@ class Handler(BaseHTTPRequestHandler):
                 "shift": shift,
                 "trim_first_frames": max(0, min(4, int(d.get("trim_first_frames", DEF_TRIM_FIRST)))),
                 "seed": int(d.get("seed", 42)),
+                "tiling_forced": tiling_forced,
             }
             if opts["scheduler"] not in ("euler", "dpm++", "unipc"):
                 opts["scheduler"] = DEF_SCHEDULER
@@ -437,6 +537,7 @@ class Handler(BaseHTTPRequestHandler):
 
 def main():
     threading.Thread(target=_worker, daemon=True).start()
+    threading.Thread(target=_power_worker, daemon=True).start()
     srv = ThreadingHTTPServer((HOST, PORT), Handler)
     print(f"omlx-video ready at http://{HOST}:{PORT} "
           f"(weights_ready={_weights_ready()})", flush=True)

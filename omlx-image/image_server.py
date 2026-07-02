@@ -133,7 +133,9 @@ def _get(jid):
 def _sys_stats():
     """Best-effort Apple-Silicon GPU + unified-memory stats (no sudo needed)."""
     out = {"gpu_util": None, "gpu_mem_gb": None,
-           "mem_used_gb": None, "mem_total_gb": None}
+           "mem_used_gb": None, "mem_total_gb": None,
+           "cpu_watts": None, "gpu_watts": None, "total_watts": None,
+           "gpu_temp": None}
     try:
         io = subprocess.check_output(
             ["ioreg", "-r", "-c", "IOAccelerator", "-d", "1"],
@@ -167,7 +169,79 @@ def _sys_stats():
         out["mem_used_gb"] = round(used_pages * page / 1e9, 1)
     except Exception:
         pass
+    p = _power_latest()
+    if p:
+        out["cpu_watts"] = p.get("cpu_watts")
+        out["gpu_watts"] = p.get("gpu_watts")
+        out["total_watts"] = p.get("total_watts")
+        out["gpu_temp"] = p.get("gpu_temp")
     return out
+
+
+# --- Sudoless power monitor via `macmon pipe` (Apple Silicon) --------------
+_MACMON_CANDIDATES = ("/opt/homebrew/bin/macmon", "/usr/local/bin/macmon",
+                      "macmon")
+_power_lock = threading.Lock()
+_power_data = {}
+
+
+def _power_latest():
+    with _power_lock:
+        return dict(_power_data)
+
+
+def _macmon_bin():
+    for c in _MACMON_CANDIDATES:
+        if os.path.sep in c:
+            if os.path.isfile(c) and os.access(c, os.X_OK):
+                return c
+        else:
+            try:
+                subprocess.check_output([c, "--version"], text=True, timeout=3,
+                                        stderr=subprocess.DEVNULL)
+                return c
+            except Exception:
+                pass
+    return None
+
+
+def _power_worker():
+    """Stream `macmon pipe` JSON lines; cache latest watts + GPU temp."""
+    binp = _macmon_bin()
+    if not binp:
+        return
+    while True:
+        try:
+            proc = subprocess.Popen(
+                [binp, "pipe", "-i", "2000"], stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL, text=True, bufsize=1)
+            for line in proc.stdout:
+                line = line.strip()
+                if not line or line[0] != "{":
+                    continue
+                try:
+                    d = json.loads(line)
+                except Exception:
+                    continue
+                cpu = d.get("cpu_power")
+                gpu = d.get("gpu_power")
+                ane = d.get("ane_power") or 0.0
+                total = d.get("all_power")
+                if total is None and cpu is not None and gpu is not None:
+                    total = cpu + gpu + ane
+                temp = (d.get("temp") or {}).get("gpu_temp_avg")
+                with _power_lock:
+                    _power_data.clear()
+                    _power_data.update({
+                        "cpu_watts": round(cpu, 1) if cpu is not None else None,
+                        "gpu_watts": round(gpu, 1) if gpu is not None else None,
+                        "total_watts": round(total, 1) if total is not None else None,
+                        "gpu_temp": round(temp) if temp is not None else None,
+                    })
+            proc.wait()
+        except Exception:
+            pass
+        time.sleep(5)
 
 
 def _worker():
@@ -366,6 +440,7 @@ class Handler(BaseHTTPRequestHandler):
 
 def main():
     threading.Thread(target=_worker, daemon=True).start()
+    threading.Thread(target=_power_worker, daemon=True).start()
     srv = ThreadingHTTPServer((HOST, PORT), Handler)
     print(f"omlx-image ready at http://{HOST}:{PORT} "
           f"(weights_ready={eng.weights_ready()})", flush=True)
