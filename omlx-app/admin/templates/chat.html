@@ -6649,7 +6649,7 @@
                         '<option value="euler">Euler</option>' +
                       '</select></div>' +
                     '<div><label style="display:block;font-size:12px;color:#8b949e">Guidance</label>' +
-                      '<input id="vidGuide" type="number" step="0.1" value="5.0" style="width:90px;background:#010409;border:1px solid #30363d;border-radius:8px;color:#e6edf3;padding:6px"></div>' +
+                      '<input id="vidGuide" type="number" step="0.1" value="3.5" style="width:90px;background:#010409;border:1px solid #30363d;border-radius:8px;color:#e6edf3;padding:6px"></div>' +
                     '<div><label style="display:block;font-size:12px;color:#8b949e">VAE tiling</label>' +
                       '<select id="vidTiling" style="background:#010409;border:1px solid #30363d;border-radius:8px;color:#e6edf3;padding:6px">' +
                         '<option value="auto" selected>Auto (safe — recommended)</option>' +
@@ -6658,7 +6658,7 @@
                         '<option value="none">None (max quality — short clips only)</option>' +
                       '</select></div>' +
                   '</div>' +
-                  '<div style="font-size:11px;color:#8b949e;margin-top:8px">💡 Quality knobs are maxed by default. VAE tiling <b>Auto</b> keeps memory safe; <b>None</b> is highest fidelity but only for short/low-res clips — heavy clips are auto-switched to Auto to avoid exhausting memory. Reference image below seeds image-to-video (first frame). Wan2.2-TI2V-5B has no separate last frame.</div>' +
+                  '<div style="font-size:11px;color:#8b949e;margin-top:8px">💡 Quality knobs are maxed by default. VAE tiling <b>Auto</b> keeps memory safe; <b>None</b> is highest fidelity but only for short/low-res clips — heavy clips are auto-switched to Auto to avoid exhausting memory. This model is <b>image-to-video</b>: a <b>start / first-frame image is required</b> below. Wan2.2-I2V-A14B supports only a first frame — no separate last-frame or reference image.</div>' +
                 '</div>' +
                 // ---- shared: seed + generate ----
                 '<div style="display:flex;gap:10px;flex-wrap:wrap;margin-top:10px;align-items:flex-end">' +
@@ -6745,7 +6745,7 @@
             if (imgPollTimer) { clearInterval(imgPollTimer); imgPollTimer = null; }
             if (isVid) {
                 if ($('imgRefWrap')) $('imgRefWrap').style.display = 'block';
-                if ($('imgRefLabel')) $('imgRefLabel').innerHTML = 'Reference / first-frame image (optional — enables image-to-video)';
+                if ($('imgRefLabel')) $('imgRefLabel').innerHTML = 'Start / first-frame image (required — this model is image-to-video). No last-frame/reference support.';
                 vidCheckHealth();
             } else {
                 if ($('imgRefLabel')) $('imgRefLabel').innerHTML = 'Reference image (required for Kontext)';
@@ -6866,10 +6866,10 @@
             try {
                 const h = await (await fetch(VIDEO_URL + '/health')).json();
                 if (!h.weights_ready) {
-                    s.innerHTML = '⏳ Wan2.2 weights still downloading — video generation will fail until they finish.';
+                    s.innerHTML = '⏳ Wan2.2-I2V-A14B weights not loaded — video generation will fail until they finish.';
                     s.style.color = '#d29922';
                 } else {
-                    s.innerHTML = '✓ Wan2.2-TI2V-5B ready. 512p ~3.5s clip renders in ~1–2 min (first run loads the model, slower).';
+                    s.innerHTML = '✓ Wan2.2-I2V-A14B ready (needs a start image). 512p ~3.5s clip renders in a few min (first run loads the 14B model, slower).';
                     s.style.color = '#3fb950';
                 }
             } catch (e) {
@@ -6892,6 +6892,7 @@
                     fr.readAsDataURL(f);
                 });
             }
+            if (!refImage) { $('imgStatus').innerHTML = 'This model is image-to-video — upload a start / first-frame image first.'; $('imgStatus').style.color = '#f85149'; return; }
             const body = {
                 prompt: prompt,
                 res: ($('vidRes') && $('vidRes').value) || '512p',
@@ -6899,7 +6900,7 @@
                 duration_seconds: parseFloat(($('vidDur') && $('vidDur').value) || '3.5') || 3.5,
                 steps: parseInt(($('vidSteps') && $('vidSteps').value), 10) || 60,
                 scheduler: ($('vidScheduler') && $('vidScheduler').value) || 'unipc',
-                guide_scale: parseFloat(($('vidGuide') && $('vidGuide').value) || '5.0') || 5.0,
+                guide_scale: parseFloat(($('vidGuide') && $('vidGuide').value) || '3.5') || 3.5,
                 tiling: ($('vidTiling') && $('vidTiling').value) || 'auto',
                 seed: parseInt($('imgSeed').value, 10) || 42,
             };

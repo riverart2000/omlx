@@ -14,7 +14,7 @@
         <key>VIDEO_PORT</key>
         <string>8500</string>
         <key>WAN_MODEL_DIR</key>
-        <string>/Users/joebains/.omlx/models/Anes1032/Wan2.2-TI2V-5B-mlx-q8</string>
+        <string>/Users/joebains/.omlx/models/Anes1032/Wan2.2-I2V-A14B-mlx-q8</string>
     </dict>
     <key>RunAtLoad</key>
     <true/>

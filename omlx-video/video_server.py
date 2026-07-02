@@ -1,14 +1,18 @@
 #!/usr/bin/env python3
-"""omlx-video — local Wan2.2-TI2V-5B text+image-to-video microservice (port 8500).
+"""omlx-video — local Wan2.2-I2V-A14B image-to-video microservice (port 8500).
 
 Mirrors the omlx-image (:8400) pattern: a tiny stdlib HTTP server with an async
 job API and a single serialized worker (video generation is very compute-bound,
 so we run exactly one at a time). Generation is delegated to mlx-video's
 `mlx_video.models.wan_2.generate` CLI running in this service's own venv.
 
-Quality-first defaults (per user): 720p 1280x704, 24fps, unipc scheduler, 40
-steps. Frame count must be 4n+1; duration_seconds is converted to the nearest
-valid frame count at 24fps.
+Model: Wan2.2-I2V-A14B (MLX q8) — a much higher-quality 14B dual-model than the
+old TI2V-5B. It is IMAGE-TO-VIDEO only, so every request MUST include a start
+image (the UI's "reference / first frame"). Native output is 16fps.
+
+Quality-first defaults: 512p (short side 512, user-selectable up to 720p), 16fps,
+unipc scheduler, 60 steps. Frame count must be 4n+1; duration_seconds is
+converted to the nearest valid frame count at 16fps.
 
 Endpoints:
   GET  /health             -> service + weights status
@@ -41,16 +45,23 @@ os.makedirs(TMP_DIR, exist_ok=True)
 
 MODEL_DIR = os.environ.get(
     "WAN_MODEL_DIR",
-    "/Users/joebains/.omlx/models/Anes1032/Wan2.2-TI2V-5B-mlx-q8",
+    "/Users/joebains/.omlx/models/Anes1032/Wan2.2-I2V-A14B-mlx-q8",
 )
 VENV_PY = os.environ.get("VIDEO_PY", os.path.join(BASE_DIR, ".venv", "bin", "python"))
 
-FPS = 24  # Wan2.2 TI2V output is fixed 24fps.
+# Wan2.2-I2V-A14B (dual-model, image-to-video only). Weight files differ from the
+# old single-model 5B (high_noise_model + low_noise_model instead of model).
+MODEL_LABEL = "Wan2.2-I2V-A14B (MLX q8)"
+MODEL_WEIGHT_FILES = ["high_noise_model.safetensors", "low_noise_model.safetensors",
+                      "t5_encoder.safetensors", "vae.safetensors", "config.json"]
+I2V_ONLY = True  # this model has no pure text-to-video path; a start image is required
+
+FPS = 16  # Wan2.2-I2V-A14B native output is 16fps.
 # Quality-first defaults. Target 512p (short side 512), all quality knobs maxed.
 DEF_WIDTH = 896
 DEF_HEIGHT = 512
 DEF_STEPS = 60           # max-quality by default (server clamps to [10,60])
-DEF_GUIDE = 5.0
+DEF_GUIDE = 3.5          # A14B dual-model config default (sample_guide_scale=[3.5,3.5])
 DEF_SCHEDULER = "unipc"  # official / highest-quality 2nd-order solver
 DEF_TILING = "auto"      # SAFE default: bounds VAE-decode peak memory so a
                          # long/high-res clip can't exhaust unified memory and
@@ -101,9 +112,8 @@ _work_cv = threading.Condition()
 
 
 def _weights_ready() -> bool:
-    need = ["model.safetensors", "t5_encoder.safetensors", "vae.safetensors",
-            "config.json"]
-    return all(os.path.isfile(os.path.join(MODEL_DIR, n)) for n in need)
+    return all(os.path.isfile(os.path.join(MODEL_DIR, n))
+               for n in MODEL_WEIGHT_FILES)
 
 
 def _scripts_available() -> bool:
@@ -111,7 +121,7 @@ def _scripts_available() -> bool:
 
 
 def _frames_for_seconds(sec: float) -> int:
-    """Wan2.2 requires num_frames == 4n+1. Convert seconds@24fps to nearest valid."""
+    """Wan2.2 requires num_frames == 4n+1. Convert seconds@16fps to nearest valid."""
     sec = max(MIN_SECONDS, min(MAX_SECONDS, float(sec)))
     raw = int(round(sec * FPS))
     n = max(1, round((raw - 1) / 4))
@@ -349,8 +359,11 @@ def _run_job(jid):
     opts = job["opts"]
     try:
         if not _weights_ready():
-            raise RuntimeError("Wan2.2 weights are still downloading — try "
-                               "again once model.safetensors finishes")
+            raise RuntimeError("Wan2.2-I2V-A14B weights are missing or still "
+                               "downloading — check the model directory")
+        if I2V_ONLY and not opts.get("image"):
+            raise RuntimeError("This model is image-to-video only — a start "
+                               "image is required")
         _set(jid, stage="loading model + encoders (first run is slow)", progress=3)
         name, elapsed = _run_generate(jid, opts)
         _set(jid, stage="saving", progress=96)
@@ -415,13 +428,16 @@ class Handler(BaseHTTPRequestHandler):
                 "ok": True,
                 "scripts_available": _scripts_available(),
                 "weights_ready": _weights_ready(),
+                "model": MODEL_LABEL,
                 "model_dir": MODEL_DIR,
+                "i2v_only": I2V_ONLY,
                 "queue": len(_work_q),
             })
         if path == "/info":
             return self._json(200, {
-                "model": "Wan2.2-TI2V-5B (MLX q8)",
-                "modes": ["t2v", "i2v"],
+                "model": MODEL_LABEL,
+                "modes": ["i2v"],
+                "i2v_only": I2V_ONLY,
                 "fps": FPS,
                 "presets": PRESETS,
                 "res_presets": RES_PRESETS,
@@ -474,6 +490,9 @@ class Handler(BaseHTTPRequestHandler):
             prompt = (d.get("prompt") or "").strip()
             if not prompt:
                 return self._json(400, {"error": "prompt is required"})
+            if I2V_ONLY and not (d.get("image") or "").strip():
+                return self._json(400, {"error": "This model is image-to-video "
+                                        "only — a reference / start image is required"})
             res = str(d.get("res") or DEF_RES)
             if res not in RES_PRESETS:
                 res = DEF_RES
