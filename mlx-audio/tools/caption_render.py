@@ -142,8 +142,10 @@ def render_card(spec, item, path):
     s_lh = s_asc + s_desc + int(s_size * 0.2)
     block_h = t_lh * len(t_lines) + (int(t_size * 0.4) + s_lh * len(s_lines)
                                      if s_lines else 0)
-    # Hook cards sit in the upper-middle for impact.
-    y = int(H * 0.30) - block_h // 2
+    # Hook cards sit in the lower third (same safe-zone as captions) so they
+    # clear the speaker's face. Bottom-anchored so taller cards grow upward.
+    y = int(H * 0.86) - block_h
+    y = max(y, int(H * 0.55))
 
     for line in t_lines:
         txt = " ".join(line)

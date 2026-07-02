@@ -109,11 +109,41 @@ DEFAULT_FILLERS = [
 VIDEO_EXTS = {".mp4", ".mov", ".mkv", ".webm", ".avi", ".m4v"}
 CI_ENHANCE_BIN = os.path.join(BASE_DIR, "tools", "ci_enhance")
 CAPTION_BIN = os.path.join(BASE_DIR, "tools", "caption_render.py")
+# Bump when caption/card layout or styling in caption_render.py changes so the
+# overlay (ovl_*) cache is invalidated and frames are re-rendered.
+OVERLAY_STYLE_VERSION = 3
 ASPECTS = {"9:16": (9, 16), "16:9": (16, 9), "1:1": (1, 1),
            "4:5": (4, 5), "original": None}
 VOCAB_PATH = os.path.join(BASE_DIR, "voice_vocab.json")
 CAPTION_LLM = ("porschefreak--Huihui-Qwen3.6-35B-A3B-Claude-4.7-Opus-"
                "abliterated-mlx-6Bit")
+# Selectable director/caption LLMs served by omlx-server (:8000). The user can
+# switch at runtime from the Viral Studio UI to compare model behaviour on the
+# same edit (plan decisions, highlight selection, captions, revise).
+LLM_CHOICES = [
+    {"id": CAPTION_LLM,
+     "label": "Qwen3.6 35B · Claude-Opus abliterated (default)"},
+    {"id": "Ornith-1.0-35B-8bit", "label": "Ornith 1.0 · 35B 8bit"},
+]
+_llm_lock = threading.Lock()
+_current_llm = CAPTION_LLM
+
+
+def _get_llm() -> str:
+    with _llm_lock:
+        return _current_llm
+
+
+def _set_llm(model_id: str) -> str:
+    """Switch the active director/caption LLM. Only ids in LLM_CHOICES allowed."""
+    global _current_llm
+    if model_id not in {c["id"] for c in LLM_CHOICES}:
+        raise ValueError(f"unknown model: {model_id}")
+    with _llm_lock:
+        _current_llm = model_id
+    return model_id
+
+
 OMLX_URL = "http://127.0.0.1:8000/v1/chat/completions"
 MEMORY_URL = os.environ.get("MEM_URL", "http://127.0.0.1:8300")
 TRANSCRIPT_COLLECTION = "video_transcripts"
@@ -1161,7 +1191,7 @@ def _llm_json(messages: list, max_tokens: int = 6000, temp: float = 0.7):
     """Call the local oMLX LLM and parse a JSON object from the reply. Tolerant
     of markdown fences, leading reasoning, and truncated output."""
     import urllib.request
-    body = json.dumps({"model": CAPTION_LLM, "messages": messages,
+    body = json.dumps({"model": _get_llm(), "messages": messages,
                        "temperature": temp, "max_tokens": max_tokens,
                        "stream": False}).encode()
     req = urllib.request.Request(OMLX_URL, data=body,
@@ -1195,48 +1225,65 @@ def _kept_line_indices(lines: list, keeps: list | None) -> set:
 def _gen_captions(lines: list, want_captions: bool = True, want_cards: bool = True,
                   topic: str = "", length_target: str = "auto",
                   keep_idx: set | None = None) -> dict:
-    """Use the LLM to rewrite transcript lines into punchy condensed captions
-    and/or a few concept/hook cards. Returns {captions:[...], cards:[...]} keyed
-    by line index 'i'. Captions are processed in batches so the model never has
-    to return more JSON than fits in one reply (avoids truncation on long
-    videos). Either pass can be skipped independently. When keep_idx is given,
-    only those line indices are sent to the LLM — so we never spend compute
-    writing captions for footage the edit cuts out."""
+    """Use the LLM to SELECT the strongest moments and write a few high-quality
+    on-screen captions for them (not a line-by-line rewrite), plus optional
+    concept/hook cards. Returns {captions:[...], cards:[...]} keyed by line index
+    'i'. When keep_idx is given, only those lines are candidates — so we never
+    spend compute on footage the edit cuts out."""
     sys_msg = (
-        "You are an elite short-form (TikTok/Reels/YouTube Shorts) video "
-        "editor. You write on-screen captions that drive retention. Output "
-        "ONLY one valid JSON object, no prose, no markdown.")
+        "You are an elite short-form (TikTok/Reels/YouTube Shorts) video editor "
+        "and copywriter. You write a SMALL number of bold, high-impact on-screen "
+        "captions that hook viewers and drive retention. Output ONLY one valid "
+        "JSON object, no prose, no markdown.")
     lt = VIRAL_LENGTH_TARGETS.get(length_target, "")
     idxs = (sorted(keep_idx) if keep_idx is not None else list(range(len(lines))))
-    payload = [{"i": i, "t": lines[i]["t"]} for i in idxs if 0 <= i < len(lines)]
+    payload = [{"i": i, "t": lines[i]["t"], "s": round(lines[i]["start"], 1)}
+               for i in idxs if 0 <= i < len(lines)]
 
-    def _caption_batch(batch_payload):
+    # Few, high-quality captions: ~1 per 7s of kept content, capped low so they
+    # stay sparse and meaningful.
+    span = (payload[-1]["s"] - payload[0]["s"]) if len(payload) >= 2 else 7.0
+    target_count = max(2, min(10, round(span / 7.0))) if payload else 0
+
+    def _select(chunk, n):
         ask = (
-            "Rewrite each transcript line into a punchy on-screen caption that "
-            "captures the MEANING — condensed, 2 to 5 words, NOT a literal copy "
-            "of the words. Keep the speaker's intent. Pick 1 word per caption to "
-            "emphasise. Keep the SAME 'i' index for each line.\n")
+            f"From these transcript lines, choose only the {n} MOST powerful "
+            "moments to put a caption on screen — a sharp hook, a bold claim, a "
+            "punchline, or a surprising/emotional beat. SKIP setup, filler, "
+            "throat-clearing and repetition. For each chosen line write ONE "
+            "punchy caption of 3 to 6 words that lands the IDEA in the speaker's "
+            "voice (NOT a transcription), and pick 1 to 2 words to EMPHASISE. "
+            "Spread the picks across the timeline; never caption adjacent "
+            "lines.\n")
         if lt:
-            ask += "Edit goal: " + lt + "\n"
+            ask += "Edit vibe: " + lt + "\n"
         if topic:
-            ask += f"Video topic/voice: {topic}\n"
+            ask += f"Topic/voice: {topic}\n"
         ask += ('Return JSON exactly: {"captions":[{"i":<int>,"text":"...",'
-                '"emphasis":["..."]}]}\nLines: ' + json.dumps(batch_payload))
+                '"emphasis":["..."]}]} using each line\'s given i.\nLines: '
+                + json.dumps(chunk))
         return _llm_json([{"role": "system", "content": sys_msg},
-                          {"role": "user", "content": ask}])
+                          {"role": "user", "content": ask}], temp=0.6)
 
     caps = {}
-    if want_captions:
-        batch = 18
-        for s in range(0, len(payload), batch):
-            chunk = payload[s:s + batch]
+    if want_captions and payload:
+        # One selective call when the candidate set is reasonable; otherwise
+        # chunk it and give each chunk a proportional quota.
+        if len(payload) <= 120:
+            chunks = [(payload, target_count)]
+        else:
+            csz = 80
+            parts = [payload[s:s + csz] for s in range(0, len(payload), csz)]
+            chunks = [(p, max(1, round(target_count * len(p) / len(payload))))
+                      for p in parts]
+        for chunk, n in chunks:
+            if n <= 0:
+                continue
             try:
-                out = _caption_batch(chunk)
+                out = _select(chunk, n)
             except Exception:
-                # Retry this batch once; if it still fails, those lines fall back
-                # to literal transcript text in _build_overlays.
                 try:
-                    out = _caption_batch(chunk)
+                    out = _select(chunk, n)
                 except Exception:
                     continue
             for c in out.get("captions", []):
@@ -1290,21 +1337,42 @@ def _build_overlays(lines: list, gen: dict, keeps: list,
         return [_txt(e) for e in (v or []) if _txt(e)]
 
     if include_captions:
+        cap_items = []
         for i, ln in enumerate(lines):
             c = caps.get(i)
-            text = (_txt(c.get("text")) if c else "") or ln["t"]
+            if not c:
+                continue  # selective: only the LLM-chosen moments get a caption
+            text = _txt(c.get("text"))
+            if not text:
+                continue
             a = _remap_time(ln["start"], keeps)
             b = _remap_time(ln["end"], keeps)
             if a is None:
                 a = _remap_time(ln["start"] + 0.05, keeps)
             if b is None:
                 b = _remap_time(ln["end"] - 0.05, keeps)
-            if a is None or b is None or b - a < 0.25:
+            if a is None or b is None or b - a < 0.05:
                 continue
-            items.append({"id": f"cap{i}", "type": "caption", "text": text,
-                          "emphasis": _emph(c.get("emphasis")) if c else [],
-                          "a": round(a, 2), "b": round(b, 2)})
+            cap_items.append({"id": f"cap{i}", "type": "caption", "text": text,
+                              "emphasis": _emph(c.get("emphasis")),
+                              "a": round(a, 2), "b": round(b, 2)})
+        # Hold each caption on screen longer (min ~3.2s), but never overlap the
+        # next one and never run past the end of the output.
+        cap_items.sort(key=lambda it: it["a"])
+        out_dur = sum(max(0.0, float(b) - float(a)) for a, b in keeps) if keeps else None
+        MIN_HOLD = 3.2
+        for k, it in enumerate(cap_items):
+            end = max(it["b"], it["a"] + MIN_HOLD)
+            if k + 1 < len(cap_items):
+                end = min(end, cap_items[k + 1]["a"] - 0.2)
+            if out_dur:
+                end = min(end, out_dur - 0.05)
+            if end - it["a"] < 0.8:
+                end = it["a"] + 0.8
+            it["b"] = round(end, 2)
+        items.extend(cap_items)
     if include_cards:
+        card_items = []
         for j, card in enumerate(gen.get("cards", [])):
             try:
                 i = int(card.get("i", 0))
@@ -1315,12 +1383,28 @@ def _build_overlays(lines: list, gen: dict, keeps: list,
             ln = lines[i]
             a = _remap_time(ln["start"], keeps)
             if a is None:
+                a = _remap_time(ln["start"] + 0.05, keeps)
+            if a is None:
                 continue
-            b = a + 2.2
-            items.append({"id": f"card{j}", "type": "card",
-                          "title": _txt(card.get("title", "")),
-                          "subtitle": _txt(card.get("subtitle", "")),
-                          "a": round(a, 2), "b": round(b, 2)})
+            card_items.append({"id": f"card{j}", "type": "card",
+                               "title": _txt(card.get("title", "")),
+                               "subtitle": _txt(card.get("subtitle", "")),
+                               "a": round(a, 2), "b": round(a + 2.2, 2)})
+        # Hold each card on screen longer (min ~4.5s) so they don't flash, but
+        # never overlap the next card or run past the end of the output.
+        card_items.sort(key=lambda it: it["a"])
+        out_dur = sum(max(0.0, float(b) - float(a)) for a, b in keeps) if keeps else None
+        CARD_HOLD = 4.5
+        for k, it in enumerate(card_items):
+            end = it["a"] + CARD_HOLD
+            if k + 1 < len(card_items):
+                end = min(end, card_items[k + 1]["a"] - 0.2)
+            if out_dur:
+                end = min(end, out_dur - 0.05)
+            if end - it["a"] < 1.5:
+                end = it["a"] + 1.5
+            it["b"] = round(end, 2)
+        items.extend(card_items)
     return items
 
 
@@ -1811,36 +1895,151 @@ def _lines_to_intervals(lines: list, idx: list, dur: float, pad: float = 0.15):
 
 
 def _director_highlights(lines: list, target_sec: int, topic: str = "") -> list:
-    """Ask the LLM to pick the line indices that form the strongest viral story
-    at roughly the target length. Returns a sorted list of kept line indices."""
-    payload = [{"i": i, "t": ln["t"], "s": round(ln["start"], 1),
-                "e": round(ln["end"], 1)} for i, ln in enumerate(lines)]
+    """Assemble a highlight cut from the BEST moments spread across the WHOLE
+    video. The transcript is divided into sequential sections spanning the entire
+    duration and the LLM picks the single strongest self-contained moment from
+    EACH section — this forces coverage across the timeline instead of the model
+    front-loading its picks from the opening. Returns sorted kept line indices
+    whose total duration is close to target_sec."""
+    n = len(lines)
+    if n == 0:
+        return []
+
+    # How many moments to stitch together (≈1 every 8s of target), and the
+    # section boundaries that span the entire video.
+    n_clips = max(3, min(12, round(target_sec / 8.0)))
+    n_clips = min(n_clips, n)
+    buckets = []
+    for k in range(n_clips):
+        lo = (k * n) // n_clips
+        hi = ((k + 1) * n) // n_clips
+        hi = max(hi, lo + 1)
+        buckets.append((lo, min(hi, n)))
+
+    sections = [{"section": k,
+                 "lines": [{"i": i, "t": lines[i]["t"]} for i in range(lo, hi)]}
+                for k, (lo, hi) in enumerate(buckets)]
+
     sys_msg = (
-        "You are an elite short-form video editor assembling a HIGHLIGHT cut. "
-        "Choose the lines that tell the most engaging, coherent viral story at "
-        "the target length: a strong hook up front, momentum in the middle, a "
-        "clear payoff. Drop rambling, repetition and weak filler. Output ONLY "
-        "one valid JSON object.")
-    ask = (f"Target final length: about {target_sec} seconds. From the numbered "
-           f"transcript lines (with start 's' / end 'e' seconds), select the "
-           f"line indices to KEEP so the kept duration is close to the target "
-           f"and the result is punchy and coherent. Prefer contiguous runs.\n")
+        "You are an elite short-form video editor assembling a HIGHLIGHT REEL "
+        "from a longer video. You stitch together the most exciting, "
+        "self-contained moments from ACROSS THE WHOLE video — a strong hook, the "
+        "punchiest insights, the best payoff — into one tight viral cut. Output "
+        "ONLY one valid JSON object.")
+    per = max(3, round(target_sec / max(1, n_clips)))
+    ask = (
+        f"This transcript is split into {n_clips} sequential SECTIONS that span "
+        f"the entire video from start to end. From EACH section, choose the ONE "
+        f"strongest, most engaging self-contained moment as a CONTIGUOUS line "
+        f"range [a..b] (about {per} seconds, using the line 'i' indices). Return "
+        f"exactly one segment per section so the final reel pulls the best bits "
+        f"from throughout — NOT just the beginning. Rate each moment 1-10 "
+        f"(10 = must-keep hook/payoff).\n")
     if topic:
         ask += f"Topic/voice: {topic}\n"
-    ask += ('Return JSON exactly: {"keep":[<int>,...]}\nLines: '
-            + json.dumps(payload))
+    ask += ('Return JSON exactly: {"segments":[{"section":<int>,"a":<int>,'
+            '"b":<int>,"score":<1-10>}]}\nSections: ' + json.dumps(sections))
     out = _llm_json([{"role": "system", "content": sys_msg},
-                     {"role": "user", "content": ask}], temp=0.5)
-    keep = out.get("keep") or out.get("keeps") or []
-    idx = []
-    for k in keep:
+                     {"role": "user", "content": ask}], temp=0.4)
+
+    # Map each section to its pick, clamped to that section's line range.
+    def seg_dur(a, b):
+        return max(0.0, lines[b]["end"] - lines[a]["start"])
+
+    # Cap any single moment so the model can't hand back a giant range that
+    # blows the length budget (keeps the reel tight and the picks usable).
+    cap = max(4.0, per * 1.8)
+
+    def _cap_b(a, b):
+        while b > a and seg_dur(a, b) > cap:
+            b -= 1
+        return b
+
+    by_section = {}
+    for s in (out.get("segments") or []):
         try:
-            ki = int(k)
-        except (TypeError, ValueError):
+            a = int(s["a"]); b = int(s["b"]); sc = float(s.get("score", 5))
+            sec = int(s.get("section", -1))
+        except (TypeError, ValueError, KeyError):
             continue
-        if 0 <= ki < len(lines):
-            idx.append(ki)
-    return sorted(set(idx))
+        a, b = min(a, b), max(a, b)
+        # Snap into the bucket this segment belongs to (by its own index if the
+        # section label is missing/wrong).
+        bk = None
+        if 0 <= sec < len(buckets):
+            bk = buckets[sec]
+        else:
+            for lo, hi in buckets:
+                if lo <= a < hi:
+                    bk = (lo, hi); break
+        if not bk:
+            continue
+        lo, hi = bk
+        a = max(lo, min(a, hi - 1))
+        b = max(a, min(b, hi - 1))
+        b = _cap_b(a, b)
+        prev = by_section.get((lo, hi))
+        if prev is None or sc > prev[0]:
+            by_section[(lo, hi)] = (sc, a, b)
+
+    # Ensure EVERY section contributes something: synthesize a midpoint pick for
+    # any section the model skipped, so coverage spans the whole video.
+    picks = []
+    for lo, hi in buckets:
+        if (lo, hi) in by_section:
+            sc, a, b = by_section[(lo, hi)]
+        else:
+            mid = (lo + hi) // 2
+            a = mid
+            b = mid
+            # grow to ~per seconds within the bucket
+            while b + 1 < hi and seg_dur(a, b + 1) < per:
+                b += 1
+            sc = 4.0
+        picks.append((sc, a, b))
+
+    # picks already span the timeline (one per section). If their combined
+    # duration overshoots the target, drop the weakest sections (keeps spread);
+    # never drop below 3 clips.
+    total = sum(seg_dur(a, b) for _, a, b in picks)
+    if total > target_sec * 1.15 and len(picks) > 3:
+        order = sorted(range(len(picks)), key=lambda j: picks[j][0])  # weakest first
+        keep_flags = [True] * len(picks)
+        for j in order:
+            if total <= target_sec * 1.05 or sum(keep_flags) <= 3:
+                break
+            keep_flags[j] = False
+            total -= seg_dur(picks[j][1], picks[j][2])
+        picks = [p for p, f in zip(picks, keep_flags) if f]
+
+    chosen = set()
+    for _, a, b in picks:
+        for i in range(a, b + 1):
+            chosen.add(i)
+    return sorted(chosen)
+
+
+def _fallback_highlights(lines: list, target: float, dur: float) -> list:
+    """Deterministic last-resort selection that STILL spreads across the whole
+    video (not just the front): sample evenly-spaced short runs across the full
+    duration until we reach the target length."""
+    n = len(lines)
+    if n == 0:
+        return []
+    n_clips = max(3, min(10, round(target / 8.0)))
+    n_clips = min(n_clips, n)
+    per = max(2.0, target / n_clips)
+    chosen = set()
+    for k in range(n_clips):
+        center_t = dur * (k + 0.5) / n_clips
+        # nearest line to this evenly-spaced point in the timeline
+        ci = min(range(n), key=lambda i: abs((lines[i]["start"] + lines[i]["end"]) / 2 - center_t))
+        a = b = ci
+        while b + 1 < n and (lines[b]["end"] - lines[a]["start"]) < per:
+            b += 1
+        for i in range(a, b + 1):
+            chosen.add(i)
+    return sorted(chosen)
 
 
 def _ensure_highlights(plan: dict, lines: list, dur: float, topic: str = "") -> dict:
@@ -1855,12 +2054,32 @@ def _ensure_highlights(plan: dict, lines: list, dur: float, topic: str = "") -> 
         return plan
     if plan.get("highlights") and plan.get("highlights_for") == length:
         return plan
+    # If the source is already within ~15% of the target there is nothing to
+    # trim — keep everything (no highlight windows).
+    if dur <= target * 1.15:
+        plan["highlights"] = []
+        plan["highlights_for"] = length
+        return plan
+    idx = []
     try:
         idx = _director_highlights(lines, target, topic)
+    except Exception as e:
+        print(f"[highlights] LLM error: {e}", flush=True)
+        idx = []
+    iv = _lines_to_intervals(lines, idx, dur) if idx else []
+    kept = sum(b - a for a, b in iv) if iv else 0.0
+    llm_ok = bool(iv) and kept <= target * 1.4
+    # Guarantee the length is obeyed: if the model gave nothing, or its pick is
+    # still far longer than the target, fall back to a deterministic trim.
+    if not llm_ok:
+        idx = _fallback_highlights(lines, target, dur)
         iv = _lines_to_intervals(lines, idx, dur)
-        plan["highlights"] = [[round(a, 2), round(b, 2)] for a, b in (iv or [])]
-    except Exception:
-        plan["highlights"] = []
+    span = (max(b for a, b in iv) - min(a for a, b in iv)) if iv else 0.0
+    print(f"[highlights] target={target}s dur={dur:.0f}s lines={len(lines)} "
+          f"llm_idx={len(idx)} llm_ok={llm_ok} windows={len(iv)} "
+          f"kept={sum(b-a for a,b in iv):.1f}s span={span:.0f}s "
+          f"first={iv[0] if iv else None}", flush=True)
+    plan["highlights"] = [[round(a, 2), round(b, 2)] for a, b in (iv or [])]
     plan["highlights_for"] = length
     return plan
 
@@ -1949,7 +2168,8 @@ def _director_execute(jid: str, path: str, plan: dict, sess: str | None = None) 
         lines = _segment_lines(prep["words"])
         gen = plan["gen"]
         ovl_key = _sig(_file_sig(cur), st["captions"], st["cards"],
-                       gen["captions"], gen["cards"], out_keeps)
+                       gen["captions"], gen["cards"], out_keeps,
+                       OVERLAY_STYLE_VERSION)
         ovl_path = _cache_path("ovl", ovl_key)
         if os.path.exists(ovl_path):
             cur = ovl_path
@@ -2644,6 +2864,9 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/history":
             self._json(200, {"history": _history_list()})
             return
+        if path == "/llm":
+            self._json(200, {"choices": LLM_CHOICES, "current": _get_llm()})
+            return
         if path == "/cleanup/status":
             from urllib.parse import parse_qs
             qs = parse_qs(urlparse(self.path).query)
@@ -2729,6 +2952,12 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(200, {"ok": _ref_delete(data.get("id", ""))})
         if path == "/cleanup":
             return self._cleanup(data)
+        if path == "/llm":
+            try:
+                cur = _set_llm(data.get("model", ""))
+                return self._json(200, {"ok": True, "current": cur})
+            except ValueError as e:
+                return self._json(400, {"error": str(e)})
         if path in ("/director/prep", "/director/plan", "/director/revise", "/director/render"):
             return self._director(path, data)
         self._json(404, {"error": "not found"})
@@ -3440,6 +3669,11 @@ STUDIO_HTML = r"""<!DOCTYPE html>
       <summary>🎬 Viral Studio &mdash; AI-directed viral edit (3 stages, collaborative)</summary>
       <div style="margin-top:12px">
         <div class="hint">Turn a plain video into a viral clip in three cached stages. <b>1)</b> Lock the look (denoise + light/colour). <b>2)</b> Let the AI direct the edit &mdash; refine it together. <b>3)</b> Pick your editing options and render. Each stage is cached, so iterating is fast.</div>
+        <div class="row" style="margin-top:10px;align-items:center;gap:8px">
+          <div class="field" style="flex:1"><label>🧠 Director AI model <span class="hint">switch to compare how different models edit</span></label>
+            <select id="dLlm" style="width:100%"></select></div>
+          <div id="dLlmMsg" class="hint" style="min-width:120px"></div>
+        </div>
 
         <!-- STAGE 1 — FOUNDATION -->
         <div class="card" style="margin:12px 0 0;background:#161a22;border-left:3px solid #4ea1ff">
@@ -3518,8 +3752,8 @@ STUDIO_HTML = r"""<!DOCTYPE html>
             <label class="toggle"><input type="checkbox" id="sFillers"> Cut fillers (um/uh)</label>
             <label class="toggle"><input type="checkbox" id="sSilence"> Trim silences</label>
             <label class="toggle"><input type="checkbox" id="sPunch"> Push-in motion</label>
-            <label class="toggle"><input type="checkbox" id="sCaptions"> Smart captions</label>
-            <label class="toggle"><input type="checkbox" id="sCards"> Hook cards</label>
+            <label class="toggle"><input type="checkbox" id="sCaptions" name="overlay"> Smart captions</label>
+            <label class="toggle"><input type="checkbox" id="sCards" name="overlay"> Hook cards</label>
           </div>
           <div class="row" style="margin-top:10px">
             <div class="spacer"></div>
@@ -4029,7 +4263,9 @@ function dShowPlan(plan){
   if(typeof s.enhance_face==='boolean') $('fFace').checked=s.enhance_face;
   // Stage 3 editing toggles.
   $('sFillers').checked=!!s.remove_fillers; $('sSilence').checked=!!s.remove_silences;
-  $('sPunch').checked=!!s.punch_in; $('sCaptions').checked=!!s.captions; $('sCards').checked=!!s.cards;
+  $('sPunch').checked=!!s.punch_in;
+  // Captions and hook cards are mutually exclusive; captions win if both set.
+  $('sCaptions').checked=!!s.captions; $('sCards').checked=!!s.cards && !s.captions;
   const hl=plan.highlights||[];
   if(hl.length){ const secs=hl.reduce((t,p)=>t+(p[1]-p[0]),0);
     $('dHl').innerHTML='✂ <b>Highlight cut active</b> — '+hl.length+' segment'+(hl.length>1?'s':'')+' kept (~'+Math.round(secs)+'s) to hit the length target. Change <b>Length</b> and Revise (or just Make it happen) to re-pick.'; }
@@ -4121,13 +4357,36 @@ $('dPrepBtn').onclick=dPrep;
 $('dPlanBtn').onclick=dPlanRun;
 $('dReviseBtn').onclick=dRevise;
 $('dRenderBtn').onclick=dRender;
+// ---- Director AI model switcher ----
+async function dLoadLlm(){
+  try{
+    const d=await (await fetch('/llm')).json();
+    const sel=$('dLlm'); sel.innerHTML='';
+    (d.choices||[]).forEach(c=>{ const o=document.createElement('option');
+      o.value=c.id; o.textContent=c.label; if(c.id===d.current) o.selected=true;
+      sel.appendChild(o); });
+  }catch(e){}
+}
+$('dLlm').addEventListener('change',async()=>{
+  const model=$('dLlm').value; const m=$('dLlmMsg'); m.textContent='switching…';
+  try{
+    const r=await fetch('/llm',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({model})});
+    const d=await r.json(); if(!r.ok||d.error) throw new Error(d.error||('HTTP '+r.status));
+    const lbl=$('dLlm').options[$('dLlm').selectedIndex].text;
+    m.textContent='✓ using '+lbl;
+    dMsg('Director AI switched to '+lbl+' — re-run stage 2 to compare.');
+  }catch(e){ m.textContent='switch failed'; }
+});
+// Captions and hook cards are mutually exclusive: either one, or neither.
+$('sCaptions').addEventListener('change',()=>{ if($('sCaptions').checked) $('sCards').checked=false; });
+$('sCards').addEventListener('change',()=>{ if($('sCards').checked) $('sCaptions').checked=false; });
 $('dAddCard').onclick=()=>{ const wrap=$('dCards'); const div=document.createElement('div');
   div.className='dcard'; div.dataset.i=0; div.style.cssText='display:flex;gap:6px;margin-bottom:6px;align-items:center';
   div.innerHTML=`<input class="dcard-i" type="number" value="0" style="width:64px"><input class="dcard-title" placeholder="title" style="flex:1"><input class="dcard-sub" placeholder="subtitle" style="flex:2"><button class="mini dcard-del" type="button">&times;</button>`;
   wrap.appendChild(div); div.querySelector('.dcard-del').onclick=()=>{ div.remove(); $('dCardCount').textContent=document.querySelectorAll('.dcard').length; };
   $('dCardCount').textContent=document.querySelectorAll('.dcard').length; };
 
-syncLabels(); applyStyle('natural'); loadEngines(); loadHistory(); poll(); setInterval(poll,2500);
+syncLabels(); applyStyle('natural'); loadEngines(); loadHistory(); dLoadLlm(); poll(); setInterval(poll,2500);
 $('clEnhance').onchange();
 $('clAspect').onchange();
 $('clCaptions').onchange();

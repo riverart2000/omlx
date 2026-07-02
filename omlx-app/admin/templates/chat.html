@@ -6556,6 +6556,7 @@
 
         // ---------- Image Studio overlay (HiDream-O1 text-to-image) ----------
         const IMAGE_URL = (window.OLMLX_IMAGE_URL || 'http://127.0.0.1:8400').replace(/\/$/, '');
+        const VIDEO_URL = (window.OLMLX_VIDEO_URL || 'http://127.0.0.1:8500').replace(/\/$/, '');
         let imgPollTimer = null;
         function openImageStudio() {
             let ov = document.getElementById('omlx-image-overlay');
@@ -6575,7 +6576,7 @@
             bar.style.cssText = 'display:flex;align-items:center;justify-content:space-between;' +
                 'padding:8px 12px;background:#161b22;border-bottom:1px solid #30363d;flex-shrink:0;';
             bar.innerHTML = '<span style="font-size:13px;font-weight:600;color:#e6edf3;display:flex;gap:8px;align-items:center;">' +
-                '<i data-lucide="image" class="w-4 h-4"></i> Image Studio — HiDream + Kontext</span>';
+                '<i data-lucide="image" class="w-4 h-4"></i> Image &amp; Video Studio — HiDream · Kontext · Wan2.2</span>';
             const closeBtn = document.createElement('button');
             closeBtn.innerHTML = '<i data-lucide="x" class="w-4 h-4"></i>';
             closeBtn.title = 'Close';
@@ -6587,10 +6588,15 @@
             body.style.cssText = 'flex:1;overflow:auto;padding:14px;color:#e6edf3;font-size:13px;';
             body.innerHTML =
                 '<div id="imgStatus" style="font-size:12px;color:#8b949e;margin-bottom:10px"></div>' +
+                '<div style="display:inline-flex;background:#010409;border:1px solid #30363d;border-radius:9px;padding:3px;margin-bottom:12px">' +
+                  '<button id="imgModeImage" type="button" data-mode="image" class="imgModeBtn" style="background:#238636;border:none;border-radius:6px;color:#fff;padding:6px 16px;font-weight:600;font-size:12px;cursor:pointer">🖼 Image</button>' +
+                  '<button id="imgModeVideo" type="button" data-mode="video" class="imgModeBtn" style="background:transparent;border:none;border-radius:6px;color:#8b949e;padding:6px 16px;font-weight:600;font-size:12px;cursor:pointer">🎬 Video</button>' +
+                '</div>' +
                 '<label style="display:block;font-weight:600;margin-bottom:4px">Prompt</label>' +
                 '<textarea id="imgPrompt" rows="3" placeholder="a cinematic portrait of a red fox in autumn forest, golden light, 85mm" ' +
                 'style="width:100%;background:#010409;border:1px solid #30363d;border-radius:8px;color:#e6edf3;padding:8px;resize:vertical"></textarea>' +
-                '<div style="display:flex;gap:10px;flex-wrap:wrap;margin-top:10px;align-items:flex-end">' +
+                // ---- IMAGE controls ----
+                '<div id="imgImageControls" style="display:flex;gap:10px;flex-wrap:wrap;margin-top:10px;align-items:flex-end">' +
                   '<div><label style="display:block;font-size:12px;color:#8b949e">Engine</label>' +
                     '<select id="imgEngine" style="background:#010409;border:1px solid #30363d;border-radius:8px;color:#e6edf3;padding:6px">' +
                       '<option value="hidream">HiDream text-to-image</option>' +
@@ -6606,15 +6612,58 @@
                     '</select></div>' +
                   '<div><label style="display:block;font-size:12px;color:#8b949e">Steps</label>' +
                     '<input id="imgSteps" type="number" min="4" max="50" value="28" style="width:80px;background:#010409;border:1px solid #30363d;border-radius:8px;color:#e6edf3;padding:6px"></div>' +
-                  '<div><label style="display:block;font-size:12px;color:#8b949e">Seed</label>' +
-                    '<input id="imgSeed" type="number" value="32" style="width:110px;background:#010409;border:1px solid #30363d;border-radius:8px;color:#e6edf3;padding:6px"></div>' +
                   '<div id="imgGuidanceWrap" style="display:none"><label style="display:block;font-size:12px;color:#8b949e">Guidance</label>' +
                     '<input id="imgGuidance" type="number" step="0.1" value="2.8" style="width:90px;background:#010409;border:1px solid #30363d;border-radius:8px;color:#e6edf3;padding:6px"></div>' +
+                '</div>' +
+                // ---- VIDEO controls (Wan2.2, :8500) ----
+                '<div id="imgVideoControls" style="display:none">' +
+                  '<div style="display:flex;gap:10px;flex-wrap:wrap;margin-top:10px;align-items:flex-end">' +
+                    '<div><label style="display:block;font-size:12px;color:#8b949e">Resolution</label>' +
+                      '<select id="vidRes" style="background:#010409;border:1px solid #30363d;border-radius:8px;color:#e6edf3;padding:6px">' +
+                        '<option value="512p" selected>512p (default)</option>' +
+                        '<option value="720p">720p (higher quality)</option>' +
+                      '</select></div>' +
+                    '<div><label style="display:block;font-size:12px;color:#8b949e">Aspect</label>' +
+                      '<select id="vidAspect" style="background:#010409;border:1px solid #30363d;border-radius:8px;color:#e6edf3;padding:6px">' +
+                        '<option value="9:16" selected>9:16 vertical</option>' +
+                        '<option value="16:9">16:9 wide</option>' +
+                        '<option value="1:1">1:1 square</option>' +
+                        '<option value="4:5">4:5 portrait</option>' +
+                        '<option value="3:2">3:2</option>' +
+                      '</select></div>' +
+                    '<div><label style="display:block;font-size:12px;color:#8b949e">Duration (s)</label>' +
+                      '<input id="vidDur" type="number" min="1" max="8" step="0.5" value="3.5" style="width:80px;background:#010409;border:1px solid #30363d;border-radius:8px;color:#e6edf3;padding:6px"></div>' +
+                  '</div>' +
+                  '<div style="display:flex;gap:10px;flex-wrap:wrap;margin-top:10px;align-items:flex-end">' +
+                    '<div><label style="display:block;font-size:12px;color:#8b949e">Steps</label>' +
+                      '<input id="vidSteps" type="number" min="10" max="60" value="60" style="width:80px;background:#010409;border:1px solid #30363d;border-radius:8px;color:#e6edf3;padding:6px"></div>' +
+                    '<div><label style="display:block;font-size:12px;color:#8b949e">Scheduler</label>' +
+                      '<select id="vidScheduler" style="background:#010409;border:1px solid #30363d;border-radius:8px;color:#e6edf3;padding:6px">' +
+                        '<option value="unipc" selected>UniPC (best)</option>' +
+                        '<option value="dpm++">DPM++</option>' +
+                        '<option value="euler">Euler</option>' +
+                      '</select></div>' +
+                    '<div><label style="display:block;font-size:12px;color:#8b949e">Guidance</label>' +
+                      '<input id="vidGuide" type="number" step="0.1" value="5.0" style="width:90px;background:#010409;border:1px solid #30363d;border-radius:8px;color:#e6edf3;padding:6px"></div>' +
+                    '<div><label style="display:block;font-size:12px;color:#8b949e">VAE tiling</label>' +
+                      '<select id="vidTiling" style="background:#010409;border:1px solid #30363d;border-radius:8px;color:#e6edf3;padding:6px">' +
+                        '<option value="none" selected>None (max quality)</option>' +
+                        '<option value="auto">Auto (safe memory)</option>' +
+                        '<option value="conservative">Conservative</option>' +
+                        '<option value="aggressive">Aggressive (low mem)</option>' +
+                      '</select></div>' +
+                  '</div>' +
+                  '<div style="font-size:11px;color:#8b949e;margin-top:8px">💡 Highest-quality knobs are on by default. Reference image below seeds image-to-video (used as the <b>first frame</b>). Wan2.2-TI2V-5B doesn\'t support a separate last frame.</div>' +
+                '</div>' +
+                // ---- shared: seed + generate ----
+                '<div style="display:flex;gap:10px;flex-wrap:wrap;margin-top:10px;align-items:flex-end">' +
+                  '<div><label style="display:block;font-size:12px;color:#8b949e">Seed</label>' +
+                    '<input id="imgSeed" type="number" value="32" style="width:110px;background:#010409;border:1px solid #30363d;border-radius:8px;color:#e6edf3;padding:6px"></div>' +
                   '<button id="imgDice" type="button" title="Random seed" style="background:#21262d;border:1px solid #30363d;border-radius:8px;color:#e6edf3;padding:7px 10px;cursor:pointer">🎲</button>' +
                   '<button id="imgGo" type="button" style="background:#238636;border:none;border-radius:8px;color:#fff;padding:8px 16px;font-weight:600;cursor:pointer">Generate</button>' +
                 '</div>' +
                 '<div id="imgRefWrap" style="display:none;margin-top:10px">' +
-                  '<label style="display:block;font-size:12px;color:#8b949e;margin-bottom:4px">Reference image (required for Kontext)</label>' +
+                  '<label id="imgRefLabel" style="display:block;font-size:12px;color:#8b949e;margin-bottom:4px">Reference image (required for Kontext)</label>' +
                   '<input id="imgRefFile" type="file" accept="image/*" style="display:block;width:100%;color:#c9d1d9">' +
                 '</div>' +
                 '<div id="imgProgWrap" style="display:none;margin-top:12px">' +
@@ -6634,10 +6683,37 @@
 
             const $ = id => document.getElementById(id);
             $('imgDice').onclick = () => { $('imgSeed').value = Math.floor(Math.random() * 1e9); };
-            $('imgGo').onclick = imgGenerate;
+            $('imgGo').onclick = () => { (imgMode === 'video') ? vidGenerate() : imgGenerate(); };
             $('imgEngine').onchange = imgEngineChanged;
+            $('imgModeImage').onclick = () => imgSetMode('image');
+            $('imgModeVideo').onclick = () => imgSetMode('video');
             imgEngineChanged();
-            imgCheckHealth();
+            imgSetMode('image');
+        }
+
+        let imgMode = 'image';
+        function imgSetMode(mode) {
+            imgMode = (mode === 'video') ? 'video' : 'image';
+            const $ = id => document.getElementById(id);
+            const isVid = imgMode === 'video';
+            if ($('imgImageControls')) $('imgImageControls').style.display = isVid ? 'none' : 'flex';
+            if ($('imgVideoControls')) $('imgVideoControls').style.display = isVid ? 'block' : 'none';
+            // segmented button styling
+            const on = 'background:#238636;border:none;border-radius:6px;color:#fff;padding:6px 16px;font-weight:600;font-size:12px;cursor:pointer';
+            const off = 'background:transparent;border:none;border-radius:6px;color:#8b949e;padding:6px 16px;font-weight:600;font-size:12px;cursor:pointer';
+            if ($('imgModeImage')) $('imgModeImage').style.cssText = isVid ? off : on;
+            if ($('imgModeVideo')) $('imgModeVideo').style.cssText = isVid ? on : off;
+            if ($('imgResult')) $('imgResult').innerHTML = '';
+            if ($('imgProgWrap')) $('imgProgWrap').style.display = 'none';
+            if (imgPollTimer) { clearInterval(imgPollTimer); imgPollTimer = null; }
+            if (isVid) {
+                if ($('imgRefWrap')) $('imgRefWrap').style.display = 'block';
+                if ($('imgRefLabel')) $('imgRefLabel').innerHTML = 'Reference / first-frame image (optional — enables image-to-video)';
+                vidCheckHealth();
+            } else {
+                if ($('imgRefLabel')) $('imgRefLabel').innerHTML = 'Reference image (required for Kontext)';
+                imgEngineChanged();
+            }
         }
 
         function imgEngineChanged() {
@@ -6745,6 +6821,94 @@
                     }
                 } catch (e) { /* transient */ }
             }, 1200);
+        }
+
+        async function vidCheckHealth() {
+            const s = document.getElementById('imgStatus'); if (!s) return;
+            try {
+                const h = await (await fetch(VIDEO_URL + '/health')).json();
+                if (!h.weights_ready) {
+                    s.innerHTML = '⏳ Wan2.2 weights still downloading — video generation will fail until they finish.';
+                    s.style.color = '#d29922';
+                } else {
+                    s.innerHTML = '✓ Wan2.2-TI2V-5B ready. 512p ~3.5s clip renders in ~1–2 min (first run loads the model, slower).';
+                    s.style.color = '#3fb950';
+                }
+            } catch (e) {
+                s.innerHTML = '⚠ Video service not reachable on :8500. Start it: <code>bash ~/omlx-video/video.sh start</code>';
+                s.style.color = '#f85149';
+            }
+        }
+
+        async function vidGenerate() {
+            const $ = id => document.getElementById(id);
+            const prompt = ($('imgPrompt').value || '').trim();
+            if (!prompt) { $('imgStatus').innerHTML = 'Enter a prompt first.'; $('imgStatus').style.color = '#f85149'; return; }
+            let refImage = '';
+            const f = $('imgRefFile') && $('imgRefFile').files && $('imgRefFile').files[0];
+            if (f) {
+                refImage = await new Promise((resolve, reject) => {
+                    const fr = new FileReader();
+                    fr.onload = () => resolve(String(fr.result || ''));
+                    fr.onerror = () => reject(new Error('failed to read reference image'));
+                    fr.readAsDataURL(f);
+                });
+            }
+            const body = {
+                prompt: prompt,
+                res: ($('vidRes') && $('vidRes').value) || '512p',
+                aspect: ($('vidAspect') && $('vidAspect').value) || '9:16',
+                duration_seconds: parseFloat(($('vidDur') && $('vidDur').value) || '3.5') || 3.5,
+                steps: parseInt(($('vidSteps') && $('vidSteps').value), 10) || 60,
+                scheduler: ($('vidScheduler') && $('vidScheduler').value) || 'unipc',
+                guide_scale: parseFloat(($('vidGuide') && $('vidGuide').value) || '5.0') || 5.0,
+                tiling: ($('vidTiling') && $('vidTiling').value) || 'none',
+                seed: parseInt($('imgSeed').value, 10) || 42,
+            };
+            if (refImage) body.image = refImage;
+            $('imgGo').disabled = true;
+            $('imgResult').innerHTML = '';
+            $('imgProgWrap').style.display = 'block';
+            $('imgProg').style.width = '0';
+            $('imgStage').textContent = 'Queued…';
+            try {
+                const r = await fetch(VIDEO_URL + '/generate', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+                const d = await r.json();
+                if (!r.ok || d.error) throw new Error(d.error || ('HTTP ' + r.status));
+                vidPoll(d.job_id);
+            } catch (e) {
+                $('imgStage').textContent = 'Error: ' + e.message;
+                $('imgGo').disabled = false;
+            }
+        }
+
+        function vidPoll(jid) {
+            const $ = id => document.getElementById(id);
+            if (imgPollTimer) clearInterval(imgPollTimer);
+            imgPollTimer = setInterval(async () => {
+                try {
+                    const d = await (await fetch(VIDEO_URL + '/status?id=' + encodeURIComponent(jid))).json();
+                    if (d.progress != null) $('imgProg').style.width = d.progress + '%';
+                    if (d.stage) $('imgStage').textContent = d.stage;
+                    if (d.status === 'done') {
+                        clearInterval(imgPollTimer); imgPollTimer = null;
+                        $('imgGo').disabled = false;
+                        const res = d.result;
+                        const url = VIDEO_URL + res.url;
+                        $('imgStage').textContent = 'Done in ' + res.seconds + 's — ' + res.width + '×' + res.height + ', ' + res.duration + 's ' + res.mode;
+                        $('imgResult').innerHTML =
+                            '<video src="' + url + '" controls autoplay loop muted playsinline style="max-width:100%;border-radius:10px;border:1px solid #30363d;background:#000"></video>' +
+                            '<div style="margin-top:8px;display:flex;gap:8px">' +
+                              '<a href="' + url + '" download="' + res.filename + '" style="background:#21262d;border:1px solid #30363d;border-radius:8px;color:#e6edf3;padding:7px 12px;text-decoration:none;font-size:12px">⬇ Download</a>' +
+                              '<a href="' + url + '" target="_blank" style="background:#21262d;border:1px solid #30363d;border-radius:8px;color:#e6edf3;padding:7px 12px;text-decoration:none;font-size:12px">↗ Open</a>' +
+                            '</div>';
+                    } else if (d.status === 'error') {
+                        clearInterval(imgPollTimer); imgPollTimer = null;
+                        $('imgGo').disabled = false;
+                        $('imgStage').textContent = 'Error: ' + (d.error || 'generation failed');
+                    }
+                } catch (e) { /* transient */ }
+            }, 1500);
         }
 
         if (synth) { loadVoices(); if (typeof synth.onvoiceschanged !== 'undefined') synth.onvoiceschanged = loadVoices; }

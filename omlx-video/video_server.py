@@ -46,26 +46,44 @@ MODEL_DIR = os.environ.get(
 VENV_PY = os.environ.get("VIDEO_PY", os.path.join(BASE_DIR, ".venv", "bin", "python"))
 
 FPS = 24  # Wan2.2 TI2V output is fixed 24fps.
-# Quality-first defaults.
-DEF_WIDTH = 1280
-DEF_HEIGHT = 704
-DEF_STEPS = 40
+# Quality-first defaults. Target 512p (short side 512), all quality knobs maxed.
+DEF_WIDTH = 896
+DEF_HEIGHT = 512
+DEF_STEPS = 60           # max-quality by default (server clamps to [10,60])
 DEF_GUIDE = 5.0
-DEF_SCHEDULER = "unipc"
+DEF_SCHEDULER = "unipc"  # official / highest-quality 2nd-order solver
+DEF_TILING = "none"      # no VAE tiling => no seams => highest fidelity (64GB M5)
+DEF_TRIM_FIRST = 0       # extra discarded temporal chunks (first-frame artifact fix)
 DEF_SECONDS = 3.5  # ~81 frames
 MAX_SECONDS = 8.0  # keep render time + memory sane on 64GB M5
 MIN_SECONDS = 1.0
 MAX_DIM = 1280
 MIN_DIM = 256
 
-# Aspect presets (width, height) — all divisible by 32, 720p-class.
-PRESETS = {
-    "16:9": (1280, 704),
-    "9:16": (704, 1280),
-    "1:1":  (960, 960),
-    "4:5":  (832, 1040),
-    "3:2":  (1152, 768),
+TILING_MODES = ("auto", "none", "default", "aggressive", "conservative",
+                "spatial", "temporal")
+
+# Aspect presets per resolution tier (width, height) — all divisible by 32.
+# 512p (short side ~512) is the default; 720p available for higher quality.
+RES_PRESETS = {
+    "512p": {
+        "16:9": (896, 512),
+        "9:16": (512, 896),
+        "1:1":  (512, 512),
+        "4:5":  (512, 640),
+        "3:2":  (768, 512),
+    },
+    "720p": {
+        "16:9": (1280, 704),
+        "9:16": (704, 1280),
+        "1:1":  (960, 960),
+        "4:5":  (832, 1040),
+        "3:2":  (1152, 768),
+    },
 }
+DEF_RES = "512p"
+# Backward-compatible flat preset map (defaults to the 512p tier).
+PRESETS = RES_PRESETS[DEF_RES]
 
 _jobs = {}
 _jobs_lock = threading.Lock()
@@ -149,6 +167,12 @@ def _run_generate(jid, opts):
         "--seed", str(opts["seed"]),
         "--output-path", out_path,
     ]
+    if opts.get("tiling"):
+        cmd += ["--tiling", opts["tiling"]]
+    if opts.get("shift") is not None:
+        cmd += ["--shift", str(opts["shift"])]
+    if int(opts.get("trim_first_frames") or 0) > 0:
+        cmd += ["--trim-first-frames", str(int(opts["trim_first_frames"]))]
     ref_path = None
     if opts.get("image"):
         ref_bytes = _decode_data_url_png(opts["image"])
@@ -270,13 +294,20 @@ class Handler(BaseHTTPRequestHandler):
                 "modes": ["t2v", "i2v"],
                 "fps": FPS,
                 "presets": PRESETS,
+                "res_presets": RES_PRESETS,
+                "res_default": DEF_RES,
+                "tiling_modes": list(TILING_MODES),
                 "defaults": {
+                    "res": DEF_RES,
                     "width": DEF_WIDTH, "height": DEF_HEIGHT,
                     "steps": DEF_STEPS, "guide_scale": DEF_GUIDE,
-                    "scheduler": DEF_SCHEDULER, "duration_seconds": DEF_SECONDS,
+                    "scheduler": DEF_SCHEDULER, "tiling": DEF_TILING,
+                    "trim_first_frames": DEF_TRIM_FIRST,
+                    "duration_seconds": DEF_SECONDS,
                 },
                 "limits": {"min_seconds": MIN_SECONDS, "max_seconds": MAX_SECONDS,
-                           "min_dim": MIN_DIM, "max_dim": MAX_DIM},
+                           "min_dim": MIN_DIM, "max_dim": MAX_DIM,
+                           "min_steps": 10, "max_steps": 60},
                 "weights_ready": _weights_ready(),
             })
         if path == "/status":
@@ -311,9 +342,14 @@ class Handler(BaseHTTPRequestHandler):
             prompt = (d.get("prompt") or "").strip()
             if not prompt:
                 return self._json(400, {"error": "prompt is required"})
-            preset = d.get("preset")
-            if preset in PRESETS:
-                w, h = PRESETS[preset]
+            res = str(d.get("res") or DEF_RES)
+            if res not in RES_PRESETS:
+                res = DEF_RES
+            aspect = d.get("aspect") or d.get("preset")
+            if aspect in RES_PRESETS[res]:
+                w, h = RES_PRESETS[res][aspect]
+            elif aspect in PRESETS:
+                w, h = PRESETS[aspect]
             else:
                 w = _even32(d.get("width", DEF_WIDTH))
                 h = _even32(d.get("height", DEF_HEIGHT))
@@ -323,6 +359,14 @@ class Handler(BaseHTTPRequestHandler):
             else:
                 nf = int(d.get("num_frames", 81))
                 num_frames = nf if (nf - 1) % 4 == 0 else _frames_for_seconds(nf / FPS)
+            tiling = str(d.get("tiling", DEF_TILING))
+            if tiling not in TILING_MODES:
+                tiling = DEF_TILING
+            shift = d.get("shift", None)
+            try:
+                shift = float(shift) if shift not in (None, "") else None
+            except (TypeError, ValueError):
+                shift = None
             opts = {
                 "prompt": prompt[:2000],
                 "image": d.get("image", ""),
@@ -332,6 +376,9 @@ class Handler(BaseHTTPRequestHandler):
                 "steps": max(10, min(60, int(d.get("steps", DEF_STEPS)))),
                 "guide_scale": float(d.get("guide_scale", DEF_GUIDE)),
                 "scheduler": str(d.get("scheduler", DEF_SCHEDULER)),
+                "tiling": tiling,
+                "shift": shift,
+                "trim_first_frames": max(0, min(4, int(d.get("trim_first_frames", DEF_TRIM_FIRST)))),
                 "seed": int(d.get("seed", 42)),
             }
             if opts["scheduler"] not in ("euler", "dpm++", "unipc"):
