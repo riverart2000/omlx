@@ -121,10 +121,16 @@ def _kokoro_voices() -> list:
     voices = []
     try:
         from glob import glob
-        repo = ENGINES["kokoro"]["repo"].replace("/", "--")
-        roots = [
-            os.path.expanduser(f"~/.cache/huggingface/hub/models--{repo}/snapshots"),
-            os.path.expanduser(f"~/.omlx/models/{ENGINES['kokoro']['repo']}"),
+        repo = ENGINES["kokoro"]["repo"]
+        roots = []
+        # If the repo is itself a local directory (e.g. an ~/.omlx/models path),
+        # look inside it directly.
+        if os.path.isdir(os.path.expanduser(repo)):
+            roots.append(os.path.expanduser(repo))
+        repo_slug = repo.replace("/", "--")
+        roots += [
+            os.path.expanduser(f"~/.cache/huggingface/hub/models--{repo_slug}/snapshots"),
+            os.path.expanduser(f"~/.omlx/models/{repo}"),
         ]
         for root in roots:
             hits = glob(os.path.join(root, "**", "voices", "*.safetensors"),

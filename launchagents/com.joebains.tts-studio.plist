@@ -26,6 +26,8 @@
         <string>/Users/joebains/mlx-audio/.venv/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
         <key>PHONEMIZER_ESPEAK_LIBRARY</key>
         <string>/opt/homebrew/opt/espeak-ng/lib/libespeak-ng.1.dylib</string>
+        <key>TTS_KOKORO</key>
+        <string>/Users/joebains/.omlx/models/mlx-community/Kokoro-82M-8bit</string>
     </dict>
 
     <key>RunAtLoad</key>
