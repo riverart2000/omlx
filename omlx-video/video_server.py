@@ -27,6 +27,7 @@ import json
 import os
 import re
 import shutil
+import ssl
 import subprocess
 import sys
 import threading
@@ -1202,6 +1203,18 @@ def _rv_headers():
             "Content-Type": "application/json"}
 
 
+def _rv_ssl_ctx():
+    """HTTPS context that trusts certifi's CA bundle. This venv's Python has no
+    linked system cert bundle (SSL_CERT_FILE unset, framework cert.pem missing),
+    so a plain urlopen to api.replicate.com / replicate.delivery fails with
+    CERTIFICATE_VERIFY_FAILED. Building the context from certifi fixes it."""
+    try:
+        import certifi
+        return ssl.create_default_context(cafile=certifi.where())
+    except Exception:
+        return ssl.create_default_context()
+
+
 def _rv_upload_file(path):
     """Upload a local file to Replicate's Files API; returns a served URL.
     More robust than data-URIs for audio/large images."""
@@ -1221,7 +1234,7 @@ def _rv_upload_file(path):
         RV_API + "/files", data=body, method="POST",
         headers={"Authorization": "Bearer " + RV_TOKEN,
                  "Content-Type": f"multipart/form-data; boundary={boundary}"})
-    with urllib.request.urlopen(req, timeout=120) as r:
+    with urllib.request.urlopen(req, timeout=120, context=_rv_ssl_ctx()) as r:
         resp = json.loads(r.read() or b"{}")
     url = (resp.get("urls") or {}).get("get") or resp.get("url")
     if not url:
@@ -1234,7 +1247,7 @@ def _rv_post_prediction(inp):
     payload = json.dumps({"version": RV_VERSION, "input": inp}).encode()
     req = urllib.request.Request(RV_API + "/predictions", data=payload,
                                  method="POST", headers=_rv_headers())
-    with urllib.request.urlopen(req, timeout=60) as r:
+    with urllib.request.urlopen(req, timeout=60, context=_rv_ssl_ctx()) as r:
         return json.loads(r.read() or b"{}")
 
 
@@ -1242,14 +1255,14 @@ def _rv_get_prediction(pid):
     import urllib.request
     req = urllib.request.Request(RV_API + "/predictions/" + pid, method="GET",
                                  headers=_rv_headers())
-    with urllib.request.urlopen(req, timeout=30) as r:
+    with urllib.request.urlopen(req, timeout=30, context=_rv_ssl_ctx()) as r:
         return json.loads(r.read() or b"{}")
 
 
 def _rv_download(url, dest):
     import urllib.request
     req = urllib.request.Request(url, method="GET")
-    with urllib.request.urlopen(req, timeout=300) as r, open(dest, "wb") as f:
+    with urllib.request.urlopen(req, timeout=300, context=_rv_ssl_ctx()) as r, open(dest, "wb") as f:
         shutil.copyfileobj(r, f)
 
 
