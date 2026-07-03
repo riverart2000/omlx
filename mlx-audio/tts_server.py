@@ -82,8 +82,111 @@ ENGINES = {
         "clone": False,
         "presets": True,
     },
+    "kokoro": {
+        "label": "Kokoro 82M — fast, natural (chat voice)",
+        "repo": os.environ.get("TTS_KOKORO", "mlx-community/Kokoro-82M-bf16"),
+        "clone": False,
+        "presets": False,
+        "kokoro": True,
+    },
 }
 DEFAULT_ENGINE = "higgs"
+
+# Default Kokoro voice for the in-chat reader. Overridable per request.
+KOKORO_DEFAULT_VOICE = os.environ.get("TTS_KOKORO_VOICE", "af_heart")
+
+# Curated fallback if the model's voice folder can't be enumerated. The live
+# list is discovered from the downloaded model at runtime (see _kokoro_voices).
+KOKORO_VOICES_FALLBACK = [
+    "af_heart", "af_bella", "af_nicole", "af_aoede", "af_kore", "af_sarah",
+    "af_nova", "af_sky", "am_michael", "am_fenrir", "am_puck", "am_adam",
+    "am_echo", "am_eric", "am_liam", "am_onyx",
+    "bf_emma", "bf_isabella", "bf_alice", "bf_lily",
+    "bm_george", "bm_daniel", "bm_fable", "bm_lewis",
+]
+_kokoro_voices_cache = None
+
+
+def _kokoro_voices() -> list:
+    """Discover installed Kokoro voice names from the model's voices folder
+    (HF cache snapshot). Cached after first lookup; falls back to a curated
+    English list if the folder isn't found."""
+    global _kokoro_voices_cache
+    if _kokoro_voices_cache is not None:
+        return _kokoro_voices_cache
+    voices = []
+    try:
+        from glob import glob
+        repo = ENGINES["kokoro"]["repo"].replace("/", "--")
+        roots = [
+            os.path.expanduser(f"~/.cache/huggingface/hub/models--{repo}/snapshots"),
+            os.path.expanduser(f"~/.omlx/models/{ENGINES['kokoro']['repo']}"),
+        ]
+        for root in roots:
+            hits = glob(os.path.join(root, "**", "voices", "*.safetensors"),
+                        recursive=True)
+            if hits:
+                voices = sorted({os.path.splitext(os.path.basename(h))[0]
+                                 for h in hits})
+                break
+    except Exception:
+        voices = []
+    _kokoro_voices_cache = voices or list(KOKORO_VOICES_FALLBACK)
+    return _kokoro_voices_cache
+
+
+def _kokoro_lang(voice: str) -> str:
+    """Kokoro derives its G2P language from the voice-name prefix letter
+    (a=American, b=British, j=Japanese, z=Mandarin, e=Spanish, f=French,
+    h=Hindi, i=Italian, p=Brazilian Portuguese). Fall back to American."""
+    c = (voice or "a")[:1].lower()
+    return c if c in "abjzefhip" else "a"
+
+
+_kokoro_patched = False
+
+
+def _patch_kokoro_sinegen() -> None:
+    """mlx_audio's Kokoro vocoder (istftnet.SineGen) crashes on certain inputs
+    with `[broadcast_shapes] Shapes (1,N,1) and (1,N+hop,9) cannot be broadcast`.
+
+    Root cause: SineGen._f02sine downsamples the F0 by 1/upsample_scale then
+    re-upsamples by upsample_scale; when the sequence length isn't divisible by
+    upsample_scale the round-trip returns a length that's off by one hop, so the
+    resulting `sine_waves` no longer matches `uv` (which stays at F0 resolution).
+    ~20% of normal chat sentences hit this and fail outright.
+
+    Fix: force `sine_waves` back to `uv`'s (true F0) length before combining —
+    exactly the length the non-crashing path already produces, so audio is
+    unchanged. Patched at the class level once, before any Kokoro generation."""
+    global _kokoro_patched
+    if _kokoro_patched:
+        return
+    try:
+        import mlx.core as mx
+        from mlx_audio.tts.models.kokoro import istftnet as _istft
+    except Exception as e:  # module not available yet / import error — non-fatal
+        print(f"[kokoro] SineGen patch skipped: {e}", flush=True)
+        return
+
+    def _sinegen_call(self, f0):
+        fn = f0 * mx.arange(1, self.harmonic_num + 2)[None, None, :]
+        sine_waves = self._f02sine(fn) * self.sine_amp
+        uv = self._f02uv(f0)
+        L = uv.shape[1]
+        t = sine_waves.shape[1]
+        if t > L:
+            sine_waves = sine_waves[:, :L, :]
+        elif t < L:
+            sine_waves = mx.pad(sine_waves, ((0, 0), (0, L - t), (0, 0)))
+        noise_amp = uv * self.noise_std + (1 - uv) * self.sine_amp / 3
+        noise = noise_amp * mx.random.normal(sine_waves.shape)
+        sine_waves = sine_waves * uv + noise
+        return sine_waves, uv, noise
+
+    _istft.SineGen.__call__ = _sinegen_call
+    _kokoro_patched = True
+    print("[kokoro] SineGen length-mismatch patch applied", flush=True)
 
 FORMATS = ["wav", "flac", "mp3"]
 MAX_CHARS = 20000
@@ -197,6 +300,8 @@ def _load_engine(engine: str):
         return _models[engine]
     from mlx_audio.tts.utils import load
     repo = ENGINES[engine]["repo"]
+    if ENGINES[engine].get("kokoro"):
+        _patch_kokoro_sinegen()   # harden the vocoder before first synthesis
     model = load(repo)
     _models[engine] = model
     return model
@@ -295,6 +400,11 @@ def _do_generate(p: dict) -> dict:
         kw["voice"] = p["voice"]
         kw["lang_code"] = _lang_for(p["voice"])
         kw["max_tokens"] = p["max_len"]
+    elif engine == "kokoro":
+        kw["voice"] = p["voice"]
+        kw["lang_code"] = _kokoro_lang(p["voice"])
+        kw["speed"] = float(p.get("speed") or 1.0)
+        kw["max_tokens"] = None
     else:  # higgs
         kw["max_tokens"] = None
         kw["max_new_frames"] = p["max_len"]
@@ -2842,7 +2952,8 @@ class Handler(BaseHTTPRequestHandler):
                 "engines": [{
                     "id": k, "label": v["label"], "clone": v["clone"],
                     "presets": v["presets"],
-                    "voices": VOXTRAL_VOICES if v["presets"] else [],
+                    "voices": (VOXTRAL_VOICES if v["presets"]
+                               else _kokoro_voices() if v.get("kokoro") else []),
                 } for k, v in ENGINES.items()],
                 "formats": FORMATS,
                 "sample_rates": SAMPLE_RATES,
@@ -2860,6 +2971,10 @@ class Handler(BaseHTTPRequestHandler):
                 "memory_url": MEMORY_URL,
                 "transcript_collection": TRANSCRIPT_COLLECTION,
             })
+            return
+        if path == "/say/voices":
+            self._json(200, {"voices": _kokoro_voices(),
+                             "default": KOKORO_DEFAULT_VOICE})
             return
         if path == "/history":
             self._json(200, {"history": _history_list()})
@@ -2936,6 +3051,8 @@ class Handler(BaseHTTPRequestHandler):
 
         if path == "/generate":
             return self._generate(data)
+        if path == "/say":
+            return self._say(data)
         if path == "/history/delete":
             return self._json(200, {"ok": _history_delete(data.get("id", ""))})
         if path == "/history/favorite":
@@ -3100,6 +3217,52 @@ class Handler(BaseHTTPRequestHandler):
         return self._json(200, {"ok": True, "job_id": jid})
 
     # ---- generate orchestration ----
+    def _say(self, data: dict):
+        """Low-latency chat reader: synthesize one short utterance with Kokoro
+        and stream the raw WAV back directly. No mastering/takes/history — kept
+        deliberately lean so the in-chat voice stays responsive."""
+        if not _worker_started.is_set():
+            return self._json(503, {"error": "starting up, try again shortly"})
+        text = (data.get("text") or "").strip()
+        if not text:
+            return self._json(400, {"error": "text is required"})
+        text = text[:1500]  # chat utterances are short; guard runaway inputs
+        voice = data.get("voice") or KOKORO_DEFAULT_VOICE
+        if voice not in _kokoro_voices():
+            voice = KOKORO_DEFAULT_VOICE
+        try:
+            speed = max(0.5, min(2.0, float(data.get("speed", 1.0))))
+        except Exception:
+            speed = 1.0
+        params = {
+            "engine": "kokoro",
+            "text": text,
+            "voice": voice,
+            "speed": speed,
+            "temperature": 0.7,
+            "top_p": 0.95,
+            "top_k": 50,
+            "max_len": None,
+            "seed": None,
+        }
+        res = _enqueue("gen", params, timeout=120)
+        if "error" in res:
+            return self._json(500, {"error": res["error"]})
+        raw = res.get("raw")
+        if not raw or not os.path.isfile(raw):
+            return self._json(500, {"error": "no audio produced"})
+        try:
+            with open(raw, "rb") as f:
+                audio = f.read()
+        finally:
+            _safe_rm(raw)
+        self.send_response(200)
+        self.send_header("Content-Type", "audio/wav")
+        self._cors()
+        self.send_header("Content-Length", str(len(audio)))
+        self.end_headers()
+        self.wfile.write(audio)
+
     def _generate(self, data: dict):
         if not _worker_started.is_set():
             return self._json(503, {"error": "starting up, try again shortly"})
@@ -3137,6 +3300,11 @@ class Handler(BaseHTTPRequestHandler):
         if ENGINES[engine]["presets"]:
             if voice not in VOXTRAL_VOICES:
                 return self._json(400, {"error": f"unknown voice '{voice}'"})
+        elif ENGINES[engine].get("kokoro"):
+            if voice == "neutral_female":
+                voice = KOKORO_DEFAULT_VOICE
+            if voice not in _kokoro_voices():
+                return self._json(400, {"error": f"unknown kokoro voice '{voice}'"})
         if ENGINES[engine]["clone"] and data.get("ref_id"):
             ref = _ref_get(data["ref_id"])
             if not ref:

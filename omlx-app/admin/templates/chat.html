@@ -6157,7 +6157,11 @@
 
     const LS_TTS = 'omlx_tts_enabled';
     const LS_VOICE = 'omlx_tts_voice';
+    const LS_KVOICE = 'omlx_tts_kvoice';   // selected Kokoro voice id
     const LS_RATE = 'omlx_tts_rate';
+
+    // High-quality neural chat voice (Kokoro-82M) served by the TTS sidecar (:8200).
+    const SAY_URL = (window.OLMLX_SAY_URL || 'http://127.0.0.1:8200').replace(/\/$/, '');
 
     const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
     const synth = window.speechSynthesis;
@@ -6196,6 +6200,7 @@
         const V = {
             ttsEnabled: localStorage.getItem(LS_TTS) === '1',
             voiceURI: localStorage.getItem(LS_VOICE) || '',
+            kvoice: localStorage.getItem(LS_KVOICE) || '',
             rate: parseFloat(localStorage.getItem(LS_RATE) || '1') || 1,
             spokenLen: 0,
             wasStreaming: false,
@@ -6232,7 +6237,7 @@
             }
             if (voiceSelect) renderVoiceOptions();
         }
-        function pickVoice() {
+        function pickBrowserVoice() {
             if (!voices.length) return null;
             return voices.find(v => v.voiceURI === V.voiceURI)
                 || voices.slice().sort((a, b) => voiceTier(b) - voiceTier(a))
@@ -6240,13 +6245,112 @@
                 || voices.find(v => v.default)
                 || voices[0];
         }
-        function speak(text) {
-            if (!synth || !V.ttsEnabled) return;
-            const clean = cleanForSpeech(text);
-            if (!clean) return;
-            for (const sentence of splitSentences(clean)) {
+
+        // ---------- Kokoro neural voice (sidecar :8200 /say) ----------
+        let kokoroVoices = [];        // [{id, label}]
+        let kokoroDefault = '';
+        let kokoroAvailable = false;
+        const sayQueue = [];          // sentences waiting to be synthesized (order preserved)
+        let sayPlaying = false;       // a /say request or playback is in flight
+        let sayGen = 0;               // bumped on stop to invalidate stale playback
+        let curAbort = null;          // AbortController for the in-flight /say fetch
+        let curAudioStop = null;      // stops+resolves the currently playing <audio>
+
+        const KLANG = { a: 'US', b: 'UK', j: 'JP', z: 'CN', e: 'ES', f: 'FR', h: 'HI', i: 'IT', p: 'BR' };
+        function kokoroLabel(id) {
+            const m = /^([a-z])([fm])_(.+)$/.exec(id || '');
+            if (!m) return id;
+            const lang = KLANG[m[1]] || m[1].toUpperCase();
+            const g = m[2] === 'f' ? '\u2640' : '\u2642';
+            const name = m[3].charAt(0).toUpperCase() + m[3].slice(1);
+            return name + ' \u00b7 ' + lang + ' ' + g;
+        }
+        function kLangRank(id) {                     // English first, then the rest
+            const c = (id || '').charAt(0);
+            return c === 'a' ? 0 : c === 'b' ? 1 : 2;
+        }
+        async function loadKokoroVoices() {
+            try {
+                const r = await fetch(SAY_URL + '/say/voices', { cache: 'no-store' });
+                if (!r.ok) throw new Error('HTTP ' + r.status);
+                const d = await r.json();
+                const ids = (d.voices || []).filter(Boolean);
+                if (!ids.length) throw new Error('no voices');
+                kokoroVoices = ids.map(id => ({ id, label: kokoroLabel(id) }))
+                    .sort((a, b) => kLangRank(a.id) - kLangRank(b.id) || a.label.localeCompare(b.label));
+                kokoroDefault = d.default || kokoroVoices[0].id;
+                kokoroAvailable = true;
+                if (!V.kvoice || !kokoroVoices.some(v => v.id === V.kvoice)) {
+                    V.kvoice = kokoroDefault;
+                    try { localStorage.setItem(LS_KVOICE, V.kvoice); } catch (e) {}
+                }
+                if (voiceSelect) renderVoiceOptions();
+            } catch (e) {
+                kokoroAvailable = false;              // sidecar down → browser-synth fallback
+                loadVoices();
+            }
+        }
+
+        function playBlob(blob) {
+            return new Promise(resolve => {
+                const url = URL.createObjectURL(blob);
+                const a = new Audio(url);
+                const done = () => { try { URL.revokeObjectURL(url); } catch (e) {} curAudioStop = null; resolve(); };
+                curAudioStop = () => { try { a.pause(); } catch (e) {} done(); };
+                a.onended = a.onerror = done;
+                a.play().catch(done);
+            });
+        }
+
+        async function pumpQueue() {
+            if (sayPlaying || !sayQueue.length) return;
+            sayPlaying = true;
+            const gen = sayGen;
+            const sentence = sayQueue[0];
+            try {
+                curAbort = new AbortController();
+                const r = await fetch(SAY_URL + '/say', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ text: sentence, voice: V.kvoice, speed: V.rate }),
+                    signal: curAbort.signal,
+                });
+                curAbort = null;
+                if (!r.ok) throw new Error('say ' + r.status);
+                const blob = await r.blob();
+                if (gen !== sayGen) { sayPlaying = false; return; }   // stopped while fetching
+                await playBlob(blob);
+                if (gen !== sayGen) { sayPlaying = false; return; }
+                sayQueue.shift();
+                V.pendingUtt = Math.max(0, V.pendingUtt - 1);
+            } catch (e) {
+                curAbort = null;
+                if ((e && e.name === 'AbortError') || gen !== sayGen) { sayPlaying = false; return; }
+                // Non-abort error: fall back to the browser voice for the rest of this turn.
+                sayQueue.shift();
+                V.pendingUtt = Math.max(0, V.pendingUtt - 1);
+                if (e instanceof TypeError) kokoroAvailable = false;   // sidecar unreachable
+                browserSpeak(sentence);
+            }
+            sayPlaying = false;
+            maybeResume();
+            if (sayQueue.length) {
+                if (kokoroAvailable) { pumpQueue(); }
+                else {
+                    const rest = sayQueue.splice(0);
+                    for (let i = 0; i < rest.length; i++) V.pendingUtt = Math.max(0, V.pendingUtt - 1);
+                    browserSpeak(rest);
+                }
+            }
+        }
+
+        function browserSpeak(sentences) {
+            if (!synth) return;
+            const arr = Array.isArray(sentences) ? sentences : [sentences];
+            for (const sentence of arr) {
+                if (!sentence) continue;
                 const u = new SpeechSynthesisUtterance(sentence);
-                const v = pickVoice();
+                const v = pickBrowserVoice();
                 if (v) { u.voice = v; u.lang = v.lang; }
                 u.rate = V.rate;
                 V.pendingUtt++;
@@ -6254,7 +6358,28 @@
                 synth.speak(u);
             }
         }
-        function stopSpeaking() { if (synth) synth.cancel(); V.pendingUtt = 0; }
+
+        function speak(text) {
+            if (!V.ttsEnabled) return;
+            const clean = cleanForSpeech(text);
+            if (!clean) return;
+            const sentences = splitSentences(clean);
+            if (kokoroAvailable) {
+                for (const s of sentences) { sayQueue.push(s); V.pendingUtt++; }
+                pumpQueue();
+            } else {
+                browserSpeak(sentences);
+            }
+        }
+        function stopSpeaking() {
+            sayGen++;                                 // invalidate any in-flight playback
+            sayQueue.length = 0;
+            if (curAbort) { try { curAbort.abort(); } catch (e) {} curAbort = null; }
+            if (curAudioStop) { try { curAudioStop(); } catch (e) {} }
+            sayPlaying = false;
+            if (synth) synth.cancel();
+            V.pendingUtt = 0;
+        }
 
         // Hands-free: once the model has finished both generating and speaking, reopen the mic.
         function maybeResume() {
@@ -6403,8 +6528,20 @@
         function tierLabel(t) { return t >= 3 ? '★★ ' : t === 2 ? '★ ' : ''; }
 
         function renderVoiceOptions() {
-            const cur = V.voiceURI;
+            if (!voiceSelect) return;
             voiceSelect.innerHTML = '';
+            if (kokoroAvailable) {                       // high-quality Kokoro voices
+                const cur = V.kvoice || kokoroDefault;
+                kokoroVoices.forEach(v => {
+                    const o = document.createElement('option');
+                    o.value = v.id;
+                    o.textContent = v.label;
+                    if (v.id === cur) o.selected = true;
+                    voiceSelect.appendChild(o);
+                });
+                return;
+            }
+            const cur = V.voiceURI;                      // browser-synth fallback
             const lang2 = (navigator.language || 'en').slice(0, 2).toLowerCase();
             const sorted = voices.slice().sort((a, b) => {
                 const ta = voiceTier(a), tb = voiceTier(b);
@@ -6437,7 +6574,16 @@
             voiceSelect.style.maxWidth = '150px';
             voiceSelect.style.height = '34px';
             voiceSelect.title = 'Voice';
-            voiceSelect.onchange = () => { V.voiceURI = voiceSelect.value; localStorage.setItem(LS_VOICE, V.voiceURI); };
+            voiceSelect.onchange = () => {
+                if (kokoroAvailable) {
+                    V.kvoice = voiceSelect.value;
+                    try { localStorage.setItem(LS_KVOICE, V.kvoice); } catch (e) {}
+                    stopSpeaking();
+                } else {
+                    V.voiceURI = voiceSelect.value;
+                    try { localStorage.setItem(LS_VOICE, V.voiceURI); } catch (e) {}
+                }
+            };
 
             // mic button
             micBtn = document.createElement('button');
@@ -7037,6 +7183,7 @@
         }
         window.vidSaveToDisk = vidSaveToDisk;
         injectControls();
+        loadKokoroVoices();
     });
 })();
 </script>

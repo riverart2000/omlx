@@ -1,0 +1,50 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.joebains.tts-studio</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/joebains/mlx-audio/.venv/bin/python</string>
+        <string>/Users/joebains/mlx-audio/tts_server.py</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/joebains/mlx-audio</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>TTS_HOST</key>
+        <string>127.0.0.1</string>
+        <key>TTS_PORT</key>
+        <string>8200</string>
+        <key>HOME</key>
+        <string>/Users/joebains</string>
+        <key>PATH</key>
+        <string>/Users/joebains/mlx-audio/.venv/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+        <key>PHONEMIZER_ESPEAK_LIBRARY</key>
+        <string>/opt/homebrew/opt/espeak-ng/lib/libespeak-ng.1.dylib</string>
+    </dict>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>KeepAlive</key>
+    <dict>
+        <key>SuccessfulExit</key>
+        <false/>
+        <key>Crashed</key>
+        <true/>
+    </dict>
+
+    <key>ThrottleInterval</key>
+    <integer>10</integer>
+
+    <key>StandardOutPath</key>
+    <string>/Users/joebains/mlx-audio/logs/tts_server.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/joebains/mlx-audio/logs/tts_server.log</string>
+</dict>
+</plist>
