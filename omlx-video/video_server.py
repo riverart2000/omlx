@@ -41,9 +41,13 @@ PORT = int(os.environ.get("VIDEO_PORT", "8500"))
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 OUT_DIR = os.path.join(BASE_DIR, "output")
 TMP_DIR = os.path.join(OUT_DIR, "_tmp")
+# Persistent archive of ORIGINAL cloud clips (per-segment + stitched, no
+# captions) so they can always be reused/re-stitched later.
+RV_RAW_DIR = os.path.join(OUT_DIR, "cloud_raw")
 SAVE_DIR = os.environ.get("VIDEO_SAVE_DIR", "/Users/joebains/Movies")
 os.makedirs(OUT_DIR, exist_ok=True)
 os.makedirs(TMP_DIR, exist_ok=True)
+os.makedirs(RV_RAW_DIR, exist_ok=True)
 
 MODEL_DIR = os.environ.get(
     "WAN_MODEL_DIR",
@@ -247,6 +251,134 @@ AV_CAPTIONS_PY = os.path.join(BASE_DIR, "captions.py")
 # job (see _free_chat_llm), so this is the floor to still refuse if something
 # else is hogging RAM. Same in-child MLX cap pattern as LongCat.
 AV_REQUIRED_FREE_GB = float(os.environ.get("AVATAR_REQUIRED_FREE_GB", "30"))
+
+# ---------------------------------------------------------------------------
+# Cloud avatar engine: PrunaAI p-video-avatar on Replicate. The fastest/cheapest
+# lip-sync avatar model — runs off-device, so it needs NO local memory and does
+# NOT unload the chat LLM. Reference photo + our TTS voiceover -> 720p/1080p
+# talking video, duration follows the audio. Captions are still burned locally.
+# Token is read from the oMLX .env (REPLICATE_API_TOKEN).
+# ---------------------------------------------------------------------------
+def _load_env_file(path):
+    """Minimal .env reader (KEY=VALUE lines) — no external deps."""
+    vals = {}
+    try:
+        with open(path) as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                k, v = line.split("=", 1)
+                vals[k.strip()] = v.strip().strip('"').strip("'")
+    except Exception:
+        pass
+    return vals
+
+RV_ENV_FILE = os.environ.get("OMLX_ENV_FILE", "/Users/joebains/.omlx/.env")
+_rv_env = _load_env_file(RV_ENV_FILE)
+RV_TOKEN = (os.environ.get("REPLICATE_API_TOKEN")
+            or _rv_env.get("REPLICATE_API_TOKEN") or "").strip()
+RV_MODEL = os.environ.get("REPLICATE_AVATAR_MODEL", "prunaai/p-video-avatar")
+# Pin the version we validated the schema against; refreshable via env.
+RV_VERSION = os.environ.get(
+    "REPLICATE_AVATAR_VERSION",
+    "8a54bb678ef43a7a40950731bad3f33f4ac904267fecebd2186c826a6da6f5a5")
+RV_API = "https://api.replicate.com/v1"
+RV_MODEL_LABEL = "PrunaAI p-video-avatar (Replicate cloud, 720p)"
+RV_RESOLUTIONS = ["720p"]
+RV_DEF_RES = "720p"
+RV_DEF_SECONDS = 10.0
+# Built-in cloud voices (Gemini-style prebuilt voices). The API accepts a free
+# string; these are the known-good options surfaced in the UI dropdown.
+RV_VOICES = [
+    "Zephyr (Female)", "Puck (Male)", "Charon (Male)", "Kore (Female)",
+    "Fenrir (Male)", "Leda (Female)", "Orus (Male)", "Aoede (Female)",
+    "Callirrhoe (Female)", "Autonoe (Female)", "Enceladus (Male)",
+    "Iapetus (Male)", "Umbriel (Male)", "Algieba (Male)", "Despina (Female)",
+    "Erinome (Female)", "Algenib (Male)", "Rasalgethi (Male)",
+    "Laomedeia (Female)", "Achernar (Female)", "Alnilam (Male)",
+    "Schedar (Male)", "Gacrux (Female)", "Pulcherrima (Female)",
+    "Achird (Male)", "Zubenelgenubi (Male)", "Vindemiatrix (Female)",
+    "Sadachbia (Male)", "Sadaltager (Male)", "Sulafat (Female)",
+]
+RV_DEF_VOICE = "Zephyr (Female)"
+# Only English (US/UK) per the product spec.
+RV_LANGUAGES = ["English (US)", "English (UK)"]
+RV_DEF_LANGUAGE = "English (US)"
+
+# Voice-delivery style presets -> sent as `voice_prompt` (how to speak).
+RV_VOICE_STYLES = [
+    {"id": "energetic", "label": "Upbeat & energetic",
+     "prompt": "Speak with high energy and enthusiasm, upbeat and lively, "
+               "like an exciting product launch."},
+    {"id": "friendly", "label": "Warm & friendly",
+     "prompt": "Speak in a warm, friendly, conversational tone, like talking "
+               "to a friend."},
+    {"id": "professional", "label": "Calm & professional",
+     "prompt": "Speak calmly and clearly with a confident, professional tone."},
+    {"id": "persuasive", "label": "Confident & persuasive",
+     "prompt": "Speak with a confident, persuasive sales tone, emphasising key "
+               "benefits and building urgency."},
+    {"id": "hype", "label": "Excited hype",
+     "prompt": "Speak with fast-paced, hyped-up excitement, punchy and "
+               "attention-grabbing for social media."},
+    {"id": "sincere", "label": "Soft & sincere",
+     "prompt": "Speak softly and sincerely, warm and heartfelt, building "
+               "trust and authenticity."},
+]
+RV_VOICE_STYLES_BY_ID = {s["id"]: s for s in RV_VOICE_STYLES}
+RV_DEF_VOICE_STYLE = "energetic"
+
+# On-screen behaviour/look presets -> sent as `video_prompt`.
+RV_VIDEO_STYLES = [
+    {"id": "direct", "label": "Direct to camera, natural",
+     "prompt": "The person looks directly at the camera and speaks naturally "
+               "with subtle, natural gestures and expressions."},
+    {"id": "presenter", "label": "Enthusiastic presenter",
+     "prompt": "The person is an enthusiastic presenter, expressive and "
+               "animated with lively hand gestures and a big smile."},
+    {"id": "spokesperson", "label": "Professional spokesperson",
+     "prompt": "The person is a polished professional spokesperson, composed "
+               "and confident with minimal, deliberate movement."},
+    {"id": "influencer", "label": "Casual influencer vibe",
+     "prompt": "The person has a casual, relatable social-media influencer "
+               "vibe, relaxed and friendly talking to camera."},
+    {"id": "salesperson", "label": "Confident salesperson",
+     "prompt": "The person is a confident salesperson, persuasive and engaging "
+               "with purposeful gestures that emphasise key points."},
+    {"id": "testimonial", "label": "Sincere testimonial",
+     "prompt": "The person gives a sincere, heartfelt testimonial, genuine and "
+               "trustworthy with warm expressions."},
+]
+RV_VIDEO_STYLES_BY_ID = {s["id"]: s for s in RV_VIDEO_STYLES}
+RV_DEF_VIDEO_STYLE = "direct"
+
+# Sensible per-video-type defaults for the two style dropdowns + voice.
+RV_TYPE_DEFAULTS = {
+    "talking_head":      {"voice_style": "professional", "video_style": "direct",       "voice": "Zephyr (Female)"},
+    "spokesperson":      {"voice_style": "professional", "video_style": "spokesperson", "voice": "Charon (Male)"},
+    "testimonial":       {"voice_style": "sincere",      "video_style": "testimonial",  "voice": "Leda (Female)"},
+    "ecommerce":         {"voice_style": "persuasive",   "video_style": "salesperson",  "voice": "Puck (Male)"},
+    "singing":           {"voice_style": "hype",         "video_style": "presenter",    "voice": "Aoede (Female)"},
+    "animated_character":{"voice_style": "energetic",    "video_style": "presenter",    "voice": "Puck (Male)"},
+    "news_educational":  {"voice_style": "professional", "video_style": "spokesperson", "voice": "Orus (Male)"},
+    "promo":             {"voice_style": "hype",         "video_style": "salesperson",  "voice": "Fenrir (Male)"},
+    "product_explainer": {"voice_style": "friendly",     "video_style": "presenter",    "voice": "Kore (Female)"},
+}
+RV_DEF_TYPE_DEFAULTS = {"voice_style": RV_DEF_VOICE_STYLE,
+                        "video_style": RV_DEF_VIDEO_STYLE, "voice": RV_DEF_VOICE}
+
+# Long scripts are split into ~10s chunks, each rendered as its own clip, then
+# concatenated and captioned locally. ~2.6 spoken words/sec ≈ 26 words / 10s.
+RV_CHUNK_SECONDS = 10
+RV_WORDS_PER_SEC = 2.6
+RV_MAX_CHUNK_WORDS = int(RV_CHUNK_SECONDS * RV_WORDS_PER_SEC)  # ~26
+RV_MAX_CHUNKS = 12  # safety cap (~2 min of speech)
+
+# Subtitles are ALWAYS burned locally for the cloud engine, so tell the model to
+# keep the frame clean (no baked-in text/subtitles/watermarks).
+RV_DEF_NEGATIVE = ("subtitles, text, captions, watermark, logo, blurry, "
+                   "low quality, distorted, extra fingers, scene change")
 
 # ---------------------------------------------------------------------------
 # Viral video "types". Each maps to an engine and shapes the scene prompt,
@@ -922,6 +1054,306 @@ def _run_avatar(jid, opts):
 
 
 # ---------------------------------------------------------------------------
+# Cloud avatar engine (PrunaAI p-video-avatar on Replicate).
+# Uploads the reference image + our TTS voiceover, runs the hosted model, polls
+# to completion, downloads the mp4, then optionally burns local captions.
+# Runs entirely off-device — no LLM unload, no memory guardrail.
+# ---------------------------------------------------------------------------
+def _rv_headers():
+    return {"Authorization": "Bearer " + RV_TOKEN,
+            "Content-Type": "application/json"}
+
+
+def _rv_upload_file(path):
+    """Upload a local file to Replicate's Files API; returns a served URL.
+    More robust than data-URIs for audio/large images."""
+    import urllib.request
+    import mimetypes
+    fname = os.path.basename(path)
+    ctype = mimetypes.guess_type(path)[0] or "application/octet-stream"
+    with open(path, "rb") as f:
+        data = f.read()
+    boundary = "----omlxvid" + uuid.uuid4().hex
+    pre = (f"--{boundary}\r\n"
+           f'Content-Disposition: form-data; name="content"; filename="{fname}"\r\n'
+           f"Content-Type: {ctype}\r\n\r\n").encode()
+    post = f"\r\n--{boundary}--\r\n".encode()
+    body = pre + data + post
+    req = urllib.request.Request(
+        RV_API + "/files", data=body, method="POST",
+        headers={"Authorization": "Bearer " + RV_TOKEN,
+                 "Content-Type": f"multipart/form-data; boundary={boundary}"})
+    with urllib.request.urlopen(req, timeout=120) as r:
+        resp = json.loads(r.read() or b"{}")
+    url = (resp.get("urls") or {}).get("get") or resp.get("url")
+    if not url:
+        raise RuntimeError("Replicate file upload returned no URL")
+    return url
+
+
+def _rv_post_prediction(inp):
+    import urllib.request
+    payload = json.dumps({"version": RV_VERSION, "input": inp}).encode()
+    req = urllib.request.Request(RV_API + "/predictions", data=payload,
+                                 method="POST", headers=_rv_headers())
+    with urllib.request.urlopen(req, timeout=60) as r:
+        return json.loads(r.read() or b"{}")
+
+
+def _rv_get_prediction(pid):
+    import urllib.request
+    req = urllib.request.Request(RV_API + "/predictions/" + pid, method="GET",
+                                 headers=_rv_headers())
+    with urllib.request.urlopen(req, timeout=30) as r:
+        return json.loads(r.read() or b"{}")
+
+
+def _rv_download(url, dest):
+    import urllib.request
+    req = urllib.request.Request(url, method="GET")
+    with urllib.request.urlopen(req, timeout=300) as r, open(dest, "wb") as f:
+        shutil.copyfileobj(r, f)
+
+
+def _rv_slug(text, n=28):
+    """Filesystem-safe lowercase slug from arbitrary text."""
+    s = re.sub(r"[^a-zA-Z0-9]+", "-", (text or "").strip()).strip("-").lower()
+    return s[:n].strip("-") or "clip"
+
+
+def _rv_name_stem(opts):
+    """Build a descriptive, unique filename stem for a cloud avatar job, e.g.
+    'talkinghead_introducing-the-new-hydro_zephyr_720p_20260703-190210_a1b2'."""
+    type_slug = _rv_slug(opts.get("video_type") or "avatar", 16).replace("-", "")
+    script_slug = _rv_slug(opts.get("voice_script") or "clip", 32)
+    voice_slug = _rv_slug((opts.get("voice") or RV_DEF_VOICE).split()[0], 12)
+    res = _rv_slug(opts.get("resolution") or RV_DEF_RES, 6)
+    ts = datetime.now().strftime("%Y%m%d-%H%M%S")
+    short = uuid.uuid4().hex[:4]
+    return f"{type_slug}_{script_slug}_{voice_slug}_{res}_{ts}_{short}"
+
+
+def _rv_chunk_script(script, max_words=RV_MAX_CHUNK_WORDS):
+    """Split a script into ~10s speech chunks. Prefer sentence boundaries;
+    hard-split any sentence that is longer than the word budget."""
+    import re as _re
+    sentences = _re.findall(r"[^.!?]+[.!?]*", script.replace("\n", " "))
+    sentences = [s.strip() for s in sentences if s.strip()]
+    chunks, cur, cur_n = [], [], 0
+    for sent in sentences:
+        words = sent.split()
+        # A single over-long sentence: flush current, then hard-split it.
+        if len(words) > max_words:
+            if cur:
+                chunks.append(" ".join(cur)); cur, cur_n = [], 0
+            for i in range(0, len(words), max_words):
+                chunks.append(" ".join(words[i:i + max_words]))
+            continue
+        if cur_n + len(words) > max_words and cur:
+            chunks.append(" ".join(cur)); cur, cur_n = [], 0
+        cur.extend(words); cur_n += len(words)
+    if cur:
+        chunks.append(" ".join(cur))
+    if not chunks:
+        chunks = [script.strip()]
+    return chunks[:RV_MAX_CHUNKS]
+
+
+def _rv_generate_segment(jid, image_url, chunk, opts, idx, total, stem):
+    """Submit one script chunk to Replicate, poll, download the raw mp4."""
+    inp = {
+        "image": image_url,
+        "resolution": opts.get("resolution", RV_DEF_RES),
+        "voice_script": chunk,
+        "voice": opts.get("voice", RV_DEF_VOICE),
+        "voice_prompt": opts.get("voice_prompt") or "",
+        "voice_language": opts.get("voice_language", RV_DEF_LANGUAGE),
+        "video_prompt": opts.get("video_prompt") or "The person is talking.",
+        "negative_prompt": opts.get("negative_prompt", RV_DEF_NEGATIVE),
+        "disable_safety_filter": True,
+    }
+    if opts.get("seed") is not None:
+        # Keep the same seed across chunks for identity consistency.
+        inp["seed"] = int(opts["seed"])
+
+    pbase = 8 + int(72 * idx / max(total, 1))
+    span = int(72 / max(total, 1))
+    seg_label = f" (part {idx + 1}/{total})" if total > 1 else ""
+    _set(jid, stage="submitting to p-video-avatar" + seg_label, progress=pbase)
+    pred = _rv_post_prediction(inp)
+    pid = pred.get("id")
+    if not pid:
+        raise RuntimeError("Replicate did not return a prediction id: "
+                           + json.dumps(pred)[:300])
+    status = pred.get("status")
+    deadline = time.time() + 900
+    while status not in ("succeeded", "failed", "canceled"):
+        if time.time() > deadline:
+            raise RuntimeError("Replicate prediction timed out (>15 min)")
+        time.sleep(3)
+        pred = _rv_get_prediction(pid)
+        status = pred.get("status")
+        _set(jid, stage=f"rendering on Replicate…{seg_label}",
+             progress=pbase + span // 2)
+    if status != "succeeded":
+        raise RuntimeError(f"Replicate prediction {status}: "
+                           + str(pred.get("error"))[:300])
+    out = pred.get("output")
+    out_url = out[0] if isinstance(out, list) else out
+    if not out_url:
+        raise RuntimeError("Replicate succeeded but returned no output URL")
+    _set(jid, stage=f"downloading result{seg_label}", progress=pbase + span)
+    seg_name = (f"{stem}.mp4" if total == 1
+                else f"{stem}_part{idx + 1:02d}.mp4")
+    raw_path = os.path.join(RV_RAW_DIR, seg_name)
+    _rv_download(out_url, raw_path)
+    return raw_path
+
+
+def _rv_concat(segments, dest):
+    """Concatenate segment mp4s into one clip (re-encode for safety)."""
+    listfile = os.path.join(TMP_DIR, "rv_concat_" + uuid.uuid4().hex[:8] + ".txt")
+    with open(listfile, "w") as f:
+        for s in segments:
+            f.write("file '" + s.replace("'", "'\\''") + "'\n")
+    cmd = [_ffmpeg_bin(), "-y", "-f", "concat", "-safe", "0", "-i", listfile,
+           "-c:v", "libx264", "-pix_fmt", "yuv420p", "-crf", "18",
+           "-c:a", "aac", "-b:a", "192k", dest]
+    p = subprocess.run(cmd, capture_output=True, text=True, env=_ffmpeg_env())
+    try:
+        os.remove(listfile)
+    except OSError:
+        pass
+    if p.returncode != 0 or not os.path.isfile(dest):
+        raise RuntimeError("segment concat failed: "
+                           + (p.stderr or p.stdout or "")[-400:])
+
+
+def _run_replicate_avatar(jid, opts):
+    """Generate a talking-avatar clip on Replicate using the model's BUILT-IN
+    voices (we supply the script + voice/visual cues). Long scripts are split
+    into ~10s segments, each rendered, then stitched and captioned locally."""
+    if not RV_TOKEN:
+        raise RuntimeError("REPLICATE_API_TOKEN is not set (checked "
+                           f"{RV_ENV_FILE}) — cannot use the cloud avatar")
+
+    script = (opts.get("voice_script") or "").strip()
+    if not script:
+        raise RuntimeError("cloud avatar needs a script: type what the avatar "
+                           "should say")
+    ref_path, ref_is_temp = _avatar_ref_path(jid, opts)
+    chunks = _rv_chunk_script(script)
+
+    t0 = time.time()
+    stem = _rv_name_stem(opts)
+    segments = []
+    try:
+        _set(jid, stage="uploading reference image to Replicate", progress=5)
+        image_url = _rv_upload_file(ref_path)
+        for idx, chunk in enumerate(chunks):
+            segments.append(
+                _rv_generate_segment(jid, image_url, chunk, opts,
+                                     idx, len(chunks), stem))
+    finally:
+        if ref_is_temp:
+            try:
+                os.remove(ref_path)
+            except OSError:
+                pass
+
+    # One clip, or stitch multiple segments together. Originals are kept in
+    # RV_RAW_DIR (never deleted) so they can be reused / re-stitched later.
+    if len(segments) == 1:
+        raw_path = segments[0]
+    else:
+        _set(jid, stage=f"stitching {len(segments)} segments", progress=82)
+        raw_path = os.path.join(RV_RAW_DIR, f"{stem}_full.mp4")
+        _rv_concat(segments, raw_path)
+
+    out_w, out_h = _probe_dims(raw_path)
+
+    # Subtitles are ALWAYS burned locally: extract the spoken audio the model
+    # baked in, derive word timings, and re-mux with captions. The captioned
+    # copy is a NEW file — the original raw_path is preserved untouched.
+    final_name = f"{stem}_captioned.mp4"
+    final_path = os.path.join(OUT_DIR, final_name)
+    style = opts.get("caption_style", AV_DEF_CAPTION)
+    if style == "none":
+        style = AV_DEF_CAPTION  # cloud engine always captions
+    _set(jid, stage="extracting audio for captions", progress=86)
+    audio_path = os.path.join(TMP_DIR, "rv_aud_" + uuid.uuid4().hex[:8] + ".wav")
+    aproc = subprocess.run(
+        [_ffmpeg_bin(), "-y", "-i", raw_path, "-vn",
+         "-ac", "1", "-ar", "16000", audio_path],
+        capture_output=True, text=True, env=_ffmpeg_env())
+    if aproc.returncode != 0 or not os.path.isfile(audio_path):
+        shutil.copyfile(raw_path, final_path)
+        style = "none"
+    else:
+        _set(jid, stage="adding captions", progress=91)
+        fcmd = [
+            sys.executable, AV_CAPTIONS_PY,
+            "--audio", audio_path,
+            "--video-in", raw_path,
+            "--video-out", final_path,
+            "--style", style,
+            "--width", str(out_w or 720),
+            "--height", str(out_h or 1280),
+        ]
+        fproc = subprocess.run(fcmd, cwd=BASE_DIR, capture_output=True,
+                               text=True, env=_ffmpeg_env())
+        try:
+            os.remove(audio_path)
+        except OSError:
+            pass
+        if fproc.returncode != 0 or not os.path.isfile(final_path):
+            raise RuntimeError("caption finishing failed: "
+                               + (fproc.stderr or fproc.stdout or "")[-400:])
+
+    elapsed = round(time.time() - t0, 1)
+    seg_names = [os.path.basename(s) for s in segments]
+    original_name = os.path.basename(raw_path)
+    _set(jid, caption_style=style, out_w=out_w, out_h=out_h,
+         segments=len(chunks), raw_segments=seg_names,
+         original=original_name)
+    return final_name, elapsed, out_w, out_h
+
+
+def _ffmpeg_bin():
+    """Resolve an ffmpeg binary (imageio-ffmpeg, then Homebrew, then PATH)."""
+    try:
+        import imageio_ffmpeg
+        return imageio_ffmpeg.get_ffmpeg_exe()
+    except Exception:
+        for cand in ("/opt/homebrew/bin/ffmpeg", "ffmpeg"):
+            return cand
+    return "ffmpeg"
+
+
+def _probe_dims(path):
+    """Return (w, h) of a video via ffprobe, or (None, None)."""
+    try:
+        import imageio_ffmpeg
+        ff = imageio_ffmpeg.get_ffmpeg_exe()
+        probe = os.path.join(os.path.dirname(ff), "ffprobe")
+    except Exception:
+        probe = "ffprobe"
+    for cand in (probe, "/opt/homebrew/bin/ffprobe", "ffprobe"):
+        try:
+            out = subprocess.run(
+                [cand, "-v", "error", "-select_streams", "v:0",
+                 "-show_entries", "stream=width,height", "-of", "csv=p=0:s=x",
+                 path], capture_output=True, text=True, env=_ffmpeg_env())
+            s = (out.stdout or "").strip()
+            if "x" in s:
+                w, h = s.split("x")[:2]
+                return int(w), int(h)
+        except Exception:
+            continue
+    return None, None
+
+
+# ---------------------------------------------------------------------------
 # Video models (Wan2.2, LongCat) run in their OWN venvs and need a large slice
 # of unified memory. The oMLX app (:8000) keeps the chat LLM resident (~28GB
 # for the 35B). Running video on top of it has hard-crashed the Mac. So before
@@ -1018,11 +1450,42 @@ def _run_job(jid):
     opts = job["opts"]
     freed = []
     try:
-        # Free the chat LLM (and anything else oMLX has resident) up front so
-        # BOTH video engines have the unified memory they need.
-        freed = _free_chat_llm(jid)
+        # Cloud engines run off-device — no local memory pressure, so keep the
+        # chat LLM resident. Local video engines need the memory freed.
+        if opts.get("engine") != "replicate_avatar":
+            freed = _free_chat_llm(jid)
 
-        if opts.get("engine") == "avatar":
+        if opts.get("engine") == "replicate_avatar":
+            if not RV_TOKEN:
+                raise RuntimeError("REPLICATE_API_TOKEN missing — set it in "
+                                   f"{RV_ENV_FILE}")
+            _set(jid, stage="preparing cloud avatar", progress=2)
+            name, elapsed, ow, oh = _run_replicate_avatar(jid, opts)
+            _set(jid, stage="saving", progress=98)
+            j = _get(jid)
+            result = {
+                "filename": name,
+                "url": f"/files/{name}",
+                "engine": "replicate_avatar",
+                "model": RV_MODEL_LABEL,
+                "video_type": opts.get("video_type"),
+                "width": ow, "height": oh,
+                "resolution": opts.get("resolution"),
+                "caption_style": (j or {}).get("caption_style"),
+                "voice": opts.get("voice"),
+                "voice_style": opts.get("voice_style"),
+                "video_style": opts.get("video_style"),
+                "voice_language": opts.get("voice_language"),
+                "voice_script": opts.get("voice_script"),
+                "segments": (j or {}).get("segments"),
+                "raw_segments": (j or {}).get("raw_segments"),
+                "original": (j or {}).get("original"),
+                "seed": opts.get("seed"), "mode": "avatar-cloud",
+                "prompt": opts["prompt"],
+                "seconds": elapsed,
+                "created": datetime.now().isoformat(timespec="seconds"),
+            }
+        elif opts.get("engine") == "avatar":
             if not os.path.isfile(AV_VENV_PY):
                 raise RuntimeError("Avatar runtime is not installed "
                                    f"({AV_VENV_PY} missing)")
@@ -1193,6 +1656,12 @@ class Handler(BaseHTTPRequestHandler):
                         "required_free_gb": AV_REQUIRED_FREE_GB,
                         "mem_ok": lc_avail_gb >= AV_REQUIRED_FREE_GB,
                     },
+                    "replicate_avatar": {
+                        "available": bool(RV_TOKEN),
+                        "label": RV_MODEL_LABEL, "modes": ["avatar"],
+                        "cloud": True,
+                        "resolutions": RV_RESOLUTIONS, "res_default": RV_DEF_RES,
+                    },
                 },
                 "queue": len(_work_q),
                 "auto_unload_llm": AUTO_UNLOAD_LLM,
@@ -1263,6 +1732,37 @@ class Handler(BaseHTTPRequestHandler):
                                  "480p is best; lower is faster but softer. "
                                  "~4-5 min per ~3s at 480p."),
                     },
+                    "replicate_avatar": {
+                        "available": bool(RV_TOKEN),
+                        "label": RV_MODEL_LABEL, "modes": ["avatar"],
+                        "cloud": True,
+                        "resolutions": RV_RESOLUTIONS, "res_default": RV_DEF_RES,
+                        "voices": RV_VOICES, "voice_default": RV_DEF_VOICE,
+                        "voice_styles": RV_VOICE_STYLES,
+                        "voice_style_default": RV_DEF_VOICE_STYLE,
+                        "video_styles": RV_VIDEO_STYLES,
+                        "video_style_default": RV_DEF_VIDEO_STYLE,
+                        "languages": RV_LANGUAGES,
+                        "language_default": RV_DEF_LANGUAGE,
+                        "type_defaults": RV_TYPE_DEFAULTS,
+                        "caption_styles": ["karaoke", "subtitle"],
+                        "caption_default": AV_DEF_CAPTION,
+                        "needs_image": True, "needs_audio": False,
+                        "chunk_seconds": RV_CHUNK_SECONDS,
+                        "max_chunk_words": RV_MAX_CHUNK_WORDS,
+                        "defaults": {"resolution": RV_DEF_RES,
+                                     "caption_style": AV_DEF_CAPTION,
+                                     "voice": RV_DEF_VOICE,
+                                     "voice_style": RV_DEF_VOICE_STYLE,
+                                     "video_style": RV_DEF_VIDEO_STYLE,
+                                     "language": RV_DEF_LANGUAGE},
+                        "note": ("cloud talking-avatar (PrunaAI p-video-avatar). "
+                                 "Fast 720p, runs off-device (chat LLM stays "
+                                 "loaded). Built-in voices — supply a script + "
+                                 "voice/visual style. Scripts over ~10s are auto-"
+                                 "split into segments, rendered, then stitched. "
+                                 "Subtitles always burned locally; originals kept."),
+                    },
                 },
                 "video_types": [
                     {"id": t["id"], "label": t["label"], "engine": t["engine"],
@@ -1296,6 +1796,11 @@ class Handler(BaseHTTPRequestHandler):
 
     def _serve_file(self, name):
         fp = os.path.join(OUT_DIR, name)
+        if not os.path.isfile(fp):
+            # Fall back to the archived cloud originals.
+            alt = os.path.join(RV_RAW_DIR, os.path.basename(name))
+            if os.path.isfile(alt):
+                fp = alt
         if not (name.endswith(".mp4") and os.path.isfile(fp)):
             return self._json(404, {"error": "not found"})
         data = open(fp, "rb").read()
@@ -1311,17 +1816,97 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/generate":
             d = self._read_body()
             prompt = (d.get("prompt") or "").strip()
-            if not prompt:
-                return self._json(400, {"error": "prompt is required"})
             engine = str(d.get("engine") or "wan").lower()
-            # A `video_type` (the viral-studio dropdown) selects the engine and
-            # shapes the scene prompt / caption / aspect defaults.
+            # The cloud avatar uses a separate `voice_script`; the scene prompt is
+            # optional there. Every other engine requires a prompt.
+            if not prompt and engine != "replicate_avatar":
+                return self._json(400, {"error": "prompt is required"})
+            # A `video_type` (the viral-studio dropdown) shapes the scene prompt
+            # and caption/aspect defaults. It also selects a LOCAL engine, but it
+            # must not override an explicit cloud-engine choice.
             tpreset = VIDEO_TYPES_BY_ID.get(str(d.get("video_type") or ""))
-            if tpreset:
-                engine = tpreset["engine"]
+            if tpreset and engine != "replicate_avatar":
                 prompt = tpreset["scene"].format(p=prompt)
-            if engine not in ("wan", "longcat", "avatar"):
+                engine = tpreset["engine"]
+            if engine not in ("wan", "longcat", "avatar", "replicate_avatar"):
                 engine = "wan"
+
+            # --- Cloud avatar (PrunaAI p-video-avatar on Replicate) ---------
+            if engine == "replicate_avatar":
+                if not RV_TOKEN:
+                    return self._json(400, {"error": "REPLICATE_API_TOKEN is not "
+                                            "set — add it to " + RV_ENV_FILE})
+                script = (d.get("voice_script") or "").strip()
+                if not script:
+                    return self._json(400, {"error": "Type a script — what the "
+                                            "avatar should say."})
+                if not ((d.get("image") or "").strip() or (d.get("image_ref") or "").strip()):
+                    return self._json(400, {"error": "A reference image is "
+                                            "required — upload one or pick a generated image"})
+                resolution = d.get("resolution")
+                if resolution not in RV_RESOLUTIONS:
+                    resolution = RV_DEF_RES
+                # Captions always burned locally: karaoke or subtitle only.
+                caption_style = d.get("caption_style") or AV_DEF_CAPTION
+                if caption_style not in ("karaoke", "subtitle"):
+                    caption_style = AV_DEF_CAPTION
+                tdef = RV_TYPE_DEFAULTS.get(str((tpreset or {}).get("id") or ""),
+                                            RV_DEF_TYPE_DEFAULTS)
+                # Voice.
+                voice = (d.get("voice") or "").strip() or tdef.get(
+                    "voice", RV_DEF_VOICE)
+                if voice not in RV_VOICES:
+                    voice = RV_DEF_VOICE
+                # Voice delivery style -> voice_prompt.
+                vsid = d.get("voice_style") or tdef.get("voice_style",
+                                                         RV_DEF_VOICE_STYLE)
+                vstyle = RV_VOICE_STYLES_BY_ID.get(vsid,
+                    RV_VOICE_STYLES_BY_ID[RV_DEF_VOICE_STYLE])
+                voice_prompt = (d.get("voice_prompt") or "").strip() or vstyle["prompt"]
+                # On-screen behaviour style -> video_prompt.
+                pvid = d.get("video_style") or tdef.get("video_style",
+                                                        RV_DEF_VIDEO_STYLE)
+                pstyle = RV_VIDEO_STYLES_BY_ID.get(pvid,
+                    RV_VIDEO_STYLES_BY_ID[RV_DEF_VIDEO_STYLE])
+                # The scene prompt (from the video type / user prompt) augments
+                # the behaviour style.
+                video_prompt = pstyle["prompt"]
+                if prompt and prompt.strip():
+                    video_prompt = pstyle["prompt"] + " " + prompt.strip()
+                # Language (English US/UK only).
+                language = d.get("voice_language") or RV_DEF_LANGUAGE
+                if language not in RV_LANGUAGES:
+                    language = RV_DEF_LANGUAGE
+                opts = {
+                    "engine": "replicate_avatar",
+                    "video_type": (tpreset or {}).get("id"),
+                    "prompt": prompt[:2000],
+                    "image": d.get("image", ""),
+                    "image_ref": (d.get("image_ref") or "").strip(),
+                    "voice_script": script[:5000],
+                    "voice": voice,
+                    "voice_style": vsid,
+                    "voice_prompt": voice_prompt,
+                    "video_style": pvid,
+                    "video_prompt": video_prompt[:1500],
+                    "voice_language": language,
+                    "resolution": resolution,
+                    "caption_style": caption_style,
+                    "negative_prompt": (d.get("negative_prompt") or RV_DEF_NEGATIVE),
+                    "seed": int(d.get("seed", 42)),
+                }
+                jid = "rv_" + uuid.uuid4().hex[:12]
+                _set(jid, status="running", stage="queued", progress=0,
+                     result=None, error=None, opts=opts)
+                with _work_cv:
+                    _work_q.append(jid)
+                    _work_cv.notify()
+                n_chunks = len(_rv_chunk_script(script))
+                return self._json(200, {"ok": True, "job_id": jid,
+                                        "engine": "replicate_avatar",
+                                        "resolution": resolution,
+                                        "segments": n_chunks,
+                                        "caption_style": caption_style})
 
             # --- Avatar (audio-driven talking viral video) ------------------
             if engine == "avatar":

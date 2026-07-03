@@ -6858,6 +6858,7 @@
                       '<option value="wan" selected>Wan2.2-I2V-A14B — image-to-video (short, ≤8s)</option>' +
                       '<option value="longcat">LongCat-Video — text-to-video (long, 15/30s)</option>' +
                       '<option value="avatar">🔥 Viral Avatar — talking sales video (audio + photo)</option>' +
+                      '<option value="replicate_avatar">☁️ Cloud Avatar — Pruna p-video-avatar (fast 720p/1080p)</option>' +
                     '</select></div>' +
                   // ---- Wan2.2 (image-to-video) ----
                   '<div id="vidWanControls">' +
@@ -6937,13 +6938,13 @@
                           '<option value="384p">384p (balanced)</option>' +
                           '<option value="480p" selected>480p (best — default)</option>' +
                         '</select></div>' +
-                      '<div><label style="display:block;font-size:12px;color:#8b949e">Aspect</label>' +
+                      '<div id="avAspectWrap"><label style="display:block;font-size:12px;color:#8b949e">Aspect</label>' +
                         '<select id="avAspect" style="background:#010409;border:1px solid #30363d;border-radius:8px;color:#e6edf3;padding:6px">' +
                           '<option value="9:16" selected>9:16 vertical</option>' +
                           '<option value="1:1">1:1 square</option>' +
                           '<option value="16:9">16:9 wide</option>' +
                         '</select></div>' +
-                      '<div><label style="display:block;font-size:12px;color:#8b949e">Length (s)</label>' +
+                      '<div id="avLengthWrap"><label style="display:block;font-size:12px;color:#8b949e">Length (s)</label>' +
                         '<select id="avLength" style="background:#010409;border:1px solid #30363d;border-radius:8px;color:#e6edf3;padding:6px">' +
                           '<option value="5">5</option><option value="10">10</option>' +
                           '<option value="15" selected>15</option><option value="20">20</option>' +
@@ -6971,6 +6972,41 @@
                       '</div></div>' +
                     '<div style="font-size:11px;color:#d29922;margin-top:8px">🔥 <b>Viral talking video</b> — a reference photo is lip-synced to your saved voiceover, then captions are burned in. Prompt describes the <i>scene/subject look</i> (the words come from the audio). Native 25fps, generated at the chosen resolution (<b>480p</b> is best — lower is faster but softer). <b>Slow:</b> ~4-5 min per ~3s at 480p. Product/E-commerce/Promo types render as scene video (no face).</div>' +
                   '</div>' +  // end #vidAvatarControls
+                  // ---- Cloud Avatar (Replicate p-video-avatar) ----
+                  '<div id="vidReplicateControls" style="display:none">' +
+                    '<div style="display:flex;gap:10px;flex-wrap:wrap;margin-top:10px;align-items:flex-end">' +
+                      '<div><label style="display:block;font-size:12px;color:#8b949e">Video type</label>' +
+                        '<select id="rvType" style="background:#010409;border:1px solid #30363d;border-radius:8px;color:#e6edf3;padding:6px;min-width:220px"></select></div>' +
+                      '<div><label style="display:block;font-size:12px;color:#8b949e">Voice</label>' +
+                        '<select id="rvVoice" style="background:#010409;border:1px solid #30363d;border-radius:8px;color:#e6edf3;padding:6px;min-width:150px"></select></div>' +
+                      '<div><label style="display:block;font-size:12px;color:#8b949e">Voice style</label>' +
+                        '<select id="rvVoiceStyle" style="background:#010409;border:1px solid #30363d;border-radius:8px;color:#e6edf3;padding:6px"></select></div>' +
+                    '</div>' +
+                    '<div style="display:flex;gap:10px;flex-wrap:wrap;margin-top:10px;align-items:flex-end">' +
+                      '<div><label style="display:block;font-size:12px;color:#8b949e">On-screen style</label>' +
+                        '<select id="rvVideoStyle" style="background:#010409;border:1px solid #30363d;border-radius:8px;color:#e6edf3;padding:6px"></select></div>' +
+                      '<div><label style="display:block;font-size:12px;color:#8b949e">Language</label>' +
+                        '<select id="rvLang" style="background:#010409;border:1px solid #30363d;border-radius:8px;color:#e6edf3;padding:6px"></select></div>' +
+                      '<div><label style="display:block;font-size:12px;color:#8b949e">Resolution</label>' +
+                        '<select id="rvRes" style="background:#010409;border:1px solid #30363d;border-radius:8px;color:#e6edf3;padding:6px"><option value="720p" selected>720p</option></select></div>' +
+                      '<div><label style="display:block;font-size:12px;color:#8b949e">Captions</label>' +
+                        '<select id="rvCaption" style="background:#010409;border:1px solid #30363d;border-radius:8px;color:#e6edf3;padding:6px">' +
+                          '<option value="karaoke" selected>Karaoke (word pop)</option>' +
+                          '<option value="subtitle">Subtitle (clean)</option>' +
+                        '</select></div>' +
+                    '</div>' +
+                    '<div style="margin-top:10px"><label style="display:block;font-size:12px;color:#8b949e">Script <span style="color:#6e7681">(exact words the avatar says — long scripts auto-split into ~10s parts &amp; stitched)</span></label>' +
+                      '<textarea id="rvScript" rows="3" placeholder="e.g. Introducing the all-new HydroFlask Pro — stays cold for 24 hours..." style="width:100%;box-sizing:border-box;background:#010409;border:1px solid #30363d;border-radius:8px;color:#e6edf3;padding:8px;font-family:inherit;font-size:13px"></textarea>' +
+                      '<div id="rvScriptMeta" style="font-size:11px;color:#6e7681;margin-top:4px"></div></div>' +
+                    '<div style="margin-top:10px"><label style="display:block;font-size:12px;color:#8b949e">Reference photo <span style="color:#6e7681">(the face/subject that talks)</span></label>' +
+                      '<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">' +
+                        '<select id="rvImageLib" style="flex:1;min-width:200px;background:#010409;border:1px solid #30363d;border-radius:8px;color:#e6edf3;padding:6px"><option value="">— pick a generated image —</option></select>' +
+                        '<span style="font-size:11px;color:#6e7681">or upload:</span>' +
+                        '<input id="rvImageFile" type="file" accept="image/*" style="color:#c9d1d9;font-size:12px;max-width:180px">' +
+                        '<img id="rvRefThumb" style="display:none;height:52px;border-radius:6px;border:1px solid #30363d">' +
+                      '</div></div>' +
+                    '<div style="font-size:11px;color:#58a6ff;margin-top:8px">☁️ <b>Cloud avatar (Pruna p-video-avatar)</b> — fast 720p talking video from a photo + built-in voice. Runs off-device, so the chat model stays loaded. Pick the voice/style; the prompt box adds extra scene direction. Scripts longer than ~10s are split, rendered as parts, and stitched. Subtitles are always burned in; every original clip is kept for reuse.</div>' +
+                  '</div>' +  // end #vidReplicateControls
                 '</div>' +
                 // ---- shared: seed + generate ----
                 '<div style="display:flex;gap:10px;flex-wrap:wrap;margin-top:10px;align-items:flex-end">' +
@@ -7050,17 +7086,93 @@
             const eng = ($('vidEngine') && $('vidEngine').value) || 'wan';
             const isLC = eng === 'longcat';
             const isAv = eng === 'avatar';
-            if ($('vidWanControls')) $('vidWanControls').style.display = (isLC || isAv) ? 'none' : 'block';
+            const isRV = eng === 'replicate_avatar';
+            const isWan = !isLC && !isAv && !isRV;
+            if ($('vidWanControls')) $('vidWanControls').style.display = isWan ? 'block' : 'none';
             if ($('vidLongcatControls')) $('vidLongcatControls').style.display = isLC ? 'block' : 'none';
             if ($('vidAvatarControls')) $('vidAvatarControls').style.display = isAv ? 'block' : 'none';
-            // Avatar/LongCat use their own inputs; only Wan uses the shared upload row.
-            if ($('imgRefWrap')) $('imgRefWrap').style.display = (isLC || isAv) ? 'none' : 'block';
-            if (!isLC && !isAv && $('imgRefLabel')) $('imgRefLabel').innerHTML = 'Start / first-frame image (required — this model is image-to-video). No last-frame/reference support.';
+            if ($('vidReplicateControls')) $('vidReplicateControls').style.display = isRV ? 'block' : 'none';
+            // Only Wan uses the shared upload row; the others have their own inputs.
+            if ($('imgRefWrap')) $('imgRefWrap').style.display = isWan ? 'block' : 'none';
+            if (isWan && $('imgRefLabel')) $('imgRefLabel').innerHTML = 'Start / first-frame image (required — this model is image-to-video). No last-frame/reference support.';
             if ($('imgResult')) $('imgResult').innerHTML = '';
             if ($('imgProgWrap')) $('imgProgWrap').style.display = 'none';
             if (isAv) { vidInitAvatar(); }
+            if (isRV) { vidInitReplicate(); }
             vidCheckHealth();
         }
+
+        let _rvInfo = null;
+        async function vidInitReplicate() {
+            const $ = id => document.getElementById(id);
+            if (!_rvInfo) {
+                try {
+                    const info = await (await fetch(VIDEO_URL + '/info')).json();
+                    _rvInfo = (info.engines && info.engines.replicate_avatar) || {};
+                    _rvInfo._types = info.video_types || [];
+                } catch (e) { _rvInfo = { _types: [] }; }
+                const opt = (v, l, sel) => '<option value="' + v + '"' + (sel ? ' selected' : '') + '>' + l + '</option>';
+                // Video type (only avatar-capable types make sense here, but show all).
+                if ($('rvType') && _rvInfo._types) {
+                    $('rvType').innerHTML = _rvInfo._types.map(t => opt(t.id, t.label)).join('');
+                    $('rvType').onchange = vidRvTypeChanged;
+                }
+                if ($('rvVoice')) $('rvVoice').innerHTML = (_rvInfo.voices || []).map(v => opt(v, v, v === _rvInfo.voice_default)).join('');
+                if ($('rvVoiceStyle')) $('rvVoiceStyle').innerHTML = (_rvInfo.voice_styles || []).map(s => opt(s.id, s.label, s.id === _rvInfo.voice_style_default)).join('');
+                if ($('rvVideoStyle')) $('rvVideoStyle').innerHTML = (_rvInfo.video_styles || []).map(s => opt(s.id, s.label, s.id === _rvInfo.video_style_default)).join('');
+                if ($('rvLang')) $('rvLang').innerHTML = (_rvInfo.languages || ['English (US)']).map(l => opt(l, l, l === _rvInfo.language_default)).join('');
+                if ($('rvCaption') && _rvInfo.caption_default) $('rvCaption').value = _rvInfo.caption_default;
+                if ($('rvImageLib')) $('rvImageLib').onchange = vidRvImagePicked;
+                if ($('rvImageFile')) $('rvImageFile').onchange = vidRvImagePicked;
+                if ($('rvScript')) $('rvScript').oninput = vidRvScriptMeta;
+            }
+            vidRvTypeChanged();
+            vidRvScriptMeta();
+            vidLoadLibrary(false);
+        }
+
+        function vidRvTypeChanged() {
+            const $ = id => document.getElementById(id);
+            const td = (_rvInfo && _rvInfo.type_defaults) || {};
+            const id = ($('rvType') && $('rvType').value) || '';
+            const def = td[id] || {};
+            // Apply this type's suggested voice + styles.
+            if (def.voice && $('rvVoice')) $('rvVoice').value = def.voice;
+            if (def.voice_style && $('rvVoiceStyle')) $('rvVoiceStyle').value = def.voice_style;
+            if (def.video_style && $('rvVideoStyle')) $('rvVideoStyle').value = def.video_style;
+        }
+
+        function vidRvScriptMeta() {
+            const $ = id => document.getElementById(id);
+            const txt = ($('rvScript') && $('rvScript').value || '').trim();
+            const words = txt ? txt.split(/\s+/).length : 0;
+            const perChunk = (_rvInfo && _rvInfo.max_chunk_words) || 26;
+            const parts = Math.max(1, Math.ceil(words / perChunk));
+            const secs = Math.round(words / 2.6);
+            if ($('rvScriptMeta')) $('rvScriptMeta').textContent = words
+                ? (words + ' words ≈ ' + secs + 's · ' + parts + ' segment' + (parts > 1 ? 's' : '') + (parts > 1 ? ' (auto-stitched)' : ''))
+                : '';
+        }
+
+        function vidRvImagePicked(e) {
+            const $ = id => document.getElementById(id);
+            const lib = window._avLib || {};
+            const thumb = $('rvRefThumb');
+            const f = $('rvImageFile') && $('rvImageFile').files && $('rvImageFile').files[0];
+            if (f) {
+                if ($('rvImageLib')) $('rvImageLib').value = '';
+                const fr = new FileReader();
+                fr.onload = () => { if (thumb) { thumb.src = String(fr.result || ''); thumb.style.display = 'inline-block'; } };
+                fr.readAsDataURL(f);
+                return;
+            }
+            const name = $('rvImageLib') && $('rvImageLib').value;
+            if (thumb && name && lib.image_base) {
+                thumb.src = lib.image_base + '/files/' + encodeURIComponent(name);
+                thumb.style.display = 'inline-block';
+            } else if (thumb) { thumb.style.display = 'none'; thumb.removeAttribute('src'); }
+        }
+
 
         let _avTypes = null;
         async function vidInitAvatar() {
@@ -7121,6 +7233,14 @@
                         (lib.images || []).map(im =>
                             '<option value="' + im.filename + '">' + im.filename + '</option>').join('');
                     if (cur) iSel.value = cur;
+                }
+                const rSel = $('rvImageLib');
+                if (rSel) {
+                    const cur = rSel.value;
+                    rSel.innerHTML = '<option value="">— pick a generated image —</option>' +
+                        (lib.images || []).map(im =>
+                            '<option value="' + im.filename + '">' + im.filename + '</option>').join('');
+                    if (cur) rSel.value = cur;
                 }
             } catch (e) { /* service may be down; health check reports it */ }
         }
@@ -7270,7 +7390,15 @@
             try {
                 const h = await (await fetch(VIDEO_URL + '/health')).json();
                 const info = (h.engines && h.engines[eng]) || {};
-                if (eng === 'avatar') {
+                if (eng === 'replicate_avatar') {
+                    if (!info.available) {
+                        s.innerHTML = '⏳ Cloud Avatar not ready — REPLICATE_API_TOKEN not set on :8500.';
+                        s.style.color = '#d29922';
+                    } else {
+                        s.innerHTML = '✓ Cloud Avatar ready (Pruna p-video-avatar) — fast 720p, runs off-device so the chat model stays loaded. Type a script + pick a reference photo. Long scripts auto-split &amp; stitch. Subtitles burned locally; originals kept.';
+                        s.style.color = '#3fb950';
+                    }
+                } else if (eng === 'avatar') {
                     if (!info.available) {
                         s.innerHTML = '⏳ Viral Avatar not ready — weights or runtime missing on :8500.';
                         s.style.color = '#d29922';
@@ -7310,11 +7438,44 @@
 
         async function vidGenerate() {
             const $ = id => document.getElementById(id);
-            const prompt = ($('imgPrompt').value || '').trim();
-            if (!prompt) { $('imgStatus').innerHTML = 'Enter a prompt first.'; $('imgStatus').style.color = '#f85149'; return; }
             const eng = ($('vidEngine') && $('vidEngine').value) || 'wan';
+            const prompt = ($('imgPrompt').value || '').trim();
+            // Cloud avatar uses a separate script field; the prompt is optional
+            // extra scene direction. Every other engine requires a prompt.
+            if (eng !== 'replicate_avatar' && !prompt) { $('imgStatus').innerHTML = 'Enter a prompt first.'; $('imgStatus').style.color = '#f85149'; return; }
             let body;
-            if (eng === 'avatar') {
+            if (eng === 'replicate_avatar') {
+                const script = ($('rvScript') && $('rvScript').value || '').trim();
+                if (!script) { $('imgStatus').innerHTML = 'Type a script — what the avatar should say.'; $('imgStatus').style.color = '#f85149'; return; }
+                let refImage = '', refName = '';
+                const f = $('rvImageFile') && $('rvImageFile').files && $('rvImageFile').files[0];
+                if (f) {
+                    refImage = await new Promise((resolve, reject) => {
+                        const fr = new FileReader();
+                        fr.onload = () => resolve(String(fr.result || ''));
+                        fr.onerror = () => reject(new Error('failed to read reference image'));
+                        fr.readAsDataURL(f);
+                    });
+                } else {
+                    refName = ($('rvImageLib') && $('rvImageLib').value) || '';
+                }
+                if (!refImage && !refName) { $('imgStatus').innerHTML = 'Pick a reference photo (a generated image) or upload one.'; $('imgStatus').style.color = '#f85149'; return; }
+                body = {
+                    engine: 'replicate_avatar',
+                    video_type: ($('rvType') && $('rvType').value) || '',
+                    prompt: prompt,
+                    voice_script: script,
+                    image: refImage,
+                    image_ref: refName,
+                    voice: ($('rvVoice') && $('rvVoice').value) || '',
+                    voice_style: ($('rvVoiceStyle') && $('rvVoiceStyle').value) || '',
+                    video_style: ($('rvVideoStyle') && $('rvVideoStyle').value) || '',
+                    voice_language: ($('rvLang') && $('rvLang').value) || 'English (US)',
+                    resolution: ($('rvRes') && $('rvRes').value) || '720p',
+                    caption_style: ($('rvCaption') && $('rvCaption').value) || 'karaoke',
+                    seed: parseInt($('imgSeed').value, 10) || 42,
+                };
+            } else if (eng === 'avatar') {
                 const t = (_avTypes || []).find(x => x.id === ($('avType') && $('avType').value)) || {};
                 const audio = ($('avAudio') && $('avAudio').value) || '';
                 if (!audio) { $('imgStatus').innerHTML = 'Pick a saved voiceover from the audio dropdown (make one in TTS Studio first).'; $('imgStatus').style.color = '#f85149'; return; }
@@ -7393,6 +7554,8 @@
                 if (!r.ok || d.error) throw new Error(d.error || ('HTTP ' + r.status));
                 if (eng === 'longcat' && d.est_seconds) {
                     $('imgStage').textContent = 'Queued — ' + d.segments + ' segment(s), ~' + d.est_seconds + 's clip. This takes a while…';
+                } else if (eng === 'replicate_avatar') {
+                    $('imgStage').textContent = 'Queued on Replicate — ' + (d.segments || 1) + ' segment(s). Rendering in the cloud…';
                 }
                 vidPoll(d.job_id);
             } catch (e) {
@@ -7414,18 +7577,22 @@
                         $('imgGo').disabled = false;
                         const res = d.result;
                         const url = VIDEO_URL + res.url;
-                        const extra = res.segments ? (', ' + res.segments + ' segments')
+                        const extra = res.segments ? (', ' + res.segments + ' segment' + (res.segments > 1 ? 's' : ''))
                             : (res.caption_style && res.caption_style !== 'none' ? (', ' + res.caption_style + ' captions') : '');
                         const dur = (res.duration != null) ? res.duration
-                            : (res.num_frames && res.fps ? (res.num_frames / res.fps).toFixed(1) : '?');
-                        $('imgStage').textContent = 'Done in ' + res.seconds + 's — ' + res.width + '×' + res.height + ', ' + dur + 's ' + res.mode + extra;
+                            : (res.num_frames && res.fps ? (res.num_frames / res.fps).toFixed(1) : null);
+                        const dims = (res.width && res.height) ? (res.width + '×' + res.height) : (res.resolution || '');
+                        $('imgStage').textContent = 'Done in ' + res.seconds + 's — ' + dims + (dur != null ? (', ' + dur + 's') : '') + ' ' + (res.mode || '') + extra;
+                        const originalsNote = (res.engine === 'replicate_avatar' && res.original)
+                            ? '<div style="font-size:11px;color:#6e7681;margin-top:6px">☁️ Original cloud clip' + (res.raw_segments && res.raw_segments.length > 1 ? 's' : '') + ' kept for reuse: <code>' + (res.raw_segments && res.raw_segments.length ? res.raw_segments.join(', ') : res.original) + '</code></div>'
+                            : '';
                         $('imgResult').innerHTML =
                             '<video src="' + url + '" controls autoplay loop muted playsinline style="max-width:100%;border-radius:10px;border:1px solid #30363d;background:#000"></video>' +
                             '<div style="margin-top:8px;display:flex;gap:8px;align-items:center">' +
                               '<button type="button" onclick="vidSaveToDisk(\'' + res.filename + '\', this)" style="background:#238636;border:none;border-radius:8px;color:#fff;padding:7px 12px;cursor:pointer;font-size:12px">⬇ Save to Movies</button>' +
                               '<a href="' + url + '" target="_blank" style="background:#21262d;border:1px solid #30363d;border-radius:8px;color:#e6edf3;padding:7px 12px;text-decoration:none;font-size:12px">↗ Open</a>' +
                               '<span id="vidSaveMsg" style="font-size:12px;color:#8b949e"></span>' +
-                            '</div>';
+                            '</div>' + originalsNote;
                     } else if (d.status === 'error') {
                         clearInterval(imgPollTimer); imgPollTimer = null;
                         $('imgGo').disabled = false;
