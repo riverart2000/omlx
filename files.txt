@@ -33,4 +33,11 @@
 #    server, so an overshoot raises instead of hard-crashing the Mac (OOM reboot)
 /Users/joebains/longcat-video-mlx/longcat_video/lora.py|longcat-video-mlx/longcat_video/lora.py
 /Users/joebains/longcat-video-mlx/.venv/lib/python3.13/site-packages/sitecustomize.py|longcat-video-mlx/sitecustomize.py
+# Viral Avatar engine (LongCat-Video-Avatar-1.5, audio-driven talking video)
+#  - captions.py: mlx_whisper word-timed karaoke/subtitle burn-in + voice mux
+#  - run_avatar_gen.py: avatar inference driver (256 gen -> Lanczos upscale, 25fps)
+#  - avatar venv sitecustomize.py: same MLX memory cap backstop as LongCat
+/Users/joebains/omlx-video/captions.py|omlx-video/captions.py
+/Users/joebains/longcat-avatar-mlx/scripts/run_avatar_gen.py|longcat-avatar-mlx/run_avatar_gen.py
+/Users/joebains/longcat-avatar-mlx/.venv/lib/python3.13/site-packages/sitecustomize.py|longcat-avatar-mlx/sitecustomize.py
 /Users/joebains/omlx-stack.sh|omlx-stack.sh

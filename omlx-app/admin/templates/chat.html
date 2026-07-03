@@ -6857,6 +6857,7 @@
                     '<select id="vidEngine" style="background:#010409;border:1px solid #30363d;border-radius:8px;color:#e6edf3;padding:6px;min-width:320px">' +
                       '<option value="wan" selected>Wan2.2-I2V-A14B — image-to-video (short, ≤8s)</option>' +
                       '<option value="longcat">LongCat-Video — text-to-video (long, 15/30s)</option>' +
+                      '<option value="avatar">🔥 Viral Avatar — talking sales video (audio + photo)</option>' +
                     '</select></div>' +
                   // ---- Wan2.2 (image-to-video) ----
                   '<div id="vidWanControls">' +
@@ -6925,6 +6926,45 @@
                     '</div>' +
                     '<div style="font-size:11px;color:#d29922;margin-top:8px">🎬 <b>Text-to-video</b> — describe the whole shot in the prompt (no reference image needed). LongCat chains 93-frame segments at 480p/15fps for long, coherent clips. <b>Heads-up on time:</b> ~10 min render <i>per segment</i> — 15s ≈ 30 min, 30s ≈ 60 min. Runs in the background; keep this open to watch progress.</div>' +
                   '</div>' +  // end #vidLongcatControls
+                  // ---- Viral Avatar (audio-driven talking video) ----
+                  '<div id="vidAvatarControls" style="display:none">' +
+                    '<div style="display:flex;gap:10px;flex-wrap:wrap;margin-top:10px;align-items:flex-end">' +
+                      '<div><label style="display:block;font-size:12px;color:#8b949e">Video type</label>' +
+                        '<select id="avType" style="background:#010409;border:1px solid #30363d;border-radius:8px;color:#e6edf3;padding:6px;min-width:260px"></select></div>' +
+                      '<div><label style="display:block;font-size:12px;color:#8b949e">Aspect</label>' +
+                        '<select id="avAspect" style="background:#010409;border:1px solid #30363d;border-radius:8px;color:#e6edf3;padding:6px">' +
+                          '<option value="9:16" selected>9:16 vertical</option>' +
+                          '<option value="1:1">1:1 square</option>' +
+                          '<option value="16:9">16:9 wide</option>' +
+                        '</select></div>' +
+                      '<div><label style="display:block;font-size:12px;color:#8b949e">Length (s)</label>' +
+                        '<select id="avLength" style="background:#010409;border:1px solid #30363d;border-radius:8px;color:#e6edf3;padding:6px">' +
+                          '<option value="5">5</option><option value="10">10</option>' +
+                          '<option value="15" selected>15</option><option value="20">20</option>' +
+                          '<option value="25">25</option><option value="30">30</option>' +
+                        '</select></div>' +
+                      '<div><label style="display:block;font-size:12px;color:#8b949e">Captions</label>' +
+                        '<select id="avCaption" style="background:#010409;border:1px solid #30363d;border-radius:8px;color:#e6edf3;padding:6px">' +
+                          '<option value="karaoke" selected>Karaoke (word pop)</option>' +
+                          '<option value="subtitle">Subtitle (clean)</option>' +
+                          '<option value="none">None</option>' +
+                        '</select></div>' +
+                    '</div>' +
+                    '<div style="margin-top:10px"><label style="display:block;font-size:12px;color:#8b949e">Voiceover <span style="color:#6e7681">(generate + save in TTS Studio)</span></label>' +
+                      '<div style="display:flex;gap:8px;align-items:center">' +
+                        '<select id="avAudio" style="flex:1;background:#010409;border:1px solid #30363d;border-radius:8px;color:#e6edf3;padding:6px"><option value="">— pick a saved voiceover —</option></select>' +
+                        '<button id="avAudioRefresh" type="button" title="Refresh library" style="background:#21262d;border:1px solid #30363d;border-radius:8px;color:#e6edf3;padding:7px 10px;cursor:pointer">↻</button>' +
+                        '<audio id="avAudioPreview" controls style="height:32px;display:none"></audio>' +
+                      '</div></div>' +
+                    '<div style="margin-top:10px;display:none" id="avRefRow"><label style="display:block;font-size:12px;color:#8b949e">Reference photo <span style="color:#6e7681">(the face/subject that talks)</span></label>' +
+                      '<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">' +
+                        '<select id="avImageLib" style="flex:1;min-width:200px;background:#010409;border:1px solid #30363d;border-radius:8px;color:#e6edf3;padding:6px"><option value="">— pick a generated image —</option></select>' +
+                        '<span style="font-size:11px;color:#6e7681">or upload:</span>' +
+                        '<input id="avImageFile" type="file" accept="image/*" style="color:#c9d1d9;font-size:12px;max-width:180px">' +
+                        '<img id="avRefThumb" style="display:none;height:52px;border-radius:6px;border:1px solid #30363d">' +
+                      '</div></div>' +
+                    '<div style="font-size:11px;color:#d29922;margin-top:8px">🔥 <b>Viral talking video</b> — a reference photo is lip-synced to your saved voiceover, then captions are burned in. Prompt describes the <i>scene/subject look</i> (the words come from the audio). Native 25fps, generated at 256 then upscaled. <b>Slow:</b> ~4-5 min per ~3s (a 15s clip ≈ 20-25 min). Product/E-commerce/Promo types render as scene video (no face).</div>' +
+                  '</div>' +  // end #vidAvatarControls
                 '</div>' +
                 // ---- shared: seed + generate ----
                 '<div style="display:flex;gap:10px;flex-wrap:wrap;margin-top:10px;align-items:flex-end">' +
@@ -7003,14 +7043,111 @@
             const $ = id => document.getElementById(id);
             const eng = ($('vidEngine') && $('vidEngine').value) || 'wan';
             const isLC = eng === 'longcat';
-            if ($('vidWanControls')) $('vidWanControls').style.display = isLC ? 'none' : 'block';
+            const isAv = eng === 'avatar';
+            if ($('vidWanControls')) $('vidWanControls').style.display = (isLC || isAv) ? 'none' : 'block';
             if ($('vidLongcatControls')) $('vidLongcatControls').style.display = isLC ? 'block' : 'none';
-            // Wan is image-to-video (ref required); LongCat is text-to-video (no ref).
-            if ($('imgRefWrap')) $('imgRefWrap').style.display = isLC ? 'none' : 'block';
-            if (!isLC && $('imgRefLabel')) $('imgRefLabel').innerHTML = 'Start / first-frame image (required — this model is image-to-video). No last-frame/reference support.';
+            if ($('vidAvatarControls')) $('vidAvatarControls').style.display = isAv ? 'block' : 'none';
+            // Avatar/LongCat use their own inputs; only Wan uses the shared upload row.
+            if ($('imgRefWrap')) $('imgRefWrap').style.display = (isLC || isAv) ? 'none' : 'block';
+            if (!isLC && !isAv && $('imgRefLabel')) $('imgRefLabel').innerHTML = 'Start / first-frame image (required — this model is image-to-video). No last-frame/reference support.';
             if ($('imgResult')) $('imgResult').innerHTML = '';
             if ($('imgProgWrap')) $('imgProgWrap').style.display = 'none';
+            if (isAv) { vidInitAvatar(); }
             vidCheckHealth();
+        }
+
+        let _avTypes = null;
+        async function vidInitAvatar() {
+            const $ = id => document.getElementById(id);
+            // Populate the video-type dropdown once (from /info), then wire it.
+            if (!_avTypes) {
+                try {
+                    const info = await (await fetch(VIDEO_URL + '/info')).json();
+                    _avTypes = info.video_types || [];
+                } catch (e) { _avTypes = []; }
+                const sel = $('avType');
+                if (sel && _avTypes.length) {
+                    sel.innerHTML = _avTypes.map(t =>
+                        '<option value="' + t.id + '">' + t.label +
+                        (t.engine !== 'avatar' ? ' (scene)' : '') + '</option>').join('');
+                    sel.onchange = vidAvatarTypeChanged;
+                }
+                if ($('avAudioRefresh')) $('avAudioRefresh').onclick = () => vidLoadLibrary(true);
+                if ($('avAudio')) $('avAudio').onchange = vidAudioPicked;
+                if ($('avImageLib')) $('avImageLib').onchange = vidImagePicked;
+                if ($('avImageFile')) $('avImageFile').onchange = vidImagePicked;
+            }
+            vidAvatarTypeChanged();
+            vidLoadLibrary(false);
+        }
+
+        function vidAvatarTypeChanged() {
+            const $ = id => document.getElementById(id);
+            const t = (_avTypes || []).find(x => x.id === ($('avType') && $('avType').value)) || {};
+            // Face types need a reference photo; scene types (product/promo) don't.
+            const needsImg = t.needs_image !== false && t.engine === 'avatar';
+            if ($('avRefRow')) $('avRefRow').style.display = needsImg ? 'block' : 'none';
+            // Reflect the type's suggested caption + aspect defaults.
+            if (t.caption && $('avCaption')) $('avCaption').value = t.caption;
+            if (t.aspect && $('avAspect')) $('avAspect').value = t.aspect;
+        }
+
+        async function vidLoadLibrary(refresh) {
+            const $ = id => document.getElementById(id);
+            try {
+                const lib = await (await fetch(VIDEO_URL + '/library')).json();
+                window._avLib = lib;
+                const aSel = $('avAudio');
+                if (aSel) {
+                    const cur = aSel.value;
+                    aSel.innerHTML = '<option value="">— pick a saved voiceover —</option>' +
+                        (lib.audio || []).map(a => {
+                            const label = (a.favorite ? '★ ' : '') + a.filename +
+                                (a.text ? ' — ' + a.text : '');
+                            return '<option value="' + a.filename + '">' + label + '</option>';
+                        }).join('');
+                    if (cur) aSel.value = cur;
+                }
+                const iSel = $('avImageLib');
+                if (iSel) {
+                    const cur = iSel.value;
+                    iSel.innerHTML = '<option value="">— pick a generated image —</option>' +
+                        (lib.images || []).map(im =>
+                            '<option value="' + im.filename + '">' + im.filename + '</option>').join('');
+                    if (cur) iSel.value = cur;
+                }
+            } catch (e) { /* service may be down; health check reports it */ }
+        }
+
+        function vidAudioPicked() {
+            const $ = id => document.getElementById(id);
+            const lib = window._avLib || {};
+            const name = $('avAudio') && $('avAudio').value;
+            const pv = $('avAudioPreview');
+            if (pv && name && lib.tts_base) {
+                pv.src = lib.tts_base + '/files/' + encodeURIComponent(name);
+                pv.style.display = 'inline-block';
+            } else if (pv) { pv.style.display = 'none'; pv.removeAttribute('src'); }
+        }
+
+        function vidImagePicked() {
+            const $ = id => document.getElementById(id);
+            const lib = window._avLib || {};
+            const th = $('avRefThumb');
+            const f = $('avImageFile') && $('avImageFile').files && $('avImageFile').files[0];
+            if (f) {
+                // An upload wins over the library pick.
+                if ($('avImageLib')) $('avImageLib').value = '';
+                const fr = new FileReader();
+                fr.onload = () => { if (th) { th.src = String(fr.result || ''); th.style.display = 'inline-block'; } };
+                fr.readAsDataURL(f);
+                return;
+            }
+            const name = $('avImageLib') && $('avImageLib').value;
+            if (th && name && lib.image_base) {
+                th.src = lib.image_base + '/files/' + encodeURIComponent(name);
+                th.style.display = 'inline-block';
+            } else if (th) { th.style.display = 'none'; th.removeAttribute('src'); }
         }
 
         function imgEngineChanged() {
@@ -7127,7 +7264,18 @@
             try {
                 const h = await (await fetch(VIDEO_URL + '/health')).json();
                 const info = (h.engines && h.engines[eng]) || {};
-                if (eng === 'longcat') {
+                if (eng === 'avatar') {
+                    if (!info.available) {
+                        s.innerHTML = '⏳ Viral Avatar not ready — weights or runtime missing on :8500.';
+                        s.style.color = '#d29922';
+                    } else if (info.mem_ok === false) {
+                        s.innerHTML = '⚠ Avatar needs ~' + (info.required_free_gb || 30) + 'GB free (only ' + (info.free_gb != null ? info.free_gb : '?') + 'GB now). The chat model is auto-unloaded before rendering, which usually frees enough.';
+                        s.style.color = '#d29922';
+                    } else {
+                        s.innerHTML = '✓ Viral Avatar ready — audio-driven talking video, 25fps, captions burned in. Pick a voiceover + a reference photo. <b>Slow:</b> ~4-5 min per ~3s (15s ≈ 20-25 min). Chat model auto-unloads during render.';
+                        s.style.color = '#3fb950';
+                    }
+                } else if (eng === 'longcat') {
                     if (!info.available) {
                         s.innerHTML = '⏳ LongCat-Video not ready — weights or runtime missing on :8500.';
                         s.style.color = '#d29922';
@@ -7160,7 +7308,38 @@
             if (!prompt) { $('imgStatus').innerHTML = 'Enter a prompt first.'; $('imgStatus').style.color = '#f85149'; return; }
             const eng = ($('vidEngine') && $('vidEngine').value) || 'wan';
             let body;
-            if (eng === 'longcat') {
+            if (eng === 'avatar') {
+                const t = (_avTypes || []).find(x => x.id === ($('avType') && $('avType').value)) || {};
+                const audio = ($('avAudio') && $('avAudio').value) || '';
+                if (!audio) { $('imgStatus').innerHTML = 'Pick a saved voiceover from the audio dropdown (make one in TTS Studio first).'; $('imgStatus').style.color = '#f85149'; return; }
+                const needsImg = t.needs_image !== false && t.engine === 'avatar';
+                let refImage = '', refName = '';
+                if (needsImg) {
+                    const f = $('avImageFile') && $('avImageFile').files && $('avImageFile').files[0];
+                    if (f) {
+                        refImage = await new Promise((resolve, reject) => {
+                            const fr = new FileReader();
+                            fr.onload = () => resolve(String(fr.result || ''));
+                            fr.onerror = () => reject(new Error('failed to read reference image'));
+                            fr.readAsDataURL(f);
+                        });
+                    } else {
+                        refName = ($('avImageLib') && $('avImageLib').value) || '';
+                    }
+                    if (!refImage && !refName) { $('imgStatus').innerHTML = 'This video type needs a reference photo — pick a generated image or upload one.'; $('imgStatus').style.color = '#f85149'; return; }
+                }
+                body = {
+                    video_type: ($('avType') && $('avType').value) || 'talking_head',
+                    prompt: prompt,
+                    audio_file: audio,
+                    image: refImage,
+                    image_ref: refName,
+                    aspect: ($('avAspect') && $('avAspect').value) || '9:16',
+                    caption_style: ($('avCaption') && $('avCaption').value) || 'karaoke',
+                    duration_seconds: parseFloat(($('avLength') && $('avLength').value) || '15') || 15,
+                    seed: parseInt($('imgSeed').value, 10) || 42,
+                };
+            } else if (eng === 'longcat') {
                 // LongCat: text-to-video, no reference image.
                 body = {
                     engine: 'longcat',
@@ -7228,8 +7407,11 @@
                         $('imgGo').disabled = false;
                         const res = d.result;
                         const url = VIDEO_URL + res.url;
-                        const extra = res.segments ? (', ' + res.segments + ' segments') : '';
-                        $('imgStage').textContent = 'Done in ' + res.seconds + 's — ' + res.width + '×' + res.height + ', ' + res.duration + 's ' + res.mode + extra;
+                        const extra = res.segments ? (', ' + res.segments + ' segments')
+                            : (res.caption_style && res.caption_style !== 'none' ? (', ' + res.caption_style + ' captions') : '');
+                        const dur = (res.duration != null) ? res.duration
+                            : (res.num_frames && res.fps ? (res.num_frames / res.fps).toFixed(1) : '?');
+                        $('imgStage').textContent = 'Done in ' + res.seconds + 's — ' + res.width + '×' + res.height + ', ' + dur + 's ' + res.mode + extra;
                         $('imgResult').innerHTML =
                             '<video src="' + url + '" controls autoplay loop muted playsinline style="max-width:100%;border-radius:10px;border:1px solid #30363d;background:#000"></video>' +
                             '<div style="margin-top:8px;display:flex;gap:8px;align-items:center">' +

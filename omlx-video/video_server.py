@@ -173,6 +173,105 @@ LC_REQUIRED_FREE_GB = float(os.environ.get("LONGCAT_REQUIRED_FREE_GB", "34"))
 LC_MLX_HEADROOM_GB = float(os.environ.get("LONGCAT_MLX_HEADROOM_GB", "8"))
 LC_MLX_CACHE_GB = float(os.environ.get("LONGCAT_MLX_CACHE_GB", "1"))
 
+# ---------------------------------------------------------------------------
+# Third engine: LongCat-Video-Avatar-1.5 (audio-driven talking avatar) — the
+# "viral / sales video" engine. A separate MLX stack (its own repo + venv) that
+# turns a reference portrait + a voiceover (generated in TTS Studio) + a scene
+# prompt into a lip-synced talking video, then burns animated captions and
+# muxes the voice track. Native audio-sync rate is 25fps. q8 denoises stably
+# only at a ~256 short side (480p direct -> NaN), so we generate small and
+# Lanczos-upscale to the requested output size (a model upscaler can replace
+# this later). Selected via engine:"avatar" or a `video_type` that maps to it.
+# ---------------------------------------------------------------------------
+AV_REPO_DIR = os.environ.get("AVATAR_REPO_DIR", "/Users/joebains/longcat-avatar-mlx")
+AV_VENV_PY = os.environ.get(
+    "AVATAR_PY", os.path.join(AV_REPO_DIR, ".venv", "bin", "python"))
+AV_WEIGHTS_DIR = os.environ.get(
+    "AVATAR_WEIGHTS_DIR", "/Users/joebains/.omlx/models/mlx-community")
+AV_VARIANT = os.environ.get("AVATAR_VARIANT", "q8-merged")
+AV_VARIANT_SUBDIR = "LongCat-Video-Avatar-1.5-q8-dmd-merged"
+AV_MODEL_LABEL = "LongCat-Video-Avatar 1.5 (q8) — audio-driven talking avatar"
+AV_DRIVER = os.path.join("scripts", "run_avatar_gen.py")
+
+AV_FPS = 25                    # native audio-sync rate — DO NOT retime
+AV_GEN_SHORT = int(os.environ.get("AVATAR_GEN_SHORT", "256"))
+AV_SEG_FRAMES = 93             # frames per generation pass (memory-bounded)
+AV_MIN_SECONDS = 5.0
+AV_DEF_SECONDS = 15.0
+AV_MAX_SECONDS = 30.0          # clip length ceiling (also caps very long renders)
+
+# Output resolution presets (final size after Lanczos upscale). Short side 480.
+AV_RES_PRESETS = {
+    "9:16": (480, 854),
+    "1:1":  (540, 540),
+    "16:9": (854, 480),
+}
+AV_DEF_ASPECT = "9:16"
+
+# Saved-media locations the UI dropdowns reference.
+AV_TTS_OUT_DIR = os.environ.get("TTS_OUT_DIR", "/Users/joebains/mlx-audio/output")
+AV_IMG_OUT_DIR = os.environ.get("IMAGE_OUT_DIR", "/Users/joebains/omlx-image/output")
+
+AV_CAPTION_STYLES = ["karaoke", "subtitle", "none"]
+AV_DEF_CAPTION = "karaoke"
+AV_CAPTIONS_PY = os.path.join(BASE_DIR, "captions.py")
+
+# Memory: q8 avatar needs ~32GB. The chat LLM is auto-unloaded before any video
+# job (see _free_chat_llm), so this is the floor to still refuse if something
+# else is hogging RAM. Same in-child MLX cap pattern as LongCat.
+AV_REQUIRED_FREE_GB = float(os.environ.get("AVATAR_REQUIRED_FREE_GB", "30"))
+
+# ---------------------------------------------------------------------------
+# Viral video "types". Each maps to an engine and shapes the scene prompt,
+# default caption style and aspect. Avatar types animate a talking subject from
+# a reference portrait + voiceover; product types route to the base LongCat
+# text-to-video engine (no face). Order is the UI dropdown order.
+# ---------------------------------------------------------------------------
+VIDEO_TYPES = [
+    {"id": "talking_head", "label": "Talking Head / Spokesperson",
+     "engine": "avatar", "needs_image": True, "needs_audio": True,
+     "caption": "karaoke", "aspect": "9:16",
+     "scene": ("{p}. A confident spokesperson speaking directly to camera, "
+               "upper-body framing, modern studio, professional lighting, "
+               "natural gestures and engaging expression")},
+    {"id": "product_explainer", "label": "Product Explainer",
+     "engine": "longcat", "needs_image": False, "needs_audio": True,
+     "caption": "subtitle", "aspect": "9:16",
+     "scene": ("{p}. Clean dynamic product explainer, the product shown clearly "
+               "with smooth camera moves, bright commercial lighting, crisp detail")},
+    {"id": "testimonial", "label": "Testimonial-Style",
+     "engine": "avatar", "needs_image": True, "needs_audio": True,
+     "caption": "karaoke", "aspect": "9:16",
+     "scene": ("{p}. A genuine, relatable person giving a heartfelt testimonial "
+               "to camera, warm natural lighting, authentic home or office setting")},
+    {"id": "ecommerce", "label": "E-commerce Marketing",
+     "engine": "longcat", "needs_image": False, "needs_audio": True,
+     "caption": "subtitle", "aspect": "9:16",
+     "scene": ("{p}. High-converting e-commerce marketing shot, product hero "
+               "framing, vivid colours, premium lighting, aspirational lifestyle")},
+    {"id": "singing", "label": "Singing / Performance",
+     "engine": "avatar", "needs_image": True, "needs_audio": True,
+     "caption": "karaoke", "aspect": "9:16",
+     "scene": ("{p}. An expressive performer singing to camera, stage lighting, "
+               "energetic and emotive, music-video aesthetic")},
+    {"id": "animated_character", "label": "Animated / Stylized Character",
+     "engine": "avatar", "needs_image": True, "needs_audio": True,
+     "caption": "karaoke", "aspect": "9:16",
+     "scene": ("{p}. A stylized animated character talking to camera, expressive "
+               "cartoon/3D-render style, vibrant colours, playful and lively")},
+    {"id": "news_educational", "label": "News-Style / Educational",
+     "engine": "avatar", "needs_image": True, "needs_audio": True,
+     "caption": "subtitle", "aspect": "9:16",
+     "scene": ("{p}. A professional news anchor / educator presenting to camera, "
+               "clean studio desk or lower-third setting, authoritative and clear")},
+    {"id": "promo", "label": "Limited-Time Offer / Promo",
+     "engine": "longcat", "needs_image": False, "needs_audio": True,
+     "caption": "karaoke", "aspect": "9:16",
+     "scene": ("{p}. High-energy limited-time-offer promo, bold dynamic motion, "
+               "punchy commercial lighting, exciting sale atmosphere")},
+]
+VIDEO_TYPES_BY_ID = {t["id"]: t for t in VIDEO_TYPES}
+
 _jobs = {}
 _jobs_lock = threading.Lock()
 _work_q = []
@@ -196,6 +295,67 @@ def _lc_weights_ready() -> bool:
 
 def _lc_available() -> bool:
     return os.path.isfile(LC_VENV_PY) and _lc_weights_ready()
+
+
+def _av_weights_ready() -> bool:
+    """Avatar weights present: <AV_WEIGHTS_DIR>/<AV_VARIANT_SUBDIR> exists."""
+    return os.path.isdir(os.path.join(AV_WEIGHTS_DIR, AV_VARIANT_SUBDIR))
+
+
+def _av_available() -> bool:
+    return (os.path.isfile(AV_VENV_PY) and _av_weights_ready()
+            and os.path.isfile(AV_CAPTIONS_PY))
+
+
+def _list_audio_library(limit=80):
+    """Saved TTS voiceovers for the avatar audio dropdown. Scans the TTS output
+    dir directly (robust to an empty/cleared history), newest first, and
+    enriches each with the spoken text from the TTS Studio :8200 /history when
+    available. Best-effort throughout."""
+    import urllib.request
+    # Map filename -> {text, favorite} from history metadata, if reachable.
+    meta = {}
+    try:
+        req = urllib.request.Request("http://127.0.0.1:8200/history", method="GET")
+        with urllib.request.urlopen(req, timeout=4) as r:
+            hist = json.loads(r.read() or b"[]")
+        items = hist if isinstance(hist, list) else hist.get("items", [])
+        for it in items:
+            name = os.path.basename(it.get("filename") or it.get("file") or "")
+            if name:
+                meta[name] = {"text": (it.get("text") or "")[:120],
+                              "favorite": bool(it.get("favorite"))}
+    except Exception:
+        pass
+    out = []
+    try:
+        exts = (".wav", ".mp3", ".m4a", ".flac", ".aac", ".ogg")
+        names = [n for n in os.listdir(AV_TTS_OUT_DIR)
+                 if n.lower().endswith(exts) and not n.startswith(".")]
+        names.sort(key=lambda n: os.path.getmtime(
+            os.path.join(AV_TTS_OUT_DIR, n)), reverse=True)
+        for n in names[:limit]:
+            m = meta.get(n, {})
+            out.append({"filename": n, "text": m.get("text", ""),
+                        "favorite": m.get("favorite", False)})
+    except Exception:
+        pass
+    return out
+
+
+def _list_image_library(limit=60):
+    """Generated stills (Image Studio output dir), for the reference-image
+    picker. Newest first."""
+    out = []
+    try:
+        names = [n for n in os.listdir(AV_IMG_OUT_DIR)
+                 if n.lower().endswith((".png", ".jpg", ".jpeg"))]
+        names.sort(key=lambda n: os.path.getmtime(
+            os.path.join(AV_IMG_OUT_DIR, n)), reverse=True)
+        out = [{"filename": n} for n in names[:limit]]
+    except Exception:
+        pass
+    return out
 
 
 def _avail_mem_gb() -> float:
@@ -568,30 +728,317 @@ def _run_longcat(jid, opts):
     return out_name, elapsed
 
 
+# ---------------------------------------------------------------------------
+# Avatar engine (LongCat-Video-Avatar 1.5) — the viral / talking-avatar path.
+# Drives scripts/run_avatar_gen.py in the avatar venv (reference portrait +
+# voiceover + scene prompt -> lip-synced silent mp4), then captions.py in THIS
+# venv (mlx_whisper word timings) to burn animated captions and mux the voice.
+# ---------------------------------------------------------------------------
+def _resolve_saved(base_dir, name):
+    """Safely resolve a user-supplied saved-media filename to a path inside
+    base_dir (basename only — no traversal). Returns the path or None."""
+    if not name:
+        return None
+    safe = os.path.basename(str(name))
+    p = os.path.join(base_dir, safe)
+    return p if os.path.isfile(p) else None
+
+
+def _avatar_ref_path(jid, opts):
+    """Materialize the reference portrait: either a base64 data-URL upload
+    (saved to TMP_DIR) or a filename picked from the Image Studio library."""
+    raw = opts.get("image")
+    if raw:
+        ref_bytes = _decode_data_url_png(raw)
+        ref_path = os.path.join(TMP_DIR, f"{jid}_avref.png")
+        with open(ref_path, "wb") as f:
+            f.write(ref_bytes)
+        return ref_path, True  # (path, is_temp)
+    picked = _resolve_saved(AV_IMG_OUT_DIR, opts.get("image_ref"))
+    if picked:
+        return picked, False
+    raise RuntimeError("avatar needs a reference image (upload one or pick a "
+                       "generated image from the Image Studio library)")
+
+
+_AV_JSON_RE = re.compile(r"^\s*\{.*\}\s*$")
+
+
+def _ffmpeg_env():
+    """Env for the captions subprocess. Under launchd the server inherits a
+    minimal PATH without /opt/homebrew/bin, but mlx_whisper (used by
+    captions.py) shells out to a bare `ffmpeg`. Ensure ffmpeg is resolvable by
+    prepending the imageio-ffmpeg binary dir and common Homebrew locations."""
+    env = dict(os.environ)
+    extra = []
+    try:
+        import imageio_ffmpeg
+        ff = imageio_ffmpeg.get_ffmpeg_exe()
+        # imageio's binary is not named "ffmpeg", so also expose a link dir.
+        ff_dir = os.path.dirname(ff)
+        link_dir = os.path.join(TMP_DIR, "_ffmpeg_bin")
+        os.makedirs(link_dir, exist_ok=True)
+        link = os.path.join(link_dir, "ffmpeg")
+        if not os.path.exists(link):
+            try:
+                os.symlink(ff, link)
+            except OSError:
+                pass
+        extra += [link_dir, ff_dir]
+    except Exception:
+        pass
+    extra += ["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin"]
+    env["PATH"] = os.pathsep.join(extra + [env.get("PATH", "")])
+    return env
+
+
+def _run_avatar(jid, opts):
+    """Generate a talking-avatar viral clip and finish it with captions+audio."""
+    avail = _avail_mem_gb()
+    if avail < AV_REQUIRED_FREE_GB:
+        raise RuntimeError(
+            f"not enough free memory for the avatar model: {avail:.1f}GB free, "
+            f"need ~{AV_REQUIRED_FREE_GB:.0f}GB. Close other apps and retry.")
+
+    audio_path = _resolve_saved(AV_TTS_OUT_DIR, opts.get("audio_file"))
+    if not audio_path:
+        raise RuntimeError("avatar needs a voiceover: generate one in TTS "
+                           "Studio, then pick it from the audio dropdown")
+    ref_path, ref_is_temp = _avatar_ref_path(jid, opts)
+
+    out_w, out_h = opts["width"], opts["height"]
+    raw_name = "av_raw_" + uuid.uuid4().hex[:12] + ".mp4"
+    raw_path = os.path.join(TMP_DIR, raw_name)
+    final_name = "av_" + uuid.uuid4().hex[:12] + ".mp4"
+    final_path = os.path.join(OUT_DIR, final_name)
+
+    cmd = [
+        AV_VENV_PY, AV_DRIVER,
+        "--weights", AV_WEIGHTS_DIR,
+        "--variant", AV_VARIANT,
+        "--image", ref_path,
+        "--audio", audio_path,
+        "--prompt", opts["prompt"],
+        "--height", str(out_h),
+        "--width", str(out_w),
+        "--gen-short", str(AV_GEN_SHORT),
+        "--seg-frames", str(AV_SEG_FRAMES),
+        "--max-seconds", str(opts.get("max_seconds", AV_MAX_SECONDS)),
+        "--seed", str(opts["seed"]),
+        "--out", raw_path,
+    ]
+
+    t0 = time.time()
+    mem_limit_gb = max(16.0, round(avail - LC_MLX_HEADROOM_GB, 1))
+    env = {
+        **os.environ,
+        "PYTHONUNBUFFERED": "1",
+        "LONGCAT_MLX_MEM_LIMIT_GB": str(mem_limit_gb),
+        "LONGCAT_MLX_CACHE_LIMIT_GB": str(LC_MLX_CACHE_GB),
+    }
+    _set(jid, stage="loading avatar model", progress=3,
+         mem_limit_gb=mem_limit_gb, avail_gb_at_launch=avail)
+    proc = subprocess.Popen(cmd, cwd=AV_REPO_DIR, stdout=subprocess.PIPE,
+                            stderr=subprocess.STDOUT, text=True, bufsize=1, env=env)
+    tail, gen_result = [], None
+    for line in proc.stdout:
+        tail.append(line.rstrip())
+        if len(tail) > 60:
+            tail.pop(0)
+        if _AV_JSON_RE.match(line):
+            try:
+                rec = json.loads(line)
+            except ValueError:
+                continue
+            if rec.get("ok"):
+                gen_result = rec
+            elif "progress" in rec:
+                # Generation occupies 3-80% of the overall job.
+                _set(jid, stage=rec.get("stage", "generating"),
+                     progress=int(3 + 0.77 * float(rec["progress"])))
+    proc.wait()
+    if ref_is_temp:
+        try:
+            os.remove(ref_path)
+        except OSError:
+            pass
+    if proc.returncode != 0 or not os.path.isfile(raw_path):
+        raise RuntimeError("avatar generate failed: " + " | ".join(tail[-8:]))
+
+    # Finish: burn captions + mux the voiceover (this venv has mlx_whisper).
+    style = opts.get("caption_style", AV_DEF_CAPTION)
+    _set(jid, stage="adding captions + audio", progress=82)
+    fcmd = [
+        sys.executable, AV_CAPTIONS_PY,
+        "--audio", audio_path,
+        "--video-in", raw_path,
+        "--video-out", final_path,
+        "--style", style,
+        "--width", str(out_w),
+        "--height", str(out_h),
+    ]
+    fproc = subprocess.run(fcmd, cwd=BASE_DIR, capture_output=True, text=True,
+                           env=_ffmpeg_env())
+    try:
+        os.remove(raw_path)
+    except OSError:
+        pass
+    if fproc.returncode != 0 or not os.path.isfile(final_path):
+        raise RuntimeError("caption/audio finishing failed: "
+                           + (fproc.stderr or fproc.stdout or "")[-400:])
+
+    elapsed = round(time.time() - t0, 1)
+    _set(jid, gen_frames=(gen_result or {}).get("frames"),
+         caption_style=style)
+    return final_name, elapsed
+
+
+# ---------------------------------------------------------------------------
+# Video models (Wan2.2, LongCat) run in their OWN venvs and need a large slice
+# of unified memory. The oMLX app (:8000) keeps the chat LLM resident (~28GB
+# for the 35B). Running video on top of it has hard-crashed the Mac. So before
+# ANY video job we unload whatever oMLX has loaded, then reload it when the job
+# finishes (success or failure). Fully best-effort: if :8000 is unreachable we
+# just skip and fall back to the memory guardrail.
+# ---------------------------------------------------------------------------
+OMLX_URL = os.environ.get("VIDEO_OMLX_URL", "http://127.0.0.1:8000").rstrip("/")
+AUTO_UNLOAD_LLM = os.environ.get("VIDEO_AUTO_UNLOAD_LLM", "1") not in ("0", "false", "no", "")
+
+
+def _omlx_get(path, timeout=8):
+    import urllib.request
+    req = urllib.request.Request(OMLX_URL + path, method="GET")
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        return json.loads(r.read() or b"{}")
+
+
+def _omlx_post(path, timeout=600):
+    import urllib.request
+    req = urllib.request.Request(OMLX_URL + path, data=b"", method="POST")
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        return json.loads(r.read() or b"{}")
+
+
+def _omlx_loaded_models():
+    """Ids of oMLX models currently loaded (or mid-load) in the :8000 pool."""
+    try:
+        st = _omlx_get("/v1/models/status")
+    except Exception:
+        return []
+    out = []
+    for m in st.get("models", []):
+        if m.get("loaded") or m.get("is_loading"):
+            out.append(m["id"])
+    return out
+
+
+def _omlx_model_memory_gb():
+    try:
+        st = _omlx_get("/v1/models/status")
+        return round(float(st.get("current_model_memory", 0)) / 1e9, 1)
+    except Exception:
+        return None
+
+
+def _free_chat_llm(jid):
+    """Unload every currently-loaded oMLX model so video gen has headroom.
+
+    Returns the list of ids we unloaded (to reload later). Best-effort; never
+    raises — memory guardrails are the backstop."""
+    if not AUTO_UNLOAD_LLM:
+        return []
+    ids = _omlx_loaded_models()
+    if not ids:
+        return []
+    _set(jid, stage="freeing memory: unloading chat model…", progress=1)
+    for mid in ids:
+        try:
+            import urllib.parse
+            _omlx_post("/v1/models/" + urllib.parse.quote(mid, safe="") + "/unload")
+        except Exception:
+            pass
+    # Wait for the pool to report the memory actually released (bounded).
+    t0 = time.time()
+    while time.time() - t0 < 30:
+        mem = _omlx_model_memory_gb()
+        if mem is not None and mem < 2.0:
+            break
+        if not _omlx_loaded_models():
+            break
+        time.sleep(1)
+    time.sleep(1.5)  # small settle for the allocator/OS pages
+    return ids
+
+
+def _restore_chat_llm(jid, ids):
+    """Reload the models we unloaded. Best-effort; never raises."""
+    if not ids:
+        return
+    _set(jid, stage="reloading chat model…", progress=98)
+    for mid in ids:
+        try:
+            import urllib.parse
+            _omlx_post("/v1/models/" + urllib.parse.quote(mid, safe="") + "/load")
+        except Exception:
+            pass
+
+
 def _run_job(jid):
     job = _get(jid)
     if not job:
         return
     opts = job["opts"]
+    freed = []
     try:
-        if opts.get("engine") == "longcat":
+        # Free the chat LLM (and anything else oMLX has resident) up front so
+        # BOTH video engines have the unified memory they need.
+        freed = _free_chat_llm(jid)
+
+        if opts.get("engine") == "avatar":
+            if not os.path.isfile(AV_VENV_PY):
+                raise RuntimeError("Avatar runtime is not installed "
+                                   f"({AV_VENV_PY} missing)")
+            av_dir = os.path.join(AV_WEIGHTS_DIR, AV_VARIANT_SUBDIR)
+            if not os.path.isdir(av_dir):
+                raise RuntimeError("LongCat-Video-Avatar weights are missing — "
+                                   f"expected {av_dir}/")
+            _set(jid, stage="loading avatar model", progress=3)
+            name, elapsed = _run_avatar(jid, opts)
+            _set(jid, stage="saving", progress=98)
+            j = _get(jid)
+            result = {
+                "filename": name,
+                "url": f"/files/{name}",
+                "engine": "avatar",
+                "model": AV_MODEL_LABEL,
+                "video_type": opts.get("video_type"),
+                "width": opts["width"], "height": opts["height"],
+                "fps": AV_FPS,
+                "num_frames": (j or {}).get("gen_frames"),
+                "caption_style": (j or {}).get("caption_style"),
+                "audio_file": opts.get("audio_file"),
+                "seed": opts["seed"], "mode": "avatar",
+                "prompt": opts["prompt"],
+                "seconds": elapsed,
+                "created": datetime.now().isoformat(timespec="seconds"),
+            }
+        elif opts.get("engine") == "longcat":
             if not os.path.isfile(LC_VENV_PY):
                 raise RuntimeError("LongCat runtime is not installed "
                                    f"({LC_VENV_PY} missing)")
             if not _lc_weights_ready():
                 raise RuntimeError("LongCat-Video weights are missing — expected "
                                    f"{LC_WEIGHTS_DIR}/LongCat-Video-{LC_VARIANT}/")
-            # Memory guardrail: LongCat needs a large chunk of unified memory.
-            # Running it on top of the loaded LLM has hard-crashed the Mac, so
-            # refuse to start unless enough RAM is genuinely free right now.
+            # Memory guardrail (now checked AFTER freeing the chat LLM): still
+            # refuse if something else is hogging RAM, to avoid the OOM crash.
             avail = _avail_mem_gb()
             if avail < LC_REQUIRED_FREE_GB:
                 raise RuntimeError(
-                    f"Not enough free memory for LongCat: {avail:.0f}GB free, "
-                    f"needs ~{LC_REQUIRED_FREE_GB:.0f}GB. Free up unified memory "
-                    f"first — unload the chat LLM (or other large models) and "
-                    f"close heavy apps, then try again. This guard prevents the "
-                    f"out-of-memory crash that requires a reboot.")
+                    f"Not enough free memory for LongCat even after unloading "
+                    f"the chat model: {avail:.0f}GB free, needs "
+                    f"~{LC_REQUIRED_FREE_GB:.0f}GB. Close other heavy apps and "
+                    f"try again. This guard prevents the out-of-memory crash "
+                    f"that requires a reboot.")
             _set(jid, stage="loading model + merging fast-mode LoRA", progress=3)
             name, elapsed = _run_longcat(jid, opts)
             _set(jid, stage="saving", progress=96)
@@ -610,36 +1057,48 @@ def _run_job(jid):
                 "seconds": elapsed,
                 "created": datetime.now().isoformat(timespec="seconds"),
             }
-            _set(jid, status="done", stage="done", progress=100, result=result)
-            return
-        if not _weights_ready():
-            raise RuntimeError("Wan2.2-I2V-A14B weights are missing or still "
-                               "downloading — check the model directory")
-        if I2V_ONLY and not opts.get("image"):
-            raise RuntimeError("This model is image-to-video only — a start "
-                               "image is required")
-        _set(jid, stage="loading model + encoders (first run is slow)", progress=3)
-        name, elapsed = _run_generate(jid, opts)
-        _set(jid, stage="saving", progress=96)
-        result = {
-            "filename": name,
-            "url": f"/files/{name}",
-            "engine": "wan",
-            "width": opts["width"], "height": opts["height"],
-            "num_frames": opts["num_frames"], "fps": FPS,
-            "duration": round(opts["num_frames"] / FPS, 2),
-            "steps": opts["steps"], "seed": opts["seed"],
-            "mode": "i2v" if opts.get("image") else "t2v",
-            "prompt": opts["prompt"],
-            "seconds": elapsed,
-            "tiling": opts.get("tiling"),
-            "tiling_forced": opts.get("tiling_forced", False),
-            "created": datetime.now().isoformat(timespec="seconds"),
-        }
+        else:
+            if not _weights_ready():
+                raise RuntimeError("Wan2.2-I2V-A14B weights are missing or still "
+                                   "downloading — check the model directory")
+            if I2V_ONLY and not opts.get("image"):
+                raise RuntimeError("This model is image-to-video only — a start "
+                                   "image is required")
+            _set(jid, stage="loading model + encoders (first run is slow)", progress=3)
+            name, elapsed = _run_generate(jid, opts)
+            _set(jid, stage="saving", progress=96)
+            result = {
+                "filename": name,
+                "url": f"/files/{name}",
+                "engine": "wan",
+                "width": opts["width"], "height": opts["height"],
+                "num_frames": opts["num_frames"], "fps": FPS,
+                "duration": round(opts["num_frames"] / FPS, 2),
+                "steps": opts["steps"], "seed": opts["seed"],
+                "mode": "i2v" if opts.get("image") else "t2v",
+                "prompt": opts["prompt"],
+                "seconds": elapsed,
+                "tiling": opts.get("tiling"),
+                "tiling_forced": opts.get("tiling_forced", False),
+                "created": datetime.now().isoformat(timespec="seconds"),
+            }
+
+        # Restore the chat model BEFORE marking done, so when the UI shows the
+        # finished clip the chat is already usable again.
+        _restore_chat_llm(jid, freed)
+        freed = []
         _set(jid, status="done", stage="done", progress=100, result=result)
     except Exception as e:
         _set(jid, status="error", stage="error",
              error=f"{type(e).__name__}: {e}")
+    finally:
+        # Guarantee the chat model comes back even if generation failed.
+        if freed:
+            try:
+                _restore_chat_llm(jid, freed)
+            except Exception:
+                pass
+
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -697,8 +1156,18 @@ class Handler(BaseHTTPRequestHandler):
                         "required_free_gb": LC_REQUIRED_FREE_GB,
                         "mem_ok": lc_avail_gb >= LC_REQUIRED_FREE_GB,
                     },
+                    "avatar": {
+                        "available": _av_available(),
+                        "label": AV_MODEL_LABEL, "modes": ["avatar"],
+                        "fps": AV_FPS,
+                        "free_gb": lc_avail_gb,
+                        "required_free_gb": AV_REQUIRED_FREE_GB,
+                        "mem_ok": lc_avail_gb >= AV_REQUIRED_FREE_GB,
+                    },
                 },
                 "queue": len(_work_q),
+                "auto_unload_llm": AUTO_UNLOAD_LLM,
+                "loaded_llms": _omlx_loaded_models() if AUTO_UNLOAD_LLM else [],
             })
         if path == "/info":
             return self._json(200, {
@@ -744,7 +1213,29 @@ class Handler(BaseHTTPRequestHandler):
                         "note": ("~10 min render per segment @ 480p; "
                                  "15s≈3 segments (~30 min), 30s≈6 segments (~60 min)"),
                     },
+                    "avatar": {
+                        "available": _av_available(),
+                        "label": AV_MODEL_LABEL, "modes": ["avatar"], "fps": AV_FPS,
+                        "res_presets": AV_RES_PRESETS, "aspect_default": AV_DEF_ASPECT,
+                        "caption_styles": AV_CAPTION_STYLES,
+                        "caption_default": AV_DEF_CAPTION,
+                        "needs_image": True, "needs_audio": True,
+                        "defaults": {"duration_seconds": AV_DEF_SECONDS,
+                                     "aspect": AV_DEF_ASPECT,
+                                     "caption_style": AV_DEF_CAPTION},
+                        "limits": {"min_seconds": AV_MIN_SECONDS,
+                                   "max_seconds": AV_MAX_SECONDS},
+                        "note": ("audio-driven talking avatar (25fps, lip-synced). "
+                                 "Generates at 256 short-side then upscales. "
+                                 "~4-5 min per ~3s — a 15s clip ≈ 20-25 min."),
+                    },
                 },
+                "video_types": [
+                    {"id": t["id"], "label": t["label"], "engine": t["engine"],
+                     "needs_image": t["needs_image"], "needs_audio": t["needs_audio"],
+                     "caption": t["caption"], "aspect": t["aspect"]}
+                    for t in VIDEO_TYPES
+                ],
                 "engine_default": "wan",
             })
         if path == "/status":
@@ -758,6 +1249,13 @@ class Handler(BaseHTTPRequestHandler):
                                      "result", "error")})
         if path == "/stats":
             return self._json(200, _sys_stats())
+        if path == "/library":
+            return self._json(200, {
+                "audio": _list_audio_library(),
+                "images": _list_image_library(),
+                "tts_base": "http://127.0.0.1:8200",
+                "image_base": "http://127.0.0.1:8400",
+            })
         if path.startswith("/files/"):
             return self._serve_file(os.path.basename(path))
         return self._json(404, {"error": "not found"})
@@ -782,8 +1280,74 @@ class Handler(BaseHTTPRequestHandler):
             if not prompt:
                 return self._json(400, {"error": "prompt is required"})
             engine = str(d.get("engine") or "wan").lower()
-            if engine not in ("wan", "longcat"):
+            # A `video_type` (the viral-studio dropdown) selects the engine and
+            # shapes the scene prompt / caption / aspect defaults.
+            tpreset = VIDEO_TYPES_BY_ID.get(str(d.get("video_type") or ""))
+            if tpreset:
+                engine = tpreset["engine"]
+                prompt = tpreset["scene"].format(p=prompt)
+            if engine not in ("wan", "longcat", "avatar"):
                 engine = "wan"
+
+            # --- Avatar (audio-driven talking viral video) ------------------
+            if engine == "avatar":
+                if not os.path.isfile(AV_VENV_PY):
+                    return self._json(400, {"error": "Avatar runtime is not "
+                                            "installed on this machine"})
+                audio_file = (d.get("audio_file") or "").strip()
+                if not audio_file:
+                    return self._json(400, {"error": "Pick a voiceover from the "
+                                            "audio dropdown (generate it in TTS Studio first)"})
+                if not ((d.get("image") or "").strip() or (d.get("image_ref") or "").strip()):
+                    return self._json(400, {"error": "A reference image is "
+                                            "required — upload one or pick a generated image"})
+                avail = _avail_mem_gb()
+                reclaim = _omlx_model_memory_gb() if AUTO_UNLOAD_LLM else 0
+                if avail + (reclaim or 0) < AV_REQUIRED_FREE_GB:
+                    return self._json(400, {"error":
+                        f"Not enough free memory for the avatar model: "
+                        f"{avail:.0f}GB free"
+                        + (f" (+{reclaim:.0f}GB reclaimable from the chat model)"
+                           if reclaim else "")
+                        + f", needs ~{AV_REQUIRED_FREE_GB:.0f}GB. Close other "
+                        f"large models / heavy apps, then try again."})
+                aspect = d.get("aspect")
+                if aspect not in AV_RES_PRESETS:
+                    aspect = (tpreset or {}).get("aspect", AV_DEF_ASPECT)
+                if aspect not in AV_RES_PRESETS:
+                    aspect = AV_DEF_ASPECT
+                w, h = AV_RES_PRESETS[aspect]
+                caption_style = d.get("caption_style") or (tpreset or {}).get(
+                    "caption", AV_DEF_CAPTION)
+                if caption_style not in AV_CAPTION_STYLES:
+                    caption_style = AV_DEF_CAPTION
+                try:
+                    max_seconds = float(d.get("duration_seconds", AV_DEF_SECONDS))
+                except (TypeError, ValueError):
+                    max_seconds = AV_DEF_SECONDS
+                max_seconds = max(AV_MIN_SECONDS, min(AV_MAX_SECONDS, max_seconds))
+                opts = {
+                    "engine": "avatar",
+                    "video_type": (tpreset or {}).get("id"),
+                    "prompt": prompt[:2000],
+                    "image": d.get("image", ""),
+                    "image_ref": (d.get("image_ref") or "").strip(),
+                    "audio_file": audio_file,
+                    "width": w, "height": h,
+                    "aspect": aspect,
+                    "caption_style": caption_style,
+                    "max_seconds": max_seconds,
+                    "seed": int(d.get("seed", 42)),
+                }
+                jid = "av_" + uuid.uuid4().hex[:12]
+                _set(jid, status="running", stage="queued", progress=0,
+                     result=None, error=None, opts=opts)
+                with _work_cv:
+                    _work_q.append(jid)
+                    _work_cv.notify()
+                return self._json(200, {"ok": True, "job_id": jid,
+                                        "engine": "avatar", "aspect": aspect,
+                                        "caption_style": caption_style})
 
             # --- LongCat text-to-video (long clips) -------------------------
             if engine == "longcat":
@@ -793,14 +1357,21 @@ class Handler(BaseHTTPRequestHandler):
                 # Reject up front if memory is too low to run safely, so the
                 # user gets an immediate, actionable message instead of a job
                 # that queues then fails (and avoids the OOM crash entirely).
+                # Auto-unload frees the resident chat LLM before the worker runs,
+                # so count that reclaimable memory toward the requirement here.
                 avail = _avail_mem_gb()
-                if avail < LC_REQUIRED_FREE_GB:
+                reclaim = _omlx_model_memory_gb() if AUTO_UNLOAD_LLM else 0
+                eff_avail = avail + (reclaim or 0)
+                if eff_avail < LC_REQUIRED_FREE_GB:
                     return self._json(400, {"error":
                         f"Not enough free memory for LongCat right now: "
-                        f"{avail:.0f}GB free, needs ~{LC_REQUIRED_FREE_GB:.0f}GB. "
-                        f"Unload the chat LLM / large models to free unified "
-                        f"memory, then try again.",
+                        f"{avail:.0f}GB free"
+                        + (f" (+{reclaim:.0f}GB reclaimable from the chat model)"
+                           if reclaim else "")
+                        + f", needs ~{LC_REQUIRED_FREE_GB:.0f}GB. "
+                        f"Close other large models / heavy apps, then try again.",
                         "mem": {"free_gb": avail,
+                                "reclaimable_gb": reclaim,
                                 "required_free_gb": LC_REQUIRED_FREE_GB}})
                 res = str(d.get("res") or LC_DEF_RES)
                 if res not in LC_RES_PRESETS:
