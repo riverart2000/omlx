@@ -108,6 +108,71 @@ DEF_RES = "512p"
 # Backward-compatible flat preset map (defaults to the 512p tier).
 PRESETS = RES_PRESETS[DEF_RES]
 
+# ---------------------------------------------------------------------------
+# Second engine: LongCat-Video (text-to-video, long clips). A completely
+# separate 13.6B diffusers-style stack living in its own repo + venv. Selected
+# per-request via `engine: "longcat"`; Wan2.2 (`engine: "wan"`, the default)
+# stays the image-to-video path. LongCat generates 15fps long video by chaining
+# 93-frame segments (each conditioned on the previous segment's last 13 frames),
+# using the cfg_step_lora fast path (8 steps, collapsed CFG) — the only path
+# fast enough to be usable.
+# ---------------------------------------------------------------------------
+LC_REPO_DIR = os.environ.get("LONGCAT_REPO_DIR", "/Users/joebains/longcat-video-mlx")
+LC_VENV_PY = os.environ.get(
+    "LONGCAT_PY", os.path.join(LC_REPO_DIR, ".venv", "bin", "python"))
+# Parent dir that contains LongCat-Video-<variant>/ (VARIANT_DIRNAMES resolves it).
+LC_WEIGHTS_DIR = os.environ.get(
+    "LONGCAT_WEIGHTS_DIR", "/Users/joebains/.omlx/models/mlx-community")
+LC_VARIANT = os.environ.get("LONGCAT_VARIANT", "q8")
+LC_MODEL_LABEL = f"LongCat-Video ({LC_VARIANT}) — text-to-video, long clips"
+
+LC_FPS = 15                    # LongCat native output is 15fps.
+LC_SEG_FRAMES = 93             # frames generated per segment
+LC_COND_FRAMES = 13            # frames of overlap conditioning between segments
+LC_SEG_STRIDE = LC_SEG_FRAMES - LC_COND_FRAMES   # 80 net-new frames per extra segment
+LC_STEPS = 8                   # cfg_step_lora fast path
+LC_MIN_SECONDS = 5.0
+LC_MAX_SECONDS = 30.0          # user target ceiling; caps runaway multi-hour renders
+LC_DEF_SECONDS = 15.0
+LC_MAX_SEGMENTS = 6            # 6 segments ≈ 32.9s ≈ 30s preset
+
+# 480p is LongCat's default / sweet-spot resolution. Dims must be /16 (VAE).
+LC_RES_PRESETS = {
+    "480p": {
+        "16:9": (832, 480),
+        "9:16": (480, 832),
+        "1:1":  (512, 512),
+        "4:5":  (512, 640),
+        "3:2":  (720, 480),
+    },
+}
+LC_DEF_RES = "480p"
+LC_DEF_ASPECT = "9:16"
+# Named length presets for the UI, in 5-second blocks (seconds -> segments:
+# 5→1, 10→2, 15→3, 20→4, 25→5, 30→6 via _lc_segments_for_seconds).
+LC_LENGTH_PRESETS = [
+    {"label": "5s",  "seconds": 5},
+    {"label": "10s", "seconds": 10},
+    {"label": "15s", "seconds": 15},
+    {"label": "20s", "seconds": 20},
+    {"label": "25s", "seconds": 25},
+    {"label": "30s", "seconds": 30},
+]
+
+# --- Memory safety (LongCat) ----------------------------------------------
+# A LongCat 480p q8 run needs a large chunk of unified memory (DiT ~15GB +
+# UMT5 encoder + VAE-decode peak). Running it ON TOP of the already-loaded LLM
+# has hard-crashed the whole Mac (kernel panic -> reboot). Two guards:
+#  1. Pre-flight: refuse to launch unless at least LC_REQUIRED_FREE_GB is
+#     genuinely free right now.
+#  2. In-child MLX cap: bound this run's MLX memory so an overshoot raises a
+#     catchable error instead of exhausting RAM (see the venv sitecustomize.py).
+LC_REQUIRED_FREE_GB = float(os.environ.get("LONGCAT_REQUIRED_FREE_GB", "34"))
+# Leave this much of the measured-free memory as OS/other-process headroom;
+# the child's MLX hard limit = (available_at_launch - this).
+LC_MLX_HEADROOM_GB = float(os.environ.get("LONGCAT_MLX_HEADROOM_GB", "8"))
+LC_MLX_CACHE_GB = float(os.environ.get("LONGCAT_MLX_CACHE_GB", "1"))
+
 _jobs = {}
 _jobs_lock = threading.Lock()
 _work_q = []
@@ -121,6 +186,69 @@ def _weights_ready() -> bool:
 
 def _scripts_available() -> bool:
     return os.path.isfile(VENV_PY)
+
+
+def _lc_weights_ready() -> bool:
+    """LongCat weights present: <LC_WEIGHTS_DIR>/LongCat-Video-<variant>/dit exists."""
+    d = os.path.join(LC_WEIGHTS_DIR, f"LongCat-Video-{LC_VARIANT}")
+    return os.path.isdir(os.path.join(d, "dit"))
+
+
+def _lc_available() -> bool:
+    return os.path.isfile(LC_VENV_PY) and _lc_weights_ready()
+
+
+def _avail_mem_gb() -> float:
+    """Best-effort 'genuinely reclaimable' unified memory, in GB.
+
+    free + inactive + speculative + purgeable pages — memory the kernel can
+    hand out without swapping. Used as the LongCat launch guardrail. Returns a
+    large number on failure so we never wrongly block (the in-child MLX cap is
+    the backstop)."""
+    try:
+        vm = subprocess.check_output(["vm_stat"], text=True, timeout=3)
+    except Exception:
+        return 1e9
+    page = 4096
+    pm = re.search(r"page size of (\d+) bytes", vm)
+    if pm:
+        page = int(pm.group(1))
+
+    def _pg(name):
+        mm = re.search(name + r":\s+(\d+)\.", vm)
+        return int(mm.group(1)) if mm else 0
+
+    pages = (_pg("Pages free") + _pg("Pages inactive")
+             + _pg("Pages speculative") + _pg("Pages purgeable"))
+    return round(pages * page / 1e9, 1)
+
+
+def _lc_segments_for_seconds(sec: float) -> int:
+    """Chained-segment count for a target duration at LC_FPS.
+
+    frames(s) = 93 + (s-1)*80. Solve for the fewest segments that reach the
+    requested seconds (round up so we never undershoot), clamped to
+    [1, LC_MAX_SEGMENTS]."""
+    try:
+        sec = float(sec)
+    except (TypeError, ValueError):
+        sec = LC_DEF_SECONDS
+    sec = max(LC_MIN_SECONDS, min(LC_MAX_SECONDS, sec))
+    target = sec * LC_FPS
+    if target <= LC_SEG_FRAMES:
+        return 1
+    import math
+    segs = int(math.ceil((target - LC_SEG_FRAMES) / LC_SEG_STRIDE)) + 1
+    return max(1, min(LC_MAX_SEGMENTS, segs))
+
+
+def _lc_frames(segments: int) -> int:
+    return LC_SEG_FRAMES + max(0, segments - 1) * LC_SEG_STRIDE
+
+
+def _even16(v: int) -> int:
+    v = max(MIN_DIM, min(MAX_DIM, int(v)))
+    return (v // 16) * 16
 
 
 def _frames_for_seconds(sec: float) -> int:
@@ -367,12 +495,123 @@ def _run_generate(jid, opts):
     return out_name, elapsed
 
 
+# LongCat prints "segment i/n (K new frames) — total elapsed ...s" per segment.
+_LC_SEG_RE = re.compile(r"segment\s+(\d+)\s*/\s*(\d+)")
+
+
+def _run_longcat(jid, opts):
+    """Generate a long clip with LongCat-Video (its own repo + venv).
+
+    Runs scripts/run_long_video.py with cwd=LC_REPO_DIR so its `_common`
+    imports resolve. Streams stdout for per-segment progress. LongCat is
+    text-to-video; no reference image is used."""
+    out_name = "lc_" + uuid.uuid4().hex[:12] + ".mp4"
+    out_path = os.path.join(OUT_DIR, out_name)
+    segments = int(opts["segments"])
+    cmd = [
+        LC_VENV_PY, os.path.join("scripts", "run_long_video.py"),
+        "--weights", LC_WEIGHTS_DIR,
+        "--variant", LC_VARIANT,
+        "--cfg-step-lora",
+        "--prompt", opts["prompt"],
+        "--num-segments", str(segments),
+        "--num-frames-per-segment", str(LC_SEG_FRAMES),
+        "--num-cond-frames", str(LC_COND_FRAMES),
+        "--height", str(opts["height"]),
+        "--width", str(opts["width"]),
+        "--seed", str(opts["seed"]),
+        "--out", out_path,
+    ]
+    if opts.get("negative_prompt"):
+        cmd += ["--negative-prompt", opts["negative_prompt"]]
+
+    t0 = time.time()
+    # Cap this run's MLX memory so an overshoot raises (catchable) instead of
+    # exhausting unified RAM and panicking the machine. Budget = the memory we
+    # measured free at launch, minus an OS/other-process headroom. Read by the
+    # venv's sitecustomize.py at interpreter startup.
+    avail = _avail_mem_gb()
+    mem_limit_gb = max(16.0, round(avail - LC_MLX_HEADROOM_GB, 1))
+    env = {
+        **os.environ,
+        "PYTHONUNBUFFERED": "1",
+        "LONGCAT_MLX_MEM_LIMIT_GB": str(mem_limit_gb),
+        "LONGCAT_MLX_CACHE_LIMIT_GB": str(LC_MLX_CACHE_GB),
+    }
+    _set(jid, mem_limit_gb=mem_limit_gb, avail_gb_at_launch=avail)
+    proc = subprocess.Popen(cmd, cwd=LC_REPO_DIR, stdout=subprocess.PIPE,
+                            stderr=subprocess.STDOUT, text=True, bufsize=1, env=env)
+    tail = []
+    for line in proc.stdout:
+        tail.append(line.rstrip())
+        if len(tail) > 60:
+            tail.pop(0)
+        low = line.lower()
+        if "building pipeline" in low or "loading from" in low:
+            _set(jid, stage="loading model + merging fast-mode LoRA", progress=4)
+        elif "merged" in low and "modules" in low:
+            _set(jid, stage="encoding prompt", progress=6)
+        else:
+            m = _LC_SEG_RE.search(line)
+            if m:
+                done, tot = int(m.group(1)), int(m.group(2))
+                # A "segment i/n" line prints when segment i FINISHES.
+                _set(jid, stage=f"segment {done}/{tot} rendered",
+                     progress=int(8 + 88 * done / max(1, tot)))
+    proc.wait()
+    if proc.returncode != 0:
+        raise RuntimeError("longcat generate failed: " + " | ".join(tail[-8:]))
+    if not os.path.isfile(out_path):
+        raise RuntimeError("longcat generate failed: no output produced — "
+                           + " | ".join(tail[-6:]))
+    elapsed = round(time.time() - t0, 1)
+    return out_name, elapsed
+
+
 def _run_job(jid):
     job = _get(jid)
     if not job:
         return
     opts = job["opts"]
     try:
+        if opts.get("engine") == "longcat":
+            if not os.path.isfile(LC_VENV_PY):
+                raise RuntimeError("LongCat runtime is not installed "
+                                   f"({LC_VENV_PY} missing)")
+            if not _lc_weights_ready():
+                raise RuntimeError("LongCat-Video weights are missing — expected "
+                                   f"{LC_WEIGHTS_DIR}/LongCat-Video-{LC_VARIANT}/")
+            # Memory guardrail: LongCat needs a large chunk of unified memory.
+            # Running it on top of the loaded LLM has hard-crashed the Mac, so
+            # refuse to start unless enough RAM is genuinely free right now.
+            avail = _avail_mem_gb()
+            if avail < LC_REQUIRED_FREE_GB:
+                raise RuntimeError(
+                    f"Not enough free memory for LongCat: {avail:.0f}GB free, "
+                    f"needs ~{LC_REQUIRED_FREE_GB:.0f}GB. Free up unified memory "
+                    f"first — unload the chat LLM (or other large models) and "
+                    f"close heavy apps, then try again. This guard prevents the "
+                    f"out-of-memory crash that requires a reboot.")
+            _set(jid, stage="loading model + merging fast-mode LoRA", progress=3)
+            name, elapsed = _run_longcat(jid, opts)
+            _set(jid, stage="saving", progress=96)
+            num_frames = _lc_frames(opts["segments"])
+            result = {
+                "filename": name,
+                "url": f"/files/{name}",
+                "engine": "longcat",
+                "model": LC_MODEL_LABEL,
+                "width": opts["width"], "height": opts["height"],
+                "num_frames": num_frames, "fps": LC_FPS,
+                "duration": round(num_frames / LC_FPS, 2),
+                "segments": opts["segments"], "steps": LC_STEPS,
+                "seed": opts["seed"], "mode": "t2v",
+                "prompt": opts["prompt"],
+                "seconds": elapsed,
+                "created": datetime.now().isoformat(timespec="seconds"),
+            }
+            _set(jid, status="done", stage="done", progress=100, result=result)
+            return
         if not _weights_ready():
             raise RuntimeError("Wan2.2-I2V-A14B weights are missing or still "
                                "downloading — check the model directory")
@@ -385,6 +624,7 @@ def _run_job(jid):
         result = {
             "filename": name,
             "url": f"/files/{name}",
+            "engine": "wan",
             "width": opts["width"], "height": opts["height"],
             "num_frames": opts["num_frames"], "fps": FPS,
             "duration": round(opts["num_frames"] / FPS, 2),
@@ -439,6 +679,7 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         path = urlparse(self.path).path
         if path == "/health":
+            lc_avail_gb = _avail_mem_gb()
             return self._json(200, {
                 "ok": True,
                 "scripts_available": _scripts_available(),
@@ -446,6 +687,17 @@ class Handler(BaseHTTPRequestHandler):
                 "model": MODEL_LABEL,
                 "model_dir": MODEL_DIR,
                 "i2v_only": I2V_ONLY,
+                "engines": {
+                    "wan": {"available": _scripts_available() and _weights_ready(),
+                            "label": MODEL_LABEL, "modes": ["i2v"]},
+                    "longcat": {
+                        "available": _lc_available(),
+                        "label": LC_MODEL_LABEL, "modes": ["t2v"],
+                        "free_gb": lc_avail_gb,
+                        "required_free_gb": LC_REQUIRED_FREE_GB,
+                        "mem_ok": lc_avail_gb >= LC_REQUIRED_FREE_GB,
+                    },
+                },
                 "queue": len(_work_q),
             })
         if path == "/info":
@@ -470,6 +722,30 @@ class Handler(BaseHTTPRequestHandler):
                            "min_dim": MIN_DIM, "max_dim": MAX_DIM,
                            "min_steps": 10, "max_steps": 60},
                 "weights_ready": _weights_ready(),
+                "engines": {
+                    "wan": {
+                        "available": _scripts_available() and _weights_ready(),
+                        "label": MODEL_LABEL, "modes": ["i2v"], "fps": FPS,
+                        "res_presets": RES_PRESETS, "res_default": DEF_RES,
+                        "needs_image": I2V_ONLY,
+                    },
+                    "longcat": {
+                        "available": _lc_available(),
+                        "label": LC_MODEL_LABEL, "modes": ["t2v"], "fps": LC_FPS,
+                        "res_presets": LC_RES_PRESETS, "res_default": LC_DEF_RES,
+                        "aspect_default": LC_DEF_ASPECT,
+                        "length_presets": LC_LENGTH_PRESETS,
+                        "needs_image": False,
+                        "defaults": {"duration_seconds": LC_DEF_SECONDS,
+                                     "res": LC_DEF_RES, "aspect": LC_DEF_ASPECT},
+                        "limits": {"min_seconds": LC_MIN_SECONDS,
+                                   "max_seconds": LC_MAX_SECONDS,
+                                   "max_segments": LC_MAX_SEGMENTS},
+                        "note": ("~10 min render per segment @ 480p; "
+                                 "15s≈3 segments (~30 min), 30s≈6 segments (~60 min)"),
+                    },
+                },
+                "engine_default": "wan",
             })
         if path == "/status":
             qs = parse_qs(urlparse(self.path).query)
@@ -505,6 +781,61 @@ class Handler(BaseHTTPRequestHandler):
             prompt = (d.get("prompt") or "").strip()
             if not prompt:
                 return self._json(400, {"error": "prompt is required"})
+            engine = str(d.get("engine") or "wan").lower()
+            if engine not in ("wan", "longcat"):
+                engine = "wan"
+
+            # --- LongCat text-to-video (long clips) -------------------------
+            if engine == "longcat":
+                if not os.path.isfile(LC_VENV_PY):
+                    return self._json(400, {"error": "LongCat runtime is not "
+                                            "installed on this machine"})
+                # Reject up front if memory is too low to run safely, so the
+                # user gets an immediate, actionable message instead of a job
+                # that queues then fails (and avoids the OOM crash entirely).
+                avail = _avail_mem_gb()
+                if avail < LC_REQUIRED_FREE_GB:
+                    return self._json(400, {"error":
+                        f"Not enough free memory for LongCat right now: "
+                        f"{avail:.0f}GB free, needs ~{LC_REQUIRED_FREE_GB:.0f}GB. "
+                        f"Unload the chat LLM / large models to free unified "
+                        f"memory, then try again.",
+                        "mem": {"free_gb": avail,
+                                "required_free_gb": LC_REQUIRED_FREE_GB}})
+                res = str(d.get("res") or LC_DEF_RES)
+                if res not in LC_RES_PRESETS:
+                    res = LC_DEF_RES
+                aspect = d.get("aspect") or d.get("preset")
+                if aspect in LC_RES_PRESETS[res]:
+                    w, h = LC_RES_PRESETS[res][aspect]
+                else:
+                    w = _even16(d.get("width", LC_RES_PRESETS[res][LC_DEF_ASPECT][0]))
+                    h = _even16(d.get("height", LC_RES_PRESETS[res][LC_DEF_ASPECT][1]))
+                if d.get("segments"):
+                    segments = max(1, min(LC_MAX_SEGMENTS, int(d.get("segments"))))
+                else:
+                    segments = _lc_segments_for_seconds(
+                        d.get("duration_seconds", LC_DEF_SECONDS))
+                opts = {
+                    "engine": "longcat",
+                    "prompt": prompt[:2000],
+                    "negative_prompt": (d.get("negative_prompt") or "").strip(),
+                    "width": w, "height": h,
+                    "segments": segments,
+                    "seed": int(d.get("seed", 42)),
+                }
+                jid = "lc_" + uuid.uuid4().hex[:12]
+                _set(jid, status="running", stage="queued", progress=0,
+                     result=None, error=None, opts=opts)
+                with _work_cv:
+                    _work_q.append(jid)
+                    _work_cv.notify()
+                return self._json(200, {"ok": True, "job_id": jid,
+                                        "engine": "longcat", "segments": segments,
+                                        "est_frames": _lc_frames(segments),
+                                        "est_seconds": round(_lc_frames(segments) / LC_FPS, 1)})
+
+            # --- Wan2.2 image-to-video (default) ----------------------------
             if I2V_ONLY and not (d.get("image") or "").strip():
                 return self._json(400, {"error": "This model is image-to-video "
                                         "only — a reference / start image is required"})
@@ -543,6 +874,7 @@ class Handler(BaseHTTPRequestHandler):
             except (TypeError, ValueError):
                 shift = None
             opts = {
+                "engine": "wan",
                 "prompt": prompt[:2000],
                 "image": d.get("image", ""),
                 "negative_prompt": (d.get("negative_prompt") or "").strip(),

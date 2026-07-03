@@ -21,9 +21,16 @@
 /Users/joebains/Library/LaunchAgents/com.joebains.omlx-image.plist|launchagents/com.joebains.omlx-image.plist
 # TTS Studio launch agent (adds PHONEMIZER_ESPEAK_LIBRARY for Kokoro G2P)
 /Users/joebains/Library/LaunchAgents/com.joebains.tts-studio.plist|launchagents/com.joebains.tts-studio.plist
-# oMLX Video Studio (Wan2.2-TI2V-5B microservice, port 8500)
+# oMLX Video Studio (Wan2.2-I2V + LongCat-Video microservice, port 8500)
 /Users/joebains/omlx-video/video_server.py|omlx-video/video_server.py
 /Users/joebains/omlx-video/video.sh|omlx-video/video.sh
 /Users/joebains/omlx-video/requirements.txt|omlx-video/requirements.txt
 /Users/joebains/Library/LaunchAgents/com.joebains.omlx-video.plist|launchagents/com.joebains.omlx-video.plist
+# LongCat-Video engine customizations (separate repo clone + venv)
+#  - lora.py: quantization-aware LoRA merge (dequantize->add->requantize) so the
+#    cfg_step_lora fast path works on the q8 DiT (upstream merge only handles bf16)
+#  - sitecustomize.py: caps this run's MLX memory/cache from env vars set by the
+#    server, so an overshoot raises instead of hard-crashing the Mac (OOM reboot)
+/Users/joebains/longcat-video-mlx/longcat_video/lora.py|longcat-video-mlx/longcat_video/lora.py
+/Users/joebains/longcat-video-mlx/.venv/lib/python3.13/site-packages/sitecustomize.py|longcat-video-mlx/sitecustomize.py
 /Users/joebains/omlx-stack.sh|omlx-stack.sh

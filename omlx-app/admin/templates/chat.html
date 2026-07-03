@@ -6807,7 +6807,7 @@
             bar.style.cssText = 'display:flex;align-items:center;justify-content:space-between;' +
                 'padding:8px 12px;background:#161b22;border-bottom:1px solid #30363d;flex-shrink:0;';
             bar.innerHTML = '<span style="font-size:13px;font-weight:600;color:#e6edf3;display:flex;gap:8px;align-items:center;">' +
-                '<i data-lucide="image" class="w-4 h-4"></i> Image &amp; Video Studio — HiDream · Kontext · Wan2.2</span>';
+                '<i data-lucide="image" class="w-4 h-4"></i> Image &amp; Video Studio — HiDream · Kontext · Wan2.2 · LongCat</span>';
             const closeBtn = document.createElement('button');
             closeBtn.innerHTML = '<i data-lucide="x" class="w-4 h-4"></i>';
             closeBtn.title = 'Close';
@@ -6851,8 +6851,15 @@
                   '<div id="imgGuidanceWrap" style="display:none"><label style="display:block;font-size:12px;color:#8b949e">Guidance</label>' +
                     '<input id="imgGuidance" type="number" step="0.1" value="2.8" style="width:90px;background:#010409;border:1px solid #30363d;border-radius:8px;color:#e6edf3;padding:6px"></div>' +
                 '</div>' +
-                // ---- VIDEO controls (Wan2.2, :8500) ----
+                // ---- VIDEO controls (:8500) ----
                 '<div id="imgVideoControls" style="display:none">' +
+                  '<div style="margin-top:10px"><label style="display:block;font-size:12px;color:#8b949e">Video engine</label>' +
+                    '<select id="vidEngine" style="background:#010409;border:1px solid #30363d;border-radius:8px;color:#e6edf3;padding:6px;min-width:320px">' +
+                      '<option value="wan" selected>Wan2.2-I2V-A14B — image-to-video (short, ≤8s)</option>' +
+                      '<option value="longcat">LongCat-Video — text-to-video (long, 15/30s)</option>' +
+                    '</select></div>' +
+                  // ---- Wan2.2 (image-to-video) ----
+                  '<div id="vidWanControls">' +
                   '<div style="display:flex;gap:10px;flex-wrap:wrap;margin-top:10px;align-items:flex-end">' +
                     '<div><label style="display:block;font-size:12px;color:#8b949e">Resolution</label>' +
                       '<select id="vidRes" style="background:#010409;border:1px solid #30363d;border-radius:8px;color:#e6edf3;padding:6px">' +
@@ -6890,6 +6897,34 @@
                       '</select></div>' +
                   '</div>' +
                   '<div style="font-size:11px;color:#8b949e;margin-top:8px">💡 Quality knobs are maxed by default. VAE tiling <b>Auto</b> keeps memory safe; <b>None</b> is highest fidelity but only for short/low-res clips — heavy clips are auto-switched to Auto to avoid exhausting memory. This model is <b>image-to-video</b>: a <b>start / first-frame image is required</b> below. Wan2.2-I2V-A14B supports only a first frame — no separate last-frame or reference image.</div>' +
+                  '</div>' +  // end #vidWanControls
+                  // ---- LongCat (text-to-video, long clips) ----
+                  '<div id="vidLongcatControls" style="display:none">' +
+                    '<div style="display:flex;gap:10px;flex-wrap:wrap;margin-top:10px;align-items:flex-end">' +
+                      '<div><label style="display:block;font-size:12px;color:#8b949e">Resolution</label>' +
+                        '<select id="lcRes" style="background:#010409;border:1px solid #30363d;border-radius:8px;color:#e6edf3;padding:6px">' +
+                          '<option value="480p" selected>480p (default)</option>' +
+                        '</select></div>' +
+                      '<div><label style="display:block;font-size:12px;color:#8b949e">Aspect</label>' +
+                        '<select id="lcAspect" style="background:#010409;border:1px solid #30363d;border-radius:8px;color:#e6edf3;padding:6px">' +
+                          '<option value="9:16" selected>9:16 vertical</option>' +
+                          '<option value="16:9">16:9 wide</option>' +
+                          '<option value="1:1">1:1 square</option>' +
+                          '<option value="4:5">4:5 portrait</option>' +
+                          '<option value="3:2">3:2</option>' +
+                        '</select></div>' +
+                      '<div><label style="display:block;font-size:12px;color:#8b949e">Length</label>' +
+                        '<select id="lcLength" style="background:#010409;border:1px solid #30363d;border-radius:8px;color:#e6edf3;padding:6px">' +
+                          '<option value="5">5 seconds (1 segment)</option>' +
+                          '<option value="10">10 seconds (2 segments)</option>' +
+                          '<option value="15" selected>15 seconds (3 segments)</option>' +
+                          '<option value="20">20 seconds (4 segments)</option>' +
+                          '<option value="25">25 seconds (5 segments)</option>' +
+                          '<option value="30">30 seconds (6 segments)</option>' +
+                        '</select></div>' +
+                    '</div>' +
+                    '<div style="font-size:11px;color:#d29922;margin-top:8px">🎬 <b>Text-to-video</b> — describe the whole shot in the prompt (no reference image needed). LongCat chains 93-frame segments at 480p/15fps for long, coherent clips. <b>Heads-up on time:</b> ~10 min render <i>per segment</i> — 15s ≈ 30 min, 30s ≈ 60 min. Runs in the background; keep this open to watch progress.</div>' +
+                  '</div>' +  // end #vidLongcatControls
                 '</div>' +
                 // ---- shared: seed + generate ----
                 '<div style="display:flex;gap:10px;flex-wrap:wrap;margin-top:10px;align-items:flex-end">' +
@@ -6923,6 +6958,7 @@
             $('imgEngine').onchange = imgEngineChanged;
             $('imgModeImage').onclick = () => imgSetMode('image');
             $('imgModeVideo').onclick = () => imgSetMode('video');
+            if ($('vidEngine')) $('vidEngine').onchange = vidEngineChanged;
             imgEngineChanged();
             imgSetMode('image');
             imgStartStats();
@@ -6955,14 +6991,26 @@
             if ($('imgProgWrap')) $('imgProgWrap').style.display = 'none';
             if (imgPollTimer) { clearInterval(imgPollTimer); imgPollTimer = null; }
             if (isVid) {
-                if ($('imgRefWrap')) $('imgRefWrap').style.display = 'block';
-                if ($('imgRefLabel')) $('imgRefLabel').innerHTML = 'Start / first-frame image (required — this model is image-to-video). No last-frame/reference support.';
-                vidCheckHealth();
+                vidEngineChanged();
             } else {
                 if ($('imgRefLabel')) $('imgRefLabel').innerHTML = 'Reference image (required for Kontext)';
                 imgEngineChanged();
             }
             imgPollStats();
+        }
+
+        function vidEngineChanged() {
+            const $ = id => document.getElementById(id);
+            const eng = ($('vidEngine') && $('vidEngine').value) || 'wan';
+            const isLC = eng === 'longcat';
+            if ($('vidWanControls')) $('vidWanControls').style.display = isLC ? 'none' : 'block';
+            if ($('vidLongcatControls')) $('vidLongcatControls').style.display = isLC ? 'block' : 'none';
+            // Wan is image-to-video (ref required); LongCat is text-to-video (no ref).
+            if ($('imgRefWrap')) $('imgRefWrap').style.display = isLC ? 'none' : 'block';
+            if (!isLC && $('imgRefLabel')) $('imgRefLabel').innerHTML = 'Start / first-frame image (required — this model is image-to-video). No last-frame/reference support.';
+            if ($('imgResult')) $('imgResult').innerHTML = '';
+            if ($('imgProgWrap')) $('imgProgWrap').style.display = 'none';
+            vidCheckHealth();
         }
 
         function imgEngineChanged() {
@@ -7074,14 +7122,31 @@
 
         async function vidCheckHealth() {
             const s = document.getElementById('imgStatus'); if (!s) return;
+            const $ = id => document.getElementById(id);
+            const eng = ($('vidEngine') && $('vidEngine').value) || 'wan';
             try {
                 const h = await (await fetch(VIDEO_URL + '/health')).json();
-                if (!h.weights_ready) {
-                    s.innerHTML = '⏳ Wan2.2-I2V-A14B weights not loaded — video generation will fail until they finish.';
-                    s.style.color = '#d29922';
+                const info = (h.engines && h.engines[eng]) || {};
+                if (eng === 'longcat') {
+                    if (!info.available) {
+                        s.innerHTML = '⏳ LongCat-Video not ready — weights or runtime missing on :8500.';
+                        s.style.color = '#d29922';
+                    } else if (info.mem_ok === false) {
+                        s.innerHTML = '⚠ LongCat needs ~' + (info.required_free_gb || 34) + 'GB free but only ' + (info.free_gb != null ? info.free_gb : '?') + 'GB is free right now. ' +
+                            '<b>Unload the chat model</b> (and other large models) to free memory first — otherwise the run is blocked to prevent an out-of-memory crash.';
+                        s.style.color = '#d29922';
+                    } else {
+                        s.innerHTML = '✓ LongCat-Video ready (text-to-video, long) — ' + (info.free_gb != null ? info.free_gb + 'GB free' : 'memory OK') + '. 480p/15fps. Rendering is slow (~10 min/segment): 15s ≈ 30 min, 30s ≈ 60 min.';
+                        s.style.color = '#3fb950';
+                    }
                 } else {
-                    s.innerHTML = '✓ Wan2.2-I2V-A14B ready (needs a start image). 512p ~3.5s clip renders in a few min (first run loads the 14B model, slower).';
-                    s.style.color = '#3fb950';
+                    if (!h.weights_ready) {
+                        s.innerHTML = '⏳ Wan2.2-I2V-A14B weights not loaded — video generation will fail until they finish.';
+                        s.style.color = '#d29922';
+                    } else {
+                        s.innerHTML = '✓ Wan2.2-I2V-A14B ready (needs a start image). 512p ~3.5s clip renders in a few min (first run loads the 14B model, slower).';
+                        s.style.color = '#3fb950';
+                    }
                 }
             } catch (e) {
                 s.innerHTML = '⚠ Video service not reachable on :8500. Start it: <code>bash ~/omlx-video/video.sh start</code>';
@@ -7093,29 +7158,44 @@
             const $ = id => document.getElementById(id);
             const prompt = ($('imgPrompt').value || '').trim();
             if (!prompt) { $('imgStatus').innerHTML = 'Enter a prompt first.'; $('imgStatus').style.color = '#f85149'; return; }
-            let refImage = '';
-            const f = $('imgRefFile') && $('imgRefFile').files && $('imgRefFile').files[0];
-            if (f) {
-                refImage = await new Promise((resolve, reject) => {
-                    const fr = new FileReader();
-                    fr.onload = () => resolve(String(fr.result || ''));
-                    fr.onerror = () => reject(new Error('failed to read reference image'));
-                    fr.readAsDataURL(f);
-                });
+            const eng = ($('vidEngine') && $('vidEngine').value) || 'wan';
+            let body;
+            if (eng === 'longcat') {
+                // LongCat: text-to-video, no reference image.
+                body = {
+                    engine: 'longcat',
+                    prompt: prompt,
+                    res: ($('lcRes') && $('lcRes').value) || '480p',
+                    aspect: ($('lcAspect') && $('lcAspect').value) || '9:16',
+                    duration_seconds: parseFloat(($('lcLength') && $('lcLength').value) || '15') || 15,
+                    seed: parseInt($('imgSeed').value, 10) || 42,
+                };
+            } else {
+                let refImage = '';
+                const f = $('imgRefFile') && $('imgRefFile').files && $('imgRefFile').files[0];
+                if (f) {
+                    refImage = await new Promise((resolve, reject) => {
+                        const fr = new FileReader();
+                        fr.onload = () => resolve(String(fr.result || ''));
+                        fr.onerror = () => reject(new Error('failed to read reference image'));
+                        fr.readAsDataURL(f);
+                    });
+                }
+                if (!refImage) { $('imgStatus').innerHTML = 'This model is image-to-video — upload a start / first-frame image first.'; $('imgStatus').style.color = '#f85149'; return; }
+                body = {
+                    engine: 'wan',
+                    prompt: prompt,
+                    res: ($('vidRes') && $('vidRes').value) || '512p',
+                    aspect: ($('vidAspect') && $('vidAspect').value) || '9:16',
+                    duration_seconds: parseFloat(($('vidDur') && $('vidDur').value) || '3.5') || 3.5,
+                    steps: parseInt(($('vidSteps') && $('vidSteps').value), 10) || 60,
+                    scheduler: ($('vidScheduler') && $('vidScheduler').value) || 'unipc',
+                    guide_scale: parseFloat(($('vidGuide') && $('vidGuide').value) || '3.5') || 3.5,
+                    tiling: ($('vidTiling') && $('vidTiling').value) || 'auto',
+                    seed: parseInt($('imgSeed').value, 10) || 42,
+                    image: refImage,
+                };
             }
-            if (!refImage) { $('imgStatus').innerHTML = 'This model is image-to-video — upload a start / first-frame image first.'; $('imgStatus').style.color = '#f85149'; return; }
-            const body = {
-                prompt: prompt,
-                res: ($('vidRes') && $('vidRes').value) || '512p',
-                aspect: ($('vidAspect') && $('vidAspect').value) || '9:16',
-                duration_seconds: parseFloat(($('vidDur') && $('vidDur').value) || '3.5') || 3.5,
-                steps: parseInt(($('vidSteps') && $('vidSteps').value), 10) || 60,
-                scheduler: ($('vidScheduler') && $('vidScheduler').value) || 'unipc',
-                guide_scale: parseFloat(($('vidGuide') && $('vidGuide').value) || '3.5') || 3.5,
-                tiling: ($('vidTiling') && $('vidTiling').value) || 'auto',
-                seed: parseInt($('imgSeed').value, 10) || 42,
-            };
-            if (refImage) body.image = refImage;
             $('imgGo').disabled = true;
             $('imgResult').innerHTML = '';
             $('imgProgWrap').style.display = 'block';
@@ -7125,6 +7205,9 @@
                 const r = await fetch(VIDEO_URL + '/generate', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
                 const d = await r.json();
                 if (!r.ok || d.error) throw new Error(d.error || ('HTTP ' + r.status));
+                if (eng === 'longcat' && d.est_seconds) {
+                    $('imgStage').textContent = 'Queued — ' + d.segments + ' segment(s), ~' + d.est_seconds + 's clip. This takes a while…';
+                }
                 vidPoll(d.job_id);
             } catch (e) {
                 $('imgStage').textContent = 'Error: ' + e.message;
@@ -7145,7 +7228,8 @@
                         $('imgGo').disabled = false;
                         const res = d.result;
                         const url = VIDEO_URL + res.url;
-                        $('imgStage').textContent = 'Done in ' + res.seconds + 's — ' + res.width + '×' + res.height + ', ' + res.duration + 's ' + res.mode;
+                        const extra = res.segments ? (', ' + res.segments + ' segments') : '';
+                        $('imgStage').textContent = 'Done in ' + res.seconds + 's — ' + res.width + '×' + res.height + ', ' + res.duration + 's ' + res.mode + extra;
                         $('imgResult').innerHTML =
                             '<video src="' + url + '" controls autoplay loop muted playsinline style="max-width:100%;border-radius:10px;border:1px solid #30363d;background:#000"></video>' +
                             '<div style="margin-top:8px;display:flex;gap:8px;align-items:center">' +
