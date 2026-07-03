@@ -194,19 +194,46 @@ AV_MODEL_LABEL = "LongCat-Video-Avatar 1.5 (q8) — audio-driven talking avatar"
 AV_DRIVER = os.path.join("scripts", "run_avatar_gen.py")
 
 AV_FPS = 25                    # native audio-sync rate — DO NOT retime
-AV_GEN_SHORT = int(os.environ.get("AVATAR_GEN_SHORT", "256"))
 AV_SEG_FRAMES = 93             # frames per generation pass (memory-bounded)
 AV_MIN_SECONDS = 5.0
 AV_DEF_SECONDS = 15.0
 AV_MAX_SECONDS = 30.0          # clip length ceiling (also caps very long renders)
 
-# Output resolution presets (final size after Lanczos upscale). Short side 480.
-AV_RES_PRESETS = {
-    "9:16": (480, 854),
-    "1:1":  (540, 540),
-    "16:9": (854, 480),
+# Generation resolution presets — the NATIVE short side the model denoises at.
+# The model's demo default is 480; lower is faster but visibly softer / can
+# distort faces. We generate directly at the chosen short side (no upscale) so
+# quality tracks the resolution. Aspect sets the long side. 480p is the default.
+AV_RES_SHORT = {
+    "256p": 256,   # fastest draft — noticeably lower quality
+    "384p": 384,   # balanced
+    "480p": 480,   # best — model's native size (default)
+}
+AV_DEF_RES = "480p"
+
+# Aspect ratios (long:short multiplier applied to the chosen short side).
+AV_ASPECTS = {
+    "9:16": (9, 16),
+    "1:1":  (1, 1),
+    "16:9": (16, 9),
 }
 AV_DEF_ASPECT = "9:16"
+
+
+def _av_dims(res, aspect):
+    """Native generation (and output) dims for a resolution + aspect. Short
+    side = the resolution preset; long side scaled by aspect; both snapped /16."""
+    short = AV_RES_SHORT.get(res, AV_RES_SHORT[AV_DEF_RES])
+    aw, ah = AV_ASPECTS.get(aspect, AV_ASPECTS[AV_DEF_ASPECT])
+    if aw <= ah:          # portrait or square: width is the short side
+        w = short
+        h = int(round(short * ah / aw))
+    else:                 # landscape: height is the short side
+        h = short
+        w = int(round(short * aw / ah))
+    w = max(64, (w // 16) * 16)
+    h = max(64, (h // 16) * 16)
+    return w, h
+
 
 # Saved-media locations the UI dropdowns reference.
 AV_TTS_OUT_DIR = os.environ.get("TTS_OUT_DIR", "/Users/joebains/mlx-audio/output")
@@ -807,6 +834,7 @@ def _run_avatar(jid, opts):
     ref_path, ref_is_temp = _avatar_ref_path(jid, opts)
 
     out_w, out_h = opts["width"], opts["height"]
+    gen_short = min(out_w, out_h)   # generate natively at the output short side
     raw_name = "av_raw_" + uuid.uuid4().hex[:12] + ".mp4"
     raw_path = os.path.join(TMP_DIR, raw_name)
     final_name = "av_" + uuid.uuid4().hex[:12] + ".mp4"
@@ -821,7 +849,7 @@ def _run_avatar(jid, opts):
         "--prompt", opts["prompt"],
         "--height", str(out_h),
         "--width", str(out_w),
-        "--gen-short", str(AV_GEN_SHORT),
+        "--gen-short", str(gen_short),
         "--seg-frames", str(AV_SEG_FRAMES),
         "--max-seconds", str(opts.get("max_seconds", AV_MAX_SECONDS)),
         "--seed", str(opts["seed"]),
@@ -1013,6 +1041,7 @@ def _run_job(jid):
                 "model": AV_MODEL_LABEL,
                 "video_type": opts.get("video_type"),
                 "width": opts["width"], "height": opts["height"],
+                "resolution": opts.get("resolution"),
                 "fps": AV_FPS,
                 "num_frames": (j or {}).get("gen_frames"),
                 "caption_style": (j or {}).get("caption_style"),
@@ -1216,18 +1245,23 @@ class Handler(BaseHTTPRequestHandler):
                     "avatar": {
                         "available": _av_available(),
                         "label": AV_MODEL_LABEL, "modes": ["avatar"], "fps": AV_FPS,
-                        "res_presets": AV_RES_PRESETS, "aspect_default": AV_DEF_ASPECT,
+                        "resolutions": list(AV_RES_SHORT.keys()),
+                        "res_default": AV_DEF_RES,
+                        "aspects": list(AV_ASPECTS.keys()),
+                        "aspect_default": AV_DEF_ASPECT,
                         "caption_styles": AV_CAPTION_STYLES,
                         "caption_default": AV_DEF_CAPTION,
                         "needs_image": True, "needs_audio": True,
                         "defaults": {"duration_seconds": AV_DEF_SECONDS,
+                                     "resolution": AV_DEF_RES,
                                      "aspect": AV_DEF_ASPECT,
                                      "caption_style": AV_DEF_CAPTION},
                         "limits": {"min_seconds": AV_MIN_SECONDS,
                                    "max_seconds": AV_MAX_SECONDS},
-                        "note": ("audio-driven talking avatar (25fps, lip-synced). "
-                                 "Generates at 256 short-side then upscales. "
-                                 "~4-5 min per ~3s — a 15s clip ≈ 20-25 min."),
+                        "note": ("audio-driven talking avatar (25fps, lip-synced), "
+                                 "generated natively at the chosen resolution. "
+                                 "480p is best; lower is faster but softer. "
+                                 "~4-5 min per ~3s at 480p."),
                     },
                 },
                 "video_types": [
@@ -1312,11 +1346,14 @@ class Handler(BaseHTTPRequestHandler):
                         + f", needs ~{AV_REQUIRED_FREE_GB:.0f}GB. Close other "
                         f"large models / heavy apps, then try again."})
                 aspect = d.get("aspect")
-                if aspect not in AV_RES_PRESETS:
+                if aspect not in AV_ASPECTS:
                     aspect = (tpreset or {}).get("aspect", AV_DEF_ASPECT)
-                if aspect not in AV_RES_PRESETS:
+                if aspect not in AV_ASPECTS:
                     aspect = AV_DEF_ASPECT
-                w, h = AV_RES_PRESETS[aspect]
+                resolution = d.get("resolution")
+                if resolution not in AV_RES_SHORT:
+                    resolution = AV_DEF_RES
+                w, h = _av_dims(resolution, aspect)
                 caption_style = d.get("caption_style") or (tpreset or {}).get(
                     "caption", AV_DEF_CAPTION)
                 if caption_style not in AV_CAPTION_STYLES:
@@ -1334,6 +1371,7 @@ class Handler(BaseHTTPRequestHandler):
                     "image_ref": (d.get("image_ref") or "").strip(),
                     "audio_file": audio_file,
                     "width": w, "height": h,
+                    "resolution": resolution,
                     "aspect": aspect,
                     "caption_style": caption_style,
                     "max_seconds": max_seconds,
@@ -1347,6 +1385,8 @@ class Handler(BaseHTTPRequestHandler):
                     _work_cv.notify()
                 return self._json(200, {"ok": True, "job_id": jid,
                                         "engine": "avatar", "aspect": aspect,
+                                        "resolution": resolution,
+                                        "dims": [w, h],
                                         "caption_style": caption_style})
 
             # --- LongCat text-to-video (long clips) -------------------------

@@ -6931,6 +6931,12 @@
                     '<div style="display:flex;gap:10px;flex-wrap:wrap;margin-top:10px;align-items:flex-end">' +
                       '<div><label style="display:block;font-size:12px;color:#8b949e">Video type</label>' +
                         '<select id="avType" style="background:#010409;border:1px solid #30363d;border-radius:8px;color:#e6edf3;padding:6px;min-width:260px"></select></div>' +
+                      '<div><label style="display:block;font-size:12px;color:#8b949e">Resolution</label>' +
+                        '<select id="avRes" style="background:#010409;border:1px solid #30363d;border-radius:8px;color:#e6edf3;padding:6px">' +
+                          '<option value="256p">256p (fast draft)</option>' +
+                          '<option value="384p">384p (balanced)</option>' +
+                          '<option value="480p" selected>480p (best — default)</option>' +
+                        '</select></div>' +
                       '<div><label style="display:block;font-size:12px;color:#8b949e">Aspect</label>' +
                         '<select id="avAspect" style="background:#010409;border:1px solid #30363d;border-radius:8px;color:#e6edf3;padding:6px">' +
                           '<option value="9:16" selected>9:16 vertical</option>' +
@@ -6963,7 +6969,7 @@
                         '<input id="avImageFile" type="file" accept="image/*" style="color:#c9d1d9;font-size:12px;max-width:180px">' +
                         '<img id="avRefThumb" style="display:none;height:52px;border-radius:6px;border:1px solid #30363d">' +
                       '</div></div>' +
-                    '<div style="font-size:11px;color:#d29922;margin-top:8px">🔥 <b>Viral talking video</b> — a reference photo is lip-synced to your saved voiceover, then captions are burned in. Prompt describes the <i>scene/subject look</i> (the words come from the audio). Native 25fps, generated at 256 then upscaled. <b>Slow:</b> ~4-5 min per ~3s (a 15s clip ≈ 20-25 min). Product/E-commerce/Promo types render as scene video (no face).</div>' +
+                    '<div style="font-size:11px;color:#d29922;margin-top:8px">🔥 <b>Viral talking video</b> — a reference photo is lip-synced to your saved voiceover, then captions are burned in. Prompt describes the <i>scene/subject look</i> (the words come from the audio). Native 25fps, generated at the chosen resolution (<b>480p</b> is best — lower is faster but softer). <b>Slow:</b> ~4-5 min per ~3s at 480p. Product/E-commerce/Promo types render as scene video (no face).</div>' +
                   '</div>' +  // end #vidAvatarControls
                 '</div>' +
                 // ---- shared: seed + generate ----
@@ -7334,6 +7340,7 @@
                     audio_file: audio,
                     image: refImage,
                     image_ref: refName,
+                    resolution: ($('avRes') && $('avRes').value) || '480p',
                     aspect: ($('avAspect') && $('avAspect').value) || '9:16',
                     caption_style: ($('avCaption') && $('avCaption').value) || 'karaoke',
                     duration_seconds: parseFloat(($('avLength') && $('avLength').value) || '15') || 15,
