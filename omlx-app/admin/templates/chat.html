@@ -6879,6 +6879,23 @@
                     '<div><label style="display:block;font-size:12px;color:#8b949e">Duration (s)</label>' +
                       '<input id="vidDur" type="number" min="1" max="8" step="0.5" value="3.5" style="width:80px;background:#010409;border:1px solid #30363d;border-radius:8px;color:#e6edf3;padding:6px"></div>' +
                   '</div>' +
+                  // ---- Long clip: continuation chaining ----
+                  '<div style="display:flex;gap:10px;flex-wrap:wrap;margin-top:10px;align-items:flex-end;padding-top:10px;border-top:1px solid #21262d">' +
+                    '<div><label style="display:block;font-size:12px;color:#8b949e">Long clip (chain segments)</label>' +
+                      '<select id="vidChain" style="background:#010409;border:1px solid #30363d;border-radius:8px;color:#e6edf3;padding:6px">' +
+                        '<option value="1" selected>Off (single clip)</option>' +
+                        '<option value="2">2 segments</option>' +
+                        '<option value="3">3 segments</option>' +
+                        '<option value="4">4 segments</option>' +
+                        '<option value="5">5 segments</option>' +
+                        '<option value="6">6 segments</option>' +
+                        '<option value="7">7 segments</option>' +
+                        '<option value="8">8 segments</option>' +
+                      '</select></div>' +
+                    '<div><label style="display:block;font-size:12px;color:#8b949e">Segment length (s)</label>' +
+                      '<input id="vidSegSec" type="number" min="2" max="8" step="0.5" value="4" style="width:80px;background:#010409;border:1px solid #30363d;border-radius:8px;color:#e6edf3;padding:6px"></div>' +
+                    '<div id="vidChainNote" style="font-size:11px;color:#8b949e;max-width:340px"></div>' +
+                  '</div>' +
                   '<div style="display:flex;gap:10px;flex-wrap:wrap;margin-top:10px;align-items:flex-end">' +
                     '<div><label style="display:block;font-size:12px;color:#8b949e">Steps</label>' +
                       '<input id="vidSteps" type="number" min="10" max="60" value="60" style="width:80px;background:#010409;border:1px solid #30363d;border-radius:8px;color:#e6edf3;padding:6px"></div>' +
@@ -6898,7 +6915,7 @@
                         '<option value="none">None (max quality — short clips only)</option>' +
                       '</select></div>' +
                   '</div>' +
-                  '<div style="font-size:11px;color:#8b949e;margin-top:8px">💡 Quality knobs are maxed by default. VAE tiling <b>Auto</b> keeps memory safe; <b>None</b> is highest fidelity but only for short/low-res clips — heavy clips are auto-switched to Auto to avoid exhausting memory. This model is <b>image-to-video</b>: a <b>start / first-frame image is required</b> below. Wan2.2-I2V-A14B supports only a first frame — no separate last-frame or reference image.</div>' +
+                  '<div style="font-size:11px;color:#8b949e;margin-top:8px">💡 Quality knobs are maxed by default. VAE tiling <b>Auto</b> keeps memory safe; <b>None</b> is highest fidelity but only for short/low-res clips — heavy clips are auto-switched to Auto to avoid exhausting memory. This model is <b>image-to-video</b>: a <b>start / first-frame image is required</b> below. Wan2.2-I2V-A14B supports only a first frame — no separate last-frame or reference image. <b>Long clip</b> chains N short segments (each seeded by the previous segment\'s last frame) into one seamless stitched clip — memory-safe and much longer than a single render (each segment ≈ Segment length; Duration is ignored when chaining).</div>' +
                   '</div>' +  // end #vidWanControls
                   // ---- LongCat (text-to-video, long clips) ----
                   '<div id="vidLongcatControls" style="display:none">' +
@@ -7041,6 +7058,9 @@
             $('imgModeImage').onclick = () => imgSetMode('image');
             $('imgModeVideo').onclick = () => imgSetMode('video');
             if ($('vidEngine')) $('vidEngine').onchange = vidEngineChanged;
+            if ($('vidChain')) $('vidChain').onchange = vidChainNote;
+            if ($('vidSegSec')) $('vidSegSec').oninput = vidChainNote;
+            vidChainNote();
             imgEngineChanged();
             imgSetMode('image');
             imgStartStats();
@@ -7058,6 +7078,22 @@
         function imgPollStats() { /* shared OMLXStats poller refreshes on its own timer */ }
 
         let imgMode = 'image';
+        function vidChainNote() {
+            const $ = id => document.getElementById(id);
+            const note = $('vidChainNote');
+            const dur = $('vidDur');
+            const n = parseInt(($('vidChain') && $('vidChain').value) || '1', 10) || 1;
+            const seg = parseFloat(($('vidSegSec') && $('vidSegSec').value) || '4') || 4;
+            if (dur) dur.disabled = (n > 1);
+            if (!note) return;
+            if (n > 1) {
+                const total = Math.round(n * seg * 10) / 10;
+                note.innerHTML = '≈ <b>' + total + 's</b> stitched (' + n + ' × ' + seg + 's). Duration field ignored while chaining. Each segment is a full render — expect ~' + n + '× the single-clip time.';
+            } else {
+                note.textContent = 'Off — single clip uses the Duration above.';
+            }
+        }
+
         function imgSetMode(mode) {
             imgMode = (mode === 'video') ? 'video' : 'image';
             const $ = id => document.getElementById(id);
@@ -7542,6 +7578,11 @@
                     seed: parseInt($('imgSeed').value, 10) || 42,
                     image: refImage,
                 };
+                var _chain = parseInt(($('vidChain') && $('vidChain').value) || '1', 10) || 1;
+                if (_chain > 1) {
+                    body.chain_segments = _chain;
+                    body.segment_seconds = parseFloat(($('vidSegSec') && $('vidSegSec').value) || '4') || 4;
+                }
             }
             $('imgGo').disabled = true;
             $('imgResult').innerHTML = '';
@@ -7556,6 +7597,8 @@
                     $('imgStage').textContent = 'Queued — ' + d.segments + ' segment(s), ~' + d.est_seconds + 's clip. This takes a while…';
                 } else if (eng === 'replicate_avatar') {
                     $('imgStage').textContent = 'Queued on Replicate — ' + (d.segments || 1) + ' segment(s). Rendering in the cloud…';
+                } else if (eng === 'wan' && body.chain_segments > 1) {
+                    $('imgStage').textContent = 'Queued — continuation chain of ' + body.chain_segments + ' × ' + body.segment_seconds + 's segments, stitched seamless. Each segment is a full render, so this takes a while…';
                 }
                 vidPoll(d.job_id);
             } catch (e) {
@@ -7577,15 +7620,19 @@
                         $('imgGo').disabled = false;
                         const res = d.result;
                         const url = VIDEO_URL + res.url;
-                        const extra = res.segments ? (', ' + res.segments + ' segment' + (res.segments > 1 ? 's' : ''))
+                        const segCount = res.segments || res.chain_segments;
+                        const extra = segCount ? (', ' + segCount + ' segment' + (segCount > 1 ? 's' : '') + (res.mode === 'chain' ? ' chained' : ''))
                             : (res.caption_style && res.caption_style !== 'none' ? (', ' + res.caption_style + ' captions') : '');
                         const dur = (res.duration != null) ? res.duration
                             : (res.num_frames && res.fps ? (res.num_frames / res.fps).toFixed(1) : null);
                         const dims = (res.width && res.height) ? (res.width + '×' + res.height) : (res.resolution || '');
                         $('imgStage').textContent = 'Done in ' + res.seconds + 's — ' + dims + (dur != null ? (', ' + dur + 's') : '') + ' ' + (res.mode || '') + extra;
-                        const originalsNote = (res.engine === 'replicate_avatar' && res.original)
-                            ? '<div style="font-size:11px;color:#6e7681;margin-top:6px">☁️ Original cloud clip' + (res.raw_segments && res.raw_segments.length > 1 ? 's' : '') + ' kept for reuse: <code>' + (res.raw_segments && res.raw_segments.length ? res.raw_segments.join(', ') : res.original) + '</code></div>'
-                            : '';
+                        let originalsNote = '';
+                        if (res.engine === 'replicate_avatar' && res.original) {
+                            originalsNote = '<div style="font-size:11px;color:#6e7681;margin-top:6px">☁️ Original cloud clip' + (res.raw_segments && res.raw_segments.length > 1 ? 's' : '') + ' kept for reuse: <code>' + (res.raw_segments && res.raw_segments.length ? res.raw_segments.join(', ') : res.original) + '</code></div>';
+                        } else if (res.mode === 'chain' && res.raw_segments && res.raw_segments.length) {
+                            originalsNote = '<div style="font-size:11px;color:#6e7681;margin-top:6px">🔗 ' + res.raw_segments.length + ' segment original' + (res.raw_segments.length > 1 ? 's' : '') + ' kept for re-stitch (output/wan_chain): <code>' + res.raw_segments.join(', ') + '</code></div>';
+                        }
                         $('imgResult').innerHTML =
                             '<video src="' + url + '" controls autoplay loop muted playsinline style="max-width:100%;border-radius:10px;border:1px solid #30363d;background:#000"></video>' +
                             '<div style="margin-top:8px;display:flex;gap:8px;align-items:center">' +

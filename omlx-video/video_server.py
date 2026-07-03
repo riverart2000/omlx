@@ -44,10 +44,14 @@ TMP_DIR = os.path.join(OUT_DIR, "_tmp")
 # Persistent archive of ORIGINAL cloud clips (per-segment + stitched, no
 # captions) so they can always be reused/re-stitched later.
 RV_RAW_DIR = os.path.join(OUT_DIR, "cloud_raw")
+# Persistent archive of Wan2.2 continuation-chain segments (each 4s clip, the
+# last frame of one seeds the next) so a long stitched clip can be rebuilt.
+WAN_CHAIN_DIR = os.path.join(OUT_DIR, "wan_chain")
 SAVE_DIR = os.environ.get("VIDEO_SAVE_DIR", "/Users/joebains/Movies")
 os.makedirs(OUT_DIR, exist_ok=True)
 os.makedirs(TMP_DIR, exist_ok=True)
 os.makedirs(RV_RAW_DIR, exist_ok=True)
+os.makedirs(WAN_CHAIN_DIR, exist_ok=True)
 
 MODEL_DIR = os.environ.get(
     "WAN_MODEL_DIR",
@@ -80,6 +84,12 @@ MAX_SECONDS = 8.0  # keep render time + memory sane on 64GB M5
 MIN_SECONDS = 1.0
 MAX_DIM = 1280
 MIN_DIM = 256
+
+# Continuation chaining: max number of linked segments in one stitched clip.
+# Each segment is a normal short (default 4s) render, so a long clip is built
+# memory-safely from many small renders. 8 x 4s ~= 32s of coherent motion.
+WAN_CHAIN_MAX = 8
+WAN_CHAIN_DEF_SECONDS = 4.0  # per-segment length for continuation chains
 
 # VAE decode with tiling="none" materializes all frames at once. Empirically a
 # 512x896x49 clip (~22.5M px*frames) decodes near ~30GB and is the crash edge on
@@ -751,9 +761,12 @@ def _guide_arg(g):
     return str(gv)
 
 
-def _run_generate(jid, opts):
-    out_name = "vid_" + uuid.uuid4().hex[:12] + ".mp4"
-    out_path = os.path.join(OUT_DIR, out_name)
+def _run_generate(jid, opts, out_name=None, out_dir=None, prog=(5, 88)):
+    if out_name is None:
+        out_name = "vid_" + uuid.uuid4().hex[:12] + ".mp4"
+    out_dir = out_dir or OUT_DIR
+    out_path = os.path.join(out_dir, out_name)
+    pbase, pspan = prog
     cmd = [
         VENV_PY, "-m", "mlx_video.models.wan_2.generate",
         "--model-dir", MODEL_DIR,
@@ -774,11 +787,17 @@ def _run_generate(jid, opts):
     if int(opts.get("trim_first_frames") or 0) > 0:
         cmd += ["--trim-first-frames", str(int(opts["trim_first_frames"]))]
     ref_path = None
-    if opts.get("image"):
+    ref_cleanup = False
+    if opts.get("image_path") and os.path.isfile(opts["image_path"]):
+        # Continuation chain: caller supplies a ready PNG (owns its cleanup).
+        ref_path = opts["image_path"]
+        cmd += ["--image", ref_path]
+    elif opts.get("image"):
         ref_bytes = _decode_data_url_png(opts["image"])
         ref_path = os.path.join(TMP_DIR, f"{jid}_ref.png")
         with open(ref_path, "wb") as f:
             f.write(ref_bytes)
+        ref_cleanup = True
         cmd += ["--image", ref_path]
     if opts.get("negative_prompt"):
         cmd += ["--negative-prompt", opts["negative_prompt"]]
@@ -796,10 +815,11 @@ def _run_generate(jid, opts):
         if m:
             done, tot = int(m.group(1)), int(m.group(2))
             if tot in (total, total + 1) or tot == total:
-                _set(jid, stage=f"diffusing {done}/{tot}",
-                     progress=int(5 + 88 * done / max(1, tot)))
+                pfx = opts.get("_stage_prefix", "")
+                _set(jid, stage=f"{pfx}diffusing {done}/{tot}",
+                     progress=int(pbase + pspan * done / max(1, tot)))
     proc.wait()
-    if ref_path:
+    if ref_cleanup and ref_path:
         try:
             os.remove(ref_path)
         except OSError:
@@ -812,6 +832,124 @@ def _run_generate(jid, opts):
                            + " | ".join(tail[-6:]))
     elapsed = round(time.time() - t0, 1)
     return out_name, elapsed
+
+
+def _extract_last_frame(video_path, out_png):
+    """Grab the final rendered frame of a clip as a PNG (used to seed the next
+    continuation segment). Reversing buffers the whole short clip then takes
+    frame 0 = the true last frame, which is robust for tiny 4s clips."""
+    cmd = [_ffmpeg_bin(), "-y", "-i", video_path,
+           "-vf", "reverse", "-frames:v", "1", "-q:v", "1", out_png]
+    p = subprocess.run(cmd, capture_output=True, text=True, env=_ffmpeg_env())
+    if p.returncode != 0 or not os.path.isfile(out_png):
+        raise RuntimeError("last-frame extraction failed: "
+                           + (p.stderr or p.stdout or "")[-300:])
+
+
+def _wan_concat_chain(segments, dest, fps=FPS):
+    """Stitch continuation segments into ONE seamless clip.
+
+    Wan2.2 I2V reproduces its conditioning image as frame 0, so every segment
+    after the first opens on a near-duplicate of the previous segment's last
+    frame. We drop that first frame of segments 2..N (trim=start_frame=1) so the
+    join has no 1-frame stutter, then concat with a single high-quality re-encode
+    (constant fps, crf 16). Wan clips are silent, so there is no audio track."""
+    ff = _ffmpeg_bin()
+    inputs = []
+    for s in segments:
+        inputs += ["-i", s]
+    parts, labels = [], []
+    for i in range(len(segments)):
+        if i == 0:
+            parts.append(f"[{i}:v]setpts=PTS-STARTPTS[v{i}]")
+        else:
+            parts.append(f"[{i}:v]trim=start_frame=1,setpts=PTS-STARTPTS[v{i}]")
+        labels.append(f"[v{i}]")
+    graph = ";".join(parts) + ";" + "".join(labels) + \
+        f"concat=n={len(segments)}:v=1:a=0[outv]"
+    cmd = [ff, "-y", *inputs, "-filter_complex", graph, "-map", "[outv]",
+           "-c:v", "libx264", "-pix_fmt", "yuv420p", "-crf", "16",
+           "-r", str(fps), "-movflags", "+faststart", dest]
+    p = subprocess.run(cmd, capture_output=True, text=True, env=_ffmpeg_env())
+    if p.returncode != 0 or not os.path.isfile(dest):
+        raise RuntimeError("chain stitch failed: "
+                           + (p.stderr or p.stdout or "")[-400:])
+
+
+def _run_generate_chain(jid, opts):
+    """Wan2.2 continuation chain: render N short segments where each segment's
+    LAST frame seeds the NEXT segment's first frame, then stitch them into one
+    seamless clip. This is memory-safe (each segment is a normal short render,
+    so there is no giant-clip VAE peak) and yields much longer coherent motion
+    than a single clip can. Segment originals are archived in WAN_CHAIN_DIR so a
+    longer clip can be re-stitched later."""
+    n = max(2, min(WAN_CHAIN_MAX, int(opts.get("chain_segments", 2))))
+    per_frames = int(opts["num_frames"])
+    base_seed = int(opts.get("seed", 42))
+    t0 = time.time()
+
+    stem = ("wanchain_" + _rv_slug(opts.get("prompt") or "clip", 28) + "_"
+            + datetime.now().strftime("%Y%m%d-%H%M%S") + "_"
+            + uuid.uuid4().hex[:4])
+
+    # Seed frame for segment 1 = the user's start image.
+    cur_img = os.path.join(TMP_DIR, f"{jid}_chain_seed.png")
+    with open(cur_img, "wb") as f:
+        f.write(_decode_data_url_png(opts["image"]))
+    owns_cur = True
+
+    segments = []
+    try:
+        for i in range(n):
+            pbase = 3 + int(92 * i / n)
+            pspan = max(1, int(92 / n) - 1)
+            _set(jid, stage=f"segment {i+1}/{n}: diffusing", progress=pbase)
+            seg_opts = dict(opts)
+            seg_opts.pop("image", None)
+            seg_opts["image_path"] = cur_img
+            # Evolve the seed per segment so motion keeps developing instead of
+            # looping; deterministic given the base seed.
+            seg_opts["seed"] = base_seed + i
+            seg_opts["_stage_prefix"] = f"segment {i+1}/{n}: "
+            seg_name = f"{stem}_seg{i+1:02d}.mp4"
+            _run_generate(jid, seg_opts, out_name=seg_name,
+                          out_dir=WAN_CHAIN_DIR, prog=(pbase, pspan))
+            seg_path = os.path.join(WAN_CHAIN_DIR, seg_name)
+            segments.append(seg_path)
+            # Extract the last frame to seed the next segment.
+            if i < n - 1:
+                nxt = os.path.join(TMP_DIR, f"{jid}_chain_{i+1}.png")
+                _set(jid, stage=f"segment {i+1}/{n}: linking last frame",
+                     progress=pbase + pspan)
+                _extract_last_frame(seg_path, nxt)
+                if owns_cur:
+                    try:
+                        os.remove(cur_img)
+                    except OSError:
+                        pass
+                cur_img = nxt
+                owns_cur = True
+    finally:
+        if owns_cur:
+            try:
+                os.remove(cur_img)
+            except OSError:
+                pass
+
+    _set(jid, stage=f"stitching {n} segments (seamless)", progress=96)
+    final_name = f"{stem}.mp4"
+    final_path = os.path.join(OUT_DIR, final_name)
+    _wan_concat_chain(segments, final_path)
+
+    out_w, out_h = _probe_dims(final_path)
+    # After seam de-dup: seg1 keeps all frames, each later seg drops 1 frame.
+    total_frames = per_frames + (n - 1) * (per_frames - 1)
+    elapsed = round(time.time() - t0, 1)
+    _set(jid, chain_segments=n,
+         raw_segments=[os.path.basename(s) for s in segments],
+         seg_frames=per_frames, total_frames=total_frames,
+         est_seconds=round(total_frames / FPS, 1), out_w=out_w, out_h=out_h)
+    return final_name, elapsed
 
 
 # LongCat prints "segment i/n (K new frames) — total elapsed ...s" per segment.
@@ -1557,23 +1695,50 @@ def _run_job(jid):
                 raise RuntimeError("This model is image-to-video only — a start "
                                    "image is required")
             _set(jid, stage="loading model + encoders (first run is slow)", progress=3)
-            name, elapsed = _run_generate(jid, opts)
-            _set(jid, stage="saving", progress=96)
-            result = {
-                "filename": name,
-                "url": f"/files/{name}",
-                "engine": "wan",
-                "width": opts["width"], "height": opts["height"],
-                "num_frames": opts["num_frames"], "fps": FPS,
-                "duration": round(opts["num_frames"] / FPS, 2),
-                "steps": opts["steps"], "seed": opts["seed"],
-                "mode": "i2v" if opts.get("image") else "t2v",
-                "prompt": opts["prompt"],
-                "seconds": elapsed,
-                "tiling": opts.get("tiling"),
-                "tiling_forced": opts.get("tiling_forced", False),
-                "created": datetime.now().isoformat(timespec="seconds"),
-            }
+            if int(opts.get("chain_segments", 1) or 1) > 1:
+                name, elapsed = _run_generate_chain(jid, opts)
+                _set(jid, stage="saving", progress=98)
+                j = _get(jid) or {}
+                seg_frames = j.get("seg_frames", opts["num_frames"])
+                total_frames = j.get("total_frames", opts["num_frames"])
+                result = {
+                    "filename": name,
+                    "url": f"/files/{name}",
+                    "engine": "wan",
+                    "mode": "chain",
+                    "width": j.get("out_w") or opts["width"],
+                    "height": j.get("out_h") or opts["height"],
+                    "chain_segments": j.get("chain_segments"),
+                    "seg_frames": seg_frames,
+                    "seg_seconds": round(seg_frames / FPS, 2),
+                    "num_frames": total_frames, "fps": FPS,
+                    "duration": round(total_frames / FPS, 2),
+                    "raw_segments": j.get("raw_segments", []),
+                    "steps": opts["steps"], "seed": opts["seed"],
+                    "prompt": opts["prompt"],
+                    "seconds": elapsed,
+                    "tiling": opts.get("tiling"),
+                    "tiling_forced": opts.get("tiling_forced", False),
+                    "created": datetime.now().isoformat(timespec="seconds"),
+                }
+            else:
+                name, elapsed = _run_generate(jid, opts)
+                _set(jid, stage="saving", progress=96)
+                result = {
+                    "filename": name,
+                    "url": f"/files/{name}",
+                    "engine": "wan",
+                    "width": opts["width"], "height": opts["height"],
+                    "num_frames": opts["num_frames"], "fps": FPS,
+                    "duration": round(opts["num_frames"] / FPS, 2),
+                    "steps": opts["steps"], "seed": opts["seed"],
+                    "mode": "i2v" if opts.get("image") else "t2v",
+                    "prompt": opts["prompt"],
+                    "seconds": elapsed,
+                    "tiling": opts.get("tiling"),
+                    "tiling_forced": opts.get("tiling_forced", False),
+                    "created": datetime.now().isoformat(timespec="seconds"),
+                }
 
         # Restore the chat model BEFORE marking done, so when the UI shows the
         # finished clip the chat is already usable again.
@@ -1684,10 +1849,16 @@ class Handler(BaseHTTPRequestHandler):
                     "scheduler": DEF_SCHEDULER, "tiling": DEF_TILING,
                     "trim_first_frames": DEF_TRIM_FIRST,
                     "duration_seconds": DEF_SECONDS,
+                    "chain_segments": 1,
+                    "segment_seconds": WAN_CHAIN_DEF_SECONDS,
                 },
+                "chain": {"max_segments": WAN_CHAIN_MAX,
+                          "segment_seconds": WAN_CHAIN_DEF_SECONDS,
+                          "fps": FPS},
                 "limits": {"min_seconds": MIN_SECONDS, "max_seconds": MAX_SECONDS,
                            "min_dim": MIN_DIM, "max_dim": MAX_DIM,
-                           "min_steps": 10, "max_steps": 60},
+                           "min_steps": 10, "max_steps": 60,
+                           "max_chain_segments": WAN_CHAIN_MAX},
                 "weights_ready": _weights_ready(),
                 "engines": {
                     "wan": {
@@ -1695,6 +1866,8 @@ class Handler(BaseHTTPRequestHandler):
                         "label": MODEL_LABEL, "modes": ["i2v"], "fps": FPS,
                         "res_presets": RES_PRESETS, "res_default": DEF_RES,
                         "needs_image": I2V_ONLY,
+                        "chain": {"max_segments": WAN_CHAIN_MAX,
+                                  "segment_seconds": WAN_CHAIN_DEF_SECONDS},
                     },
                     "longcat": {
                         "available": _lc_available(),
@@ -1797,10 +1970,12 @@ class Handler(BaseHTTPRequestHandler):
     def _serve_file(self, name):
         fp = os.path.join(OUT_DIR, name)
         if not os.path.isfile(fp):
-            # Fall back to the archived cloud originals.
-            alt = os.path.join(RV_RAW_DIR, os.path.basename(name))
-            if os.path.isfile(alt):
-                fp = alt
+            # Fall back to the archived cloud / chain-segment originals.
+            for d in (RV_RAW_DIR, WAN_CHAIN_DIR):
+                alt = os.path.join(d, os.path.basename(name))
+                if os.path.isfile(alt):
+                    fp = alt
+                    break
         if not (name.endswith(".mp4") and os.path.isfile(fp)):
             return self._json(404, {"error": "not found"})
         data = open(fp, "rb").read()
@@ -2069,6 +2244,27 @@ class Handler(BaseHTTPRequestHandler):
                 shift = float(shift) if shift not in (None, "") else None
             except (TypeError, ValueError):
                 shift = None
+            # Continuation chaining: N linked short segments (each seeded by the
+            # previous segment's last frame) stitched into one seamless clip.
+            # When on, force each segment to the per-segment length so num_frames
+            # is the SEGMENT length, not the whole clip.
+            try:
+                chain_segments = int(d.get("chain_segments", 1) or 1)
+            except (TypeError, ValueError):
+                chain_segments = 1
+            chain_segments = max(1, min(WAN_CHAIN_MAX, chain_segments))
+            if chain_segments > 1:
+                try:
+                    seg_sec = float(d.get("segment_seconds", WAN_CHAIN_DEF_SECONDS))
+                except (TypeError, ValueError):
+                    seg_sec = WAN_CHAIN_DEF_SECONDS
+                num_frames = _frames_for_seconds(seg_sec)
+                # Each segment is a normal short render, so the per-segment
+                # pixel*frame budget governs memory — recompute the guardrail.
+                px_frames = w * h * num_frames
+                if tiling == "none" and px_frames > NONE_TILING_PX_BUDGET:
+                    tiling = "auto"
+                    tiling_forced = True
             opts = {
                 "engine": "wan",
                 "prompt": prompt[:2000],
@@ -2076,6 +2272,7 @@ class Handler(BaseHTTPRequestHandler):
                 "negative_prompt": (d.get("negative_prompt") or "").strip(),
                 "width": w, "height": h,
                 "num_frames": num_frames,
+                "chain_segments": chain_segments,
                 "steps": max(10, min(60, int(d.get("steps", DEF_STEPS)))),
                 "guide_scale": float(d.get("guide_scale", DEF_GUIDE)),
                 "scheduler": str(d.get("scheduler", DEF_SCHEDULER)),
