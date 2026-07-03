@@ -94,6 +94,9 @@ DEFAULT_ENGINE = "higgs"
 
 # Default Kokoro voice for the in-chat reader. Overridable per request.
 KOKORO_DEFAULT_VOICE = os.environ.get("TTS_KOKORO_VOICE", "af_heart")
+# Which Kokoro language prefixes to expose. English only by default
+# (a=American, b=British); override with e.g. TTS_KOKORO_LANGS="abj".
+KOKORO_LANGS = (os.environ.get("TTS_KOKORO_LANGS", "ab") or "ab").lower()
 
 # Curated fallback if the model's voice folder can't be enumerated. The live
 # list is discovered from the downloaded model at runtime (see _kokoro_voices).
@@ -109,8 +112,9 @@ _kokoro_voices_cache = None
 
 def _kokoro_voices() -> list:
     """Discover installed Kokoro voice names from the model's voices folder
-    (HF cache snapshot). Cached after first lookup; falls back to a curated
-    English list if the folder isn't found."""
+    (HF cache snapshot), filtered to the languages in KOKORO_LANGS (English by
+    default). Cached after first lookup; falls back to a curated list if the
+    folder isn't found."""
     global _kokoro_voices_cache
     if _kokoro_voices_cache is not None:
         return _kokoro_voices_cache
@@ -131,7 +135,10 @@ def _kokoro_voices() -> list:
                 break
     except Exception:
         voices = []
-    _kokoro_voices_cache = voices or list(KOKORO_VOICES_FALLBACK)
+    voices = voices or list(KOKORO_VOICES_FALLBACK)
+    # Keep only the enabled languages (by voice-name prefix letter).
+    filtered = [v for v in voices if v[:1].lower() in KOKORO_LANGS]
+    _kokoro_voices_cache = filtered or voices
     return _kokoro_voices_cache
 
 
@@ -307,6 +314,42 @@ def _load_engine(engine: str):
     return model
 
 
+WARM_KOKORO = os.environ.get("TTS_WARM_KOKORO", "1") not in ("0", "false", "no")
+
+
+def _warm_kokoro() -> None:
+    """Preload Kokoro and JIT-compile the vocoder for each enabled English
+    language (US/UK) at startup, so the first in-chat /say is fast instead of
+    paying a ~15-30s cold model load + per-language pipeline build."""
+    if not WARM_KOKORO or "kokoro" not in ENGINES:
+        return
+    try:
+        from mlx_audio.tts.generate import generate_audio
+        model = _load_engine("kokoro")
+        voices = _kokoro_voices()
+        seen = set()
+        for v in voices:
+            lang = _kokoro_lang(v)
+            if lang in seen:
+                continue
+            seen.add(lang)
+            prefix = "warm_" + uuid.uuid4().hex[:8]
+            try:
+                generate_audio(
+                    text="Ready.", model=model, voice=v, lang_code=lang,
+                    speed=1.0, audio_format="wav", output_path=OUT_DIR,
+                    file_prefix=prefix, join_audio=True, verbose=False,
+                )
+            finally:
+                try:
+                    os.remove(os.path.join(OUT_DIR, prefix + ".wav"))
+                except OSError:
+                    pass
+        print(f"[kokoro] warmed ({', '.join(sorted(seen))})", flush=True)
+    except Exception as e:  # non-fatal: falls back to lazy load on first call
+        print(f"[kokoro] warm-up skipped: {type(e).__name__}: {e}", flush=True)
+
+
 def _load_stt():
     global _stt
     if _stt is None:
@@ -345,6 +388,11 @@ def _worker() -> None:
         _load_engine(DEFAULT_ENGINE)
     except Exception as e:  # pragma: no cover
         _load_errors[DEFAULT_ENGINE] = f"{type(e).__name__}: {e}"
+    # Warm Kokoro (in-chat voice) so the first /say isn't a cold load.
+    try:
+        _warm_kokoro()
+    except Exception as e:  # pragma: no cover
+        _load_errors["kokoro"] = f"{type(e).__name__}: {e}"
 
     while True:
         job = _jobs.get()
