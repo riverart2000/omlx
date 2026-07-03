@@ -6513,14 +6513,23 @@
 
         // ---------- TTS Studio overlay (high-quality file generation) ----------
         const TTS_STUDIO_URL = 'http://127.0.0.1:8200/';
+        let ttsStatsUnmount = null;
+        function ttsStartStats() {
+            const el = document.getElementById('ttsSysStats');
+            if (ttsStatsUnmount) { ttsStatsUnmount(); ttsStatsUnmount = null; }
+            ttsStatsUnmount = window.OMLXStats ? OMLXStats.mount(el) : null;
+        }
+        function ttsStopStats() {
+            if (ttsStatsUnmount) { ttsStatsUnmount(); ttsStatsUnmount = null; }
+        }
         function openStudio() {
             let ov = document.getElementById('omlx-studio-overlay');
-            if (ov) { ov.style.display = 'flex'; return; }
+            if (ov) { ov.style.display = 'flex'; ttsStartStats(); return; }
             ov = document.createElement('div');
             ov.id = 'omlx-studio-overlay';
             ov.style.cssText = 'position:fixed;inset:0;z-index:9999;background:rgba(0,0,0,.55);' +
                 'display:flex;align-items:center;justify-content:center;backdrop-filter:blur(2px);';
-            ov.addEventListener('click', e => { if (e.target === ov) ov.style.display = 'none'; });
+            ov.addEventListener('click', e => { if (e.target === ov) { ov.style.display = 'none'; ttsStopStats(); } });
 
             const panel = document.createElement('div');
             panel.style.cssText = 'width:min(880px,94vw);height:min(760px,92vh);background:#0d1117;' +
@@ -6529,14 +6538,18 @@
 
             const bar = document.createElement('div');
             bar.style.cssText = 'display:flex;align-items:center;justify-content:space-between;' +
-                'padding:8px 12px;background:#161b22;border-bottom:1px solid #30363d;flex-shrink:0;';
-            bar.innerHTML = '<span style="font-size:13px;font-weight:600;color:#e6edf3;display:flex;gap:8px;align-items:center;">' +
+                'padding:8px 12px;background:#161b22;border-bottom:1px solid #30363d;flex-shrink:0;gap:12px;';
+            bar.innerHTML = '<span style="font-size:13px;font-weight:600;color:#e6edf3;display:flex;gap:8px;align-items:center;white-space:nowrap;">' +
                 '<i data-lucide="audio-lines" class="w-4 h-4"></i> TTS Studio — high-quality audio</span>';
+            const ttsStats = document.createElement('span');
+            ttsStats.id = 'ttsSysStats';
+            ttsStats.style.cssText = 'font-size:11px;color:#8b949e;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;flex:1;text-align:right;';
+            bar.appendChild(ttsStats);
             const closeBtn = document.createElement('button');
             closeBtn.innerHTML = '<i data-lucide="x" class="w-4 h-4"></i>';
             closeBtn.title = 'Close';
-            closeBtn.style.cssText = 'background:transparent;border:none;color:#8b949e;cursor:pointer;padding:4px;border-radius:6px;';
-            closeBtn.onclick = () => { ov.style.display = 'none'; };
+            closeBtn.style.cssText = 'background:transparent;border:none;color:#8b949e;cursor:pointer;padding:4px;border-radius:6px;flex-shrink:0;';
+            closeBtn.onclick = () => { ov.style.display = 'none'; ttsStopStats(); };
             bar.appendChild(closeBtn);
 
             const frame = document.createElement('iframe');
@@ -6549,14 +6562,86 @@
             ov.appendChild(panel);
             document.body.appendChild(ov);
             if (window.lucide && lucide.createIcons) lucide.createIcons();
+            ttsStartStats();
             document.addEventListener('keydown', function esc(e) {
-                if (e.key === 'Escape') { ov.style.display = 'none'; }
+                if (e.key === 'Escape') { ov.style.display = 'none'; ttsStopStats(); }
             });
         }
 
         // ---------- Image Studio overlay (HiDream-O1 text-to-image) ----------
         const IMAGE_URL = (window.OLMLX_IMAGE_URL || 'http://127.0.0.1:8400').replace(/\/$/, '');
         const VIDEO_URL = (window.OLMLX_VIDEO_URL || 'http://127.0.0.1:8500').replace(/\/$/, '');
+
+        // ---------- Shared system-stats widget (GPU / Watts / RAM) ----------
+        // ONE poller shared by every mount point: a single /stats fetch per tick
+        // is broadcast to all mounted readouts, and it's fully paused whenever no
+        // readout is mounted or the tab/overlay is hidden — so adding it to more
+        // sections costs nothing extra. Drop into any section with
+        // OMLXStats.mount(el) -> returns an unmount() handle.
+        const OMLXStats = (function () {
+            const ENDPOINTS = [IMAGE_URL, VIDEO_URL];   // all report identical system-wide stats
+            const INTERVAL_MS = 5000;
+            const targets = new Set();
+            let timer = null, lastGoodUrl = null, inFlight = false;
+
+            function fmt(s) {
+                const parts = [];
+                if (s.gpu_util != null) parts.push('🎛 GPU ' + s.gpu_util + '%');
+                if (s.gpu_watts != null || s.total_watts != null) {
+                    let w = '⚡ ';
+                    if (s.gpu_watts != null) w += 'GPU ' + s.gpu_watts + 'W';
+                    if (s.total_watts != null) w += (s.gpu_watts != null ? ' / ' : '') + s.total_watts + 'W total';
+                    parts.push(w);
+                }
+                if (s.gpu_temp != null) parts.push('🌡 ' + s.gpu_temp + '°C');
+                if (s.gpu_mem_gb != null) parts.push('VRAM ' + s.gpu_mem_gb + ' GB');
+                if (s.mem_used_gb != null && s.mem_total_gb != null)
+                    parts.push('RAM ' + s.mem_used_gb + '/' + s.mem_total_gb + ' GB');
+                return parts.join('   ·   ');
+            }
+            async function fetchStats() {
+                const urls = lastGoodUrl
+                    ? [lastGoodUrl, ...ENDPOINTS.filter(u => u !== lastGoodUrl)]
+                    : ENDPOINTS.slice();
+                for (const u of urls) {
+                    try {
+                        const r = await fetch(u + '/stats', { cache: 'no-store' });
+                        if (!r.ok) continue;
+                        lastGoodUrl = u;
+                        return await r.json();
+                    } catch (e) { /* try next endpoint */ }
+                }
+                return null;
+            }
+            async function tick() {
+                if (inFlight || document.hidden || targets.size === 0) return;
+                inFlight = true;
+                try {
+                    const s = await fetchStats();
+                    const text = s ? fmt(s) : '';
+                    targets.forEach(el => { if (el && el.isConnected) el.textContent = text; });
+                } finally { inFlight = false; }
+            }
+            function start() { if (!timer) { tick(); timer = setInterval(tick, INTERVAL_MS); } }
+            function stop() { if (timer) { clearInterval(timer); timer = null; } }
+            document.addEventListener('visibilitychange', () => {
+                if (document.hidden) stop();
+                else if (targets.size > 0) start();
+            });
+            return {
+                mount(el) {
+                    if (!el) return () => {};
+                    targets.add(el);
+                    if (!document.hidden) start();
+                    tick();
+                    return function unmount() {
+                        targets.delete(el);
+                        if (targets.size === 0) stop();
+                    };
+                }
+            };
+        })();
+        window.OMLXStats = OMLXStats;
         let imgPollTimer = null;
         function openImageStudio() {
             let ov = document.getElementById('omlx-image-overlay');
@@ -6697,36 +6782,16 @@
             imgStartStats();
         }
 
-        let imgStatsTimer = null;
-        function imgStatsUrl() { return (imgMode === 'video') ? VIDEO_URL : IMAGE_URL; }
-        async function imgPollStats() {
-            const el = document.getElementById('imgSysStats');
-            if (!el) return;
-            try {
-                const s = await (await fetch(imgStatsUrl() + '/stats')).json();
-                const parts = [];
-                if (s.gpu_util != null) parts.push('🎛 GPU ' + s.gpu_util + '%');
-                if (s.gpu_watts != null || s.total_watts != null) {
-                    let w = '⚡ ';
-                    if (s.gpu_watts != null) w += 'GPU ' + s.gpu_watts + 'W';
-                    if (s.total_watts != null) w += (s.gpu_watts != null ? ' / ' : '') + s.total_watts + 'W total';
-                    parts.push(w);
-                }
-                if (s.gpu_temp != null) parts.push('🌡 ' + s.gpu_temp + '°C');
-                if (s.gpu_mem_gb != null) parts.push('VRAM ' + s.gpu_mem_gb + ' GB');
-                if (s.mem_used_gb != null && s.mem_total_gb != null)
-                    parts.push('RAM ' + s.mem_used_gb + '/' + s.mem_total_gb + ' GB');
-                el.textContent = parts.join('   ·   ');
-            } catch (e) { el.textContent = ''; }
-        }
+        let imgStatsUnmount = null;
         function imgStartStats() {
-            if (imgStatsTimer) clearInterval(imgStatsTimer);
-            imgPollStats();
-            imgStatsTimer = setInterval(imgPollStats, 5000);
+            const el = document.getElementById('imgSysStats');
+            if (imgStatsUnmount) { imgStatsUnmount(); imgStatsUnmount = null; }
+            imgStatsUnmount = OMLXStats.mount(el);
         }
         function imgStopStats() {
-            if (imgStatsTimer) { clearInterval(imgStatsTimer); imgStatsTimer = null; }
+            if (imgStatsUnmount) { imgStatsUnmount(); imgStatsUnmount = null; }
         }
+        function imgPollStats() { /* shared OMLXStats poller refreshes on its own timer */ }
 
         let imgMode = 'image';
         function imgSetMode(mode) {
