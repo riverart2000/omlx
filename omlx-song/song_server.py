@@ -401,6 +401,7 @@ def _run_song(jid, opts):
             "text": opts["prompt"],
             "lyrics": opts.get("lyrics", ""),
             "duration": float(opts["duration"]),
+            "num_steps": int(opts.get("num_steps", DEF_STEPS_VOCAL)),
             "seed": int(opts["seed"]),
             "make_mp3": MAKE_MP3,
             "keep_wav": KEEP_WAV,
@@ -615,7 +616,7 @@ The catchy part"></textarea>
       <div>
         <label>Planner</label>
         <select id="lm"></select>
-        <div class="hint">ACE-only control. DiffRhythm (default) ignores planner/steps and uses its own high-quality path.</div>
+        <div class="hint">ACE-only control. DiffRhythm uses the quality slider to drive stronger multi-pass generation.</div>
       </div>
     </div>
 
@@ -723,7 +724,8 @@ function poll(jid){
 function done(res){
   $('go').disabled=false; $('progWrap').style.display='none';
   if((res.engine||'')==='diffrhythm'){
-    $('statusText').textContent='Done in '+(res.elapsed||'?')+'s (DiffRhythm local, clip '+(res.duration||'?')+'s)';
+    const qm=(res.metadata&&res.metadata.quality_profile)||'standard';
+    $('statusText').textContent='Done in '+(res.elapsed||'?')+'s (DiffRhythm '+qm+', clip '+(res.duration||'?')+'s, picks '+(res.attempts||1)+')';
   }else{
     $('statusText').textContent='Done in '+(res.elapsed||'?')+'s (gen '+(res.gen_s||'?')+'s, '+(res.num_steps||'?')+' steps, LM '+(res.lm_model_size||'?')+', take '+(res.selected_take||1)+'/'+(res.attempts||1)+')';
   }

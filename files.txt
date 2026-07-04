@@ -52,4 +52,6 @@
 /Users/joebains/omlx-song/song.sh|omlx-song/song.sh
 /Users/joebains/omlx-song/requirements.txt|omlx-song/requirements.txt
 /Users/joebains/Library/LaunchAgents/com.joebains.omlx-song.plist|launchagents/com.joebains.omlx-song.plist
+# DiffRhythm local runtime customization (quality picker + deterministic/best pick)
+/Users/joebains/omlx-diffrhythm/DiffRhythm/infer/infer.py|omlx-diffrhythm/infer.py
 /Users/joebains/omlx-stack.sh|omlx-stack.sh
