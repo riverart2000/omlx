@@ -420,17 +420,278 @@ produced artifact (its url) and how they fit together. Do not call any tool in t
 
 
 # ---------------------------------------------------------------------------
+# Workflow templates
+# Each workflow exposes a form (fields) in the UI and, from the filled inputs,
+# builds an explicit GOAL/plan the Orchestrator model then executes with tools.
+# A field with "source" pulls its dropdown options live from /options.
+# ---------------------------------------------------------------------------
+WORKFLOWS = [
+    {
+        "id": "sales_video",
+        "label": "🎯 Sales video (talking head)",
+        "description": "A spokesperson/avatar video that sells your product. Writes a script, "
+                       "voices it, generates a presenter portrait, then an audio-driven talking video.",
+        "note": "Local avatar engine — a 15s clip takes several minutes to render.",
+        "fields": [
+            {"name": "offer", "label": "Product / offer", "type": "text", "required": True,
+             "placeholder": "NoteZen — a minimalist markdown note-taking app"},
+            {"name": "talking_points", "label": "Key talking points", "type": "textarea",
+             "placeholder": "calm distraction-free UI; markdown; syncs everywhere; free to try"},
+            {"name": "script", "label": "Exact voiceover script (optional)", "type": "textarea",
+             "placeholder": "Leave blank to have the orchestrator write it from your talking points."},
+            {"name": "presenter", "label": "Presenter / face", "type": "text",
+             "default": "friendly professional presenter, warm smile, soft studio lighting, plain neutral background",
+             "help": "Describe the person who appears and talks (a portrait is generated from this)."},
+            {"name": "voice", "label": "Voice", "type": "select", "source": "voices"},
+            {"name": "aspect", "label": "Aspect", "type": "select", "options": ["9:16", "1:1", "16:9"], "default": "9:16"},
+            {"name": "duration", "label": "Duration (s)", "type": "number", "default": 15, "min": 5, "max": 30},
+            {"name": "captions", "label": "Captions", "type": "select",
+             "options": ["karaoke", "subtitle", "none"], "default": "karaoke"},
+        ],
+    },
+    {
+        "id": "narrated_promo",
+        "label": "🎬 Narrated promo / b-roll clip",
+        "description": "A cinematic text-to-video scene (LongCat) with a separate voiceover track. "
+                       "Returns both artifacts so you can combine them in the editor.",
+        "note": "LongCat text-to-video is slow: ~10 min per 5s segment.",
+        "fields": [
+            {"name": "topic", "label": "Topic / product", "type": "text", "required": True,
+             "placeholder": "a productivity app launch"},
+            {"name": "scene", "label": "Visual scene", "type": "textarea", "required": True,
+             "placeholder": "slow cinematic push-in over a sunrise city skyline, warm golden light, drone shot"},
+            {"name": "narration", "label": "Narration script (optional)", "type": "textarea",
+             "placeholder": "Leave blank to auto-write a short narration about the topic."},
+            {"name": "voice", "label": "Voice", "type": "select", "source": "voices"},
+            {"name": "aspect", "label": "Aspect", "type": "select", "options": ["9:16", "16:9", "1:1"], "default": "9:16"},
+            {"name": "duration", "label": "Duration (s)", "type": "number", "default": 10, "min": 5, "max": 30},
+        ],
+    },
+    {
+        "id": "animate_image",
+        "label": "🖼️ Animate an image (image-to-video)",
+        "description": "Generate a first-frame image, then animate it into a short motion clip (Wan2.2 i2v).",
+        "note": "Wan i2v clips are short (≤8s).",
+        "fields": [
+            {"name": "subject", "label": "First-frame image", "type": "textarea", "required": True,
+             "placeholder": "a red sports car parked on a coastal road at sunset, cinematic, 85mm"},
+            {"name": "motion", "label": "Motion / action", "type": "text", "required": True,
+             "placeholder": "camera slowly orbits the car, gentle wind, clouds drifting"},
+            {"name": "aspect", "label": "Aspect", "type": "select", "options": ["9:16", "16:9", "1:1"], "default": "16:9"},
+            {"name": "duration", "label": "Duration (s)", "type": "number", "default": 4, "min": 1, "max": 8},
+        ],
+    },
+    {
+        "id": "image_set",
+        "label": "📸 Marketing image set",
+        "description": "Generate a set of on-brand marketing images of your product or subject.",
+        "fields": [
+            {"name": "product", "label": "Subject / product", "type": "textarea", "required": True,
+             "placeholder": "a matte-black wireless headphone on a marble surface"},
+            {"name": "style", "label": "Style", "type": "select",
+             "options": ["photorealistic studio", "lifestyle", "minimalist", "vibrant marketing", "cinematic"],
+             "default": "photorealistic studio"},
+            {"name": "aspect", "label": "Aspect", "type": "select",
+             "options": ["1:1", "9:16", "16:9", "4:5", "3:2"], "default": "1:1"},
+            {"name": "count", "label": "How many", "type": "number", "default": 3, "min": 1, "max": 4},
+        ],
+    },
+    {
+        "id": "voiceover",
+        "label": "🎙️ Voiceover / narration",
+        "description": "Turn a script into a mastered voiceover audio file.",
+        "fields": [
+            {"name": "script", "label": "Script", "type": "textarea", "required": True,
+             "placeholder": "Welcome to NoteZen — calm notes for a busy mind."},
+            {"name": "voice", "label": "Voice", "type": "select", "source": "voices"},
+            {"name": "engine", "label": "Engine", "type": "select",
+             "options": ["kokoro", "higgs", "voxtral"], "default": "kokoro"},
+            {"name": "speed", "label": "Speed", "type": "number", "default": 1.0, "min": 0.5, "max": 2.0, "step": 0.1},
+        ],
+    },
+    {
+        "id": "thumbnail",
+        "label": "🔥 YouTube thumbnail",
+        "description": "Generate a bold, high-contrast thumbnail image for a video.",
+        "fields": [
+            {"name": "topic", "label": "Video topic", "type": "text", "required": True,
+             "placeholder": "how I automated my whole content pipeline locally"},
+            {"name": "style", "label": "Style", "type": "select",
+             "options": ["bold high-contrast", "clean minimal", "dramatic cinematic", "playful colorful"],
+             "default": "bold high-contrast"},
+            {"name": "aspect", "label": "Aspect", "type": "select", "options": ["16:9", "1:1", "9:16"], "default": "16:9"},
+        ],
+    },
+    {
+        "id": "custom",
+        "label": "✨ Custom goal (free-form)",
+        "description": "Describe any goal in your own words and let the orchestrator plan it.",
+        "fields": [
+            {"name": "goal", "label": "Goal", "type": "textarea", "required": True,
+             "placeholder": "Make a 15s vertical talking-head promo for my note app with an upbeat voiceover."},
+        ],
+    },
+]
+
+_WF_BY_ID = {w["id"]: w for w in WORKFLOWS}
+
+
+def _g(inp, key, default=""):
+    v = inp.get(key, default)
+    if v is None:
+        return default
+    return v
+
+
+def _build_goal(wid, inp):
+    """Compose an explicit goal/plan string from a workflow's filled inputs."""
+    if wid not in _WF_BY_ID:
+        raise ValueError(f"unknown workflow '{wid}'")
+    # required-field validation
+    for f in _WF_BY_ID[wid]["fields"]:
+        if f.get("required") and not str(_g(inp, f["name"])).strip():
+            raise ValueError(f"'{f['label']}' is required")
+
+    if wid == "custom":
+        return str(_g(inp, "goal")).strip()
+
+    if wid == "sales_video":
+        offer = _g(inp, "offer")
+        pts = _g(inp, "talking_points")
+        script = str(_g(inp, "script")).strip()
+        presenter = _g(inp, "presenter") or "friendly professional presenter, soft studio lighting, plain background"
+        voice = _g(inp, "voice") or "af_heart"
+        aspect = _g(inp, "aspect") or "9:16"
+        dur = int(float(_g(inp, "duration", 15)))
+        caps = _g(inp, "captions") or "karaoke"
+        words = max(20, int(dur * 2.5))
+        if script:
+            script_step = f'Use EXACTLY this voiceover script (do not rewrite it):\n"""{script}"""'
+        else:
+            script_step = (f"Write a punchy, persuasive ~{dur}s spokesperson script (about {words} words) "
+                           f"that sells: {offer}." + (f" Base it on these talking points: {pts}." if pts else ""))
+        return (
+            f"GOAL: Produce a {dur}-second {aspect} talking-head SALES VIDEO for: {offer}.\n"
+            f"Execute these steps in order, passing each output to the next:\n"
+            f"1. {script_step}\n"
+            f"2. Call generate_speech with that script and voice=\"{voice}\" to get an audio_file.\n"
+            f"3. Call generate_image to create a photorealistic PORTRAIT of the presenter "
+            f"(this is the face that will talk): {presenter}. Use aspect \"{aspect}\".\n"
+            f"4. Call generate_video with engine=\"avatar\", image=<the portrait image_file from step 3>, "
+            f"audio_file=<the audio_file from step 2>, aspect=\"{aspect}\", caption_style=\"{caps}\", "
+            f"duration_seconds={dur}.\n"
+            f"5. Finish with a summary containing the final video URL and the exact script used."
+        )
+
+    if wid == "narrated_promo":
+        topic = _g(inp, "topic")
+        scene = _g(inp, "scene")
+        narration = str(_g(inp, "narration")).strip()
+        voice = _g(inp, "voice") or "af_heart"
+        aspect = _g(inp, "aspect") or "9:16"
+        dur = int(float(_g(inp, "duration", 10)))
+        words = max(18, int(dur * 2.4))
+        if narration:
+            narr_step = f'Use EXACTLY this narration:\n"""{narration}"""'
+        else:
+            narr_step = f"Write a short ~{dur}s narration (about {words} words) about: {topic}."
+        return (
+            f"GOAL: Produce a {dur}-second {aspect} narrated promo/b-roll clip about: {topic}.\n"
+            f"1. {narr_step} Then call generate_speech(voice=\"{voice}\") to get the voiceover audio_file.\n"
+            f"2. Call generate_video with engine=\"longcat\", prompt=\"{scene}\", aspect=\"{aspect}\", "
+            f"duration_seconds={dur} to create the visuals.\n"
+            f"3. Finish with a summary listing BOTH the voiceover audio URL and the video URL, and note "
+            f"they are separate tracks to combine in the editor."
+        )
+
+    if wid == "animate_image":
+        subject = _g(inp, "subject")
+        motion = _g(inp, "motion")
+        aspect = _g(inp, "aspect") or "16:9"
+        dur = int(float(_g(inp, "duration", 4)))
+        return (
+            f"GOAL: Create a {dur}-second {aspect} image-to-video clip.\n"
+            f"1. Call generate_image with prompt=\"{subject}\" and aspect=\"{aspect}\" to make the first frame.\n"
+            f"2. Call generate_video with engine=\"wan\", image=<the image_file from step 1>, "
+            f"prompt=\"{motion}\", aspect=\"{aspect}\", duration_seconds={dur}.\n"
+            f"3. Finish with the final video URL."
+        )
+
+    if wid == "image_set":
+        product = _g(inp, "product")
+        style = _g(inp, "style") or "photorealistic studio"
+        aspect = _g(inp, "aspect") or "1:1"
+        count = max(1, min(4, int(float(_g(inp, "count", 3)))))
+        return (
+            f"GOAL: Generate {count} distinct {style} marketing images of: {product}.\n"
+            f"Call generate_image {count} separate times, each with aspect=\"{aspect}\", a DIFFERENT seed, "
+            f"and a slightly varied prompt/angle/lighting so the images differ. "
+            f"Finish with a summary listing every image URL."
+        )
+
+    if wid == "voiceover":
+        script = _g(inp, "script")
+        voice = _g(inp, "voice") or "af_heart"
+        engine = _g(inp, "engine") or "kokoro"
+        speed = float(_g(inp, "speed", 1.0))
+        return (
+            f"GOAL: Produce a voiceover audio file.\n"
+            f"Call generate_speech with text=\"{script}\", voice=\"{voice}\", engine=\"{engine}\", "
+            f"speed={speed}. Finish with the audio URL."
+        )
+
+    if wid == "thumbnail":
+        topic = _g(inp, "topic")
+        style = _g(inp, "style") or "bold high-contrast"
+        aspect = _g(inp, "aspect") or "16:9"
+        return (
+            f"GOAL: Generate a {style} YouTube thumbnail image for a video about: {topic}.\n"
+            f"Call generate_image with a vivid, {style} prompt (strong focal subject, punchy colors, "
+            f"leaves room for a short text overlay) and aspect=\"{aspect}\". Finish with the image URL."
+        )
+
+    # fallback
+    return str(_g(inp, "goal")).strip() or f"Workflow {wid}"
+
+
+def _wf_label(wid):
+    w = _WF_BY_ID.get(wid)
+    return w["label"] if w else wid
+
+
+def _workflows_public():
+    return [{k: v for k, v in w.items()} for w in WORKFLOWS]
+
+
+def _options():
+    voices = ["af_heart", "af_bella", "am_michael", "am_adam", "bf_emma", "bm_george"]
+    vdefault = "af_heart"
+    try:
+        v = _get_json(f"{TTS_URL}/say/voices", timeout=8)
+        if v.get("voices"):
+            voices = v["voices"]
+        vdefault = v.get("default", vdefault)
+    except Exception:
+        pass
+    return {
+        "voices": {"options": voices, "default": vdefault},
+        "aspects": ["9:16", "16:9", "1:1", "4:5", "3:2"],
+    }
+
+
+# ---------------------------------------------------------------------------
 # Agent loop  (runs in a background thread per job)
 # ---------------------------------------------------------------------------
 _jobs = {}
 _jobs_lock = threading.Lock()
 
 
-def _new_job(goal):
+def _new_job(goal, workflow=None):
     jid = "orch_" + uuid.uuid4().hex[:12]
     with _jobs_lock:
         _jobs[jid] = {
             "id": jid, "goal": goal, "status": "running",
+            "workflow": workflow, "workflow_label": _wf_label(workflow) if workflow else None,
             "steps": [], "artifacts": [], "result": None,
             "error": None, "created": time.time(),
         }
@@ -609,6 +870,12 @@ class Handler(BaseHTTPRequestHandler):
                 "max_iters": MAX_ITERS,
             })
             return
+        if path == "/workflows":
+            self._send(200, {"workflows": _workflows_public()})
+            return
+        if path == "/options":
+            self._send(200, _options())
+            return
         if path == "/status":
             jid = (qs.get("id") or [""])[0]
             j = _job(jid)
@@ -618,6 +885,7 @@ class Handler(BaseHTTPRequestHandler):
             with _jobs_lock:
                 self._send(200, {
                     "status": j["status"], "goal": j["goal"],
+                    "workflow": j.get("workflow"), "workflow_label": j.get("workflow_label"),
                     "steps": j["steps"], "artifacts": j["artifacts"],
                     "result": j["result"], "error": j["error"],
                 })
@@ -655,56 +923,152 @@ class Handler(BaseHTTPRequestHandler):
         except Exception:
             data = {}
         if path == "/orchestrate":
-            goal = str(data.get("goal", "")).strip()
-            if not goal:
-                self._send(400, {"error": "goal is required"})
-                return
-            jid = _new_job(goal)
+            wid = str(data.get("workflow", "")).strip()
+            if wid:
+                inputs = data.get("inputs") or {}
+                try:
+                    goal = _build_goal(wid, inputs)
+                except ValueError as e:
+                    self._send(400, {"error": str(e)})
+                    return
+                if not goal:
+                    self._send(400, {"error": "workflow produced an empty goal"})
+                    return
+                jid = _new_job(goal, workflow=wid)
+            else:
+                goal = str(data.get("goal", "")).strip()
+                if not goal:
+                    self._send(400, {"error": "goal is required"})
+                    return
+                jid = _new_job(goal)
             t = threading.Thread(target=_run_job, args=(jid, goal), daemon=True)
             t.start()
-            self._send(200, {"ok": True, "job_id": jid})
+            self._send(200, {"ok": True, "job_id": jid, "goal": goal})
             return
         self._send(404, {"error": "not found"})
 
 
 _UI_HTML = """<!doctype html><html><head><meta charset=utf-8>
+<meta name=viewport content="width=device-width,initial-scale=1">
 <title>omlx-orchestrator</title><style>
-body{font:14px -apple-system,system-ui,sans-serif;max-width:820px;margin:24px auto;padding:0 16px;background:#0d1117;color:#e6edf3}
-h1{font-size:18px}textarea{width:100%;height:70px;background:#161b22;color:#e6edf3;border:1px solid #30363d;border-radius:8px;padding:10px;font:inherit}
-button{background:#238636;color:#fff;border:0;border-radius:8px;padding:9px 16px;font:inherit;cursor:pointer;margin-top:8px}
+body{font:14px -apple-system,system-ui,sans-serif;max-width:860px;margin:20px auto;padding:0 16px;background:#0d1117;color:#e6edf3}
+h1{font-size:18px;margin:0 0 4px}
+.sub{color:#8b949e;font-size:12px;margin-bottom:14px}
+label{display:block;font-size:12px;color:#adbac7;margin:12px 0 4px;font-weight:600}
+select,input,textarea{width:100%;box-sizing:border-box;background:#161b22;color:#e6edf3;border:1px solid #30363d;border-radius:8px;padding:9px;font:inherit}
+textarea{min-height:64px;resize:vertical}
+input[type=number]{max-width:160px}
+button{background:#238636;color:#fff;border:0;border-radius:8px;padding:10px 18px;font:inherit;font-weight:600;cursor:pointer;margin-top:14px}
+button:disabled{opacity:.5;cursor:default}
+.wfdesc{background:#161b22;border:1px solid #21262d;border-radius:8px;padding:10px 12px;margin:8px 0;color:#adbac7;font-size:13px}
+.wfnote{color:#e3b341;font-size:12px;margin-top:6px}
+.help{color:#6e7681;font-size:11px;margin-top:3px}
+#form{margin-top:4px}
 .step{border-left:3px solid #30363d;padding:4px 10px;margin:6px 0;white-space:pre-wrap}
 .reason{border-color:#8957e5;color:#c9a0ff}.tool_call{border-color:#1f6feb;color:#79c0ff}
 .observation{border-color:#3fb950;color:#7ee787}.error{border-color:#f85149;color:#ff7b72}
 .final{border-color:#d29922;color:#e3b341;font-weight:600}.progress{border-color:#484f58;color:#8b949e;font-size:12px}
-a{color:#79c0ff}img,video{max-width:320px;border-radius:8px;display:block;margin:6px 0}
+a{color:#79c0ff}img,video{max-width:340px;border-radius:8px;display:block;margin:6px 0}
+hr{border:0;border-top:1px solid #21262d;margin:18px 0}
 </style></head><body>
 <h1>🧭 omlx-orchestrator</h1>
-<textarea id=g placeholder="Describe a goal, e.g. Make a 15s vertical talking-head promo for my note-taking app with an upbeat voiceover"></textarea>
-<button onclick=go()>Run workflow</button>
+<div class=sub>Pick a workflow, fill in the details, and the orchestrator builds &amp; runs the whole pipeline for you.</div>
+
+<label for=wf>Workflow</label>
+<select id=wf onchange=renderForm()></select>
+<div id=wfdesc class=wfdesc></div>
+<div id=form></div>
+<button id=runbtn onclick=go()>Run workflow</button>
+
 <div id=out></div>
 <script>
-let timer;
-async function go(){
- const goal=document.getElementById('g').value.trim();if(!goal)return;
- document.getElementById('out').innerHTML='<div class=step>starting…</div>';
- const r=await fetch('/orchestrate',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({goal})});
- const j=await r.json();if(j.error){document.getElementById('out').innerHTML='<div class="step error">'+j.error+'</div>';return;}
- clearInterval(timer);timer=setInterval(()=>poll(j.job_id),1200);poll(j.job_id);
+let WORKFLOWS=[], OPTS={}, timer;
+
+async function boot(){
+ try{
+  const [w,o]=await Promise.all([fetch('/workflows').then(r=>r.json()),fetch('/options').then(r=>r.json())]);
+  WORKFLOWS=w.workflows||[];OPTS=o||{};
+ }catch(e){document.getElementById('out').innerHTML='<div class="step error">Could not load workflows: '+esc(e.message)+'</div>';return;}
+ const sel=document.getElementById('wf');
+ sel.innerHTML=WORKFLOWS.map(w=>'<option value="'+w.id+'">'+esc(w.label)+'</option>').join('');
+ renderForm();
 }
+
+function curWf(){return WORKFLOWS.find(w=>w.id===document.getElementById('wf').value);}
+
+function renderForm(){
+ const w=curWf();if(!w)return;
+ let d='<div>'+esc(w.description||'')+'</div>';
+ if(w.note)d+='<div class=wfnote>⏱ '+esc(w.note)+'</div>';
+ document.getElementById('wfdesc').innerHTML=d;
+ const f=document.getElementById('form');
+ f.innerHTML=(w.fields||[]).map(fieldHtml).join('');
+}
+
+function fieldHtml(fl){
+ const id='f_'+fl.name;
+ let ctl='';
+ let opts=fl.options;
+ let def=fl.default;
+ if(fl.source&&OPTS[fl.source]){const s=OPTS[fl.source];opts=s.options||s;if(def==null)def=s.default;}
+ if(fl.type==='textarea'){
+  ctl='<textarea id="'+id+'" placeholder="'+esc(fl.placeholder||'')+'">'+esc(def||'')+'</textarea>';
+ }else if(fl.type==='select'){
+  ctl='<select id="'+id+'">'+(opts||[]).map(o=>'<option'+(o===def?' selected':'')+'>'+esc(o)+'</option>').join('')+'</select>';
+ }else if(fl.type==='number'){
+  ctl='<input id="'+id+'" type=number value="'+(def!=null?def:'')+'"'+
+      (fl.min!=null?' min="'+fl.min+'"':'')+(fl.max!=null?' max="'+fl.max+'"':'')+
+      (fl.step!=null?' step="'+fl.step+'"':'')+'>';
+ }else{
+  ctl='<input id="'+id+'" type=text value="'+esc(def||'')+'" placeholder="'+esc(fl.placeholder||'')+'">';
+ }
+ let h='<label for="'+id+'">'+esc(fl.label)+(fl.required?' *':'')+'</label>'+ctl;
+ if(fl.help)h+='<div class=help>'+esc(fl.help)+'</div>';
+ return h;
+}
+
+function collect(){
+ const w=curWf();const inputs={};
+ for(const fl of (w.fields||[])){
+  const el=document.getElementById('f_'+fl.name);if(!el)continue;
+  let v=el.value;
+  if(fl.type==='number')v=v===''?null:Number(v);
+  inputs[fl.name]=v;
+ }
+ return {workflow:w.id,inputs};
+}
+
+async function go(){
+ const w=curWf();if(!w)return;
+ const body=collect();
+ const btn=document.getElementById('runbtn');btn.disabled=true;
+ document.getElementById('out').innerHTML='<hr><div class=step>starting…</div>';
+ let j;
+ try{
+  const r=await fetch('/orchestrate',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+  j=await r.json();
+ }catch(e){j={error:e.message};}
+ btn.disabled=false;
+ if(j.error){document.getElementById('out').innerHTML='<hr><div class="step error">'+esc(j.error)+'</div>';return;}
+ clearInterval(timer);timer=setInterval(()=>poll(j.job_id),1400);poll(j.job_id);
+}
+
 async function poll(id){
- const r=await fetch('/status?id='+id);const j=await r.json();
- let h='';
- for(const s of j.steps){h+='<div class="step '+s.kind+'">['+s.t+'s] '+(s.kind)+': '+esc(s.text||'')+
+ let j;try{const r=await fetch('/status?id='+id);j=await r.json();}catch(e){return;}
+ let h='<hr>';
+ if(j.workflow_label)h+='<div class=sub>'+esc(j.workflow_label)+' — '+esc(j.status)+'</div>';
+ for(const s of (j.steps||[])){h+='<div class="step '+s.kind+'">['+s.t+'s] '+s.kind+': '+esc(s.text||'')+
    (s.kind==='tool_call'&&s.data?'  '+esc(JSON.stringify(s.data)):'')+'</div>';}
- if(j.artifacts.length){h+='<h3>Artifacts</h3>';for(const a of j.artifacts){
+ if((j.artifacts||[]).length){h+='<h3>Artifacts</h3>';for(const a of j.artifacts){
    if(a.kind==='image')h+='<img src="'+a.url+'">';
    else if(a.kind==='video')h+='<video src="'+a.url+'" controls></video>';
    else if(a.kind==='audio')h+='<audio src="'+a.url+'" controls></audio>';
-   h+='<div><a href="'+a.url+'" target=_blank>'+(a.label||a.url)+'</a></div>';}}
+   h+='<div><a href="'+a.url+'" target=_blank>'+esc(a.label||a.url)+'</a></div>';}}
  document.getElementById('out').innerHTML=h;
  if(j.status!=='running')clearInterval(timer);
 }
-function esc(s){return (s+'').replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));}
+function esc(s){return (s+'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));}
+boot();
 </script></body></html>"""
 
 
