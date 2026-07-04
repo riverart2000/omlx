@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.joebains.omlx-song</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/joebains/omlx-song/.venv/bin/python</string>
+        <string>/Users/joebains/omlx-song/song_server.py</string>
+    </array>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>SONG_PORT</key>
+        <string>8600</string>
+        <key>SONG_MODEL_DIR</key>
+        <string>/Users/joebains/.omlx/models/mlx-community/ACE-Step1.5-MLX</string>
+    </dict>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>StandardOutPath</key>
+    <string>/Users/joebains/omlx-song/service.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/joebains/omlx-song/service.err</string>
+</dict>
+</plist>

@@ -40,4 +40,15 @@
 /Users/joebains/omlx-video/captions.py|omlx-video/captions.py
 /Users/joebains/longcat-avatar-mlx/scripts/run_avatar_gen.py|longcat-avatar-mlx/run_avatar_gen.py
 /Users/joebains/longcat-avatar-mlx/.venv/lib/python3.13/site-packages/sitecustomize.py|longcat-avatar-mlx/sitecustomize.py
+# Song Studio (ACE-Step1.5-MLX music/song generation, :8600 sidecar)
+#  - song_server.py: stdlib HTTP job queue + LLM auto-unload + serves its own UI
+#  - gen_song.py: per-job subprocess generator (clean MLX memory release)
+#  - song.sh: start/stop/restart/status; requirements: mlx-audio @ pc/add-ace branch
+#    (pip install git+https://github.com/Blaizzy/mlx-audio.git@pc/add-ace) pinned
+#    with transformers==4.57.1; planner auto-downloads ACE-Step/acestep-5Hz-lm-0.6B
+/Users/joebains/omlx-song/song_server.py|omlx-song/song_server.py
+/Users/joebains/omlx-song/gen_song.py|omlx-song/gen_song.py
+/Users/joebains/omlx-song/song.sh|omlx-song/song.sh
+/Users/joebains/omlx-song/requirements.txt|omlx-song/requirements.txt
+/Users/joebains/Library/LaunchAgents/com.joebains.omlx-song.plist|launchagents/com.joebains.omlx-song.plist
 /Users/joebains/omlx-stack.sh|omlx-stack.sh

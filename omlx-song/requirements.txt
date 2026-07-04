@@ -1,0 +1,24 @@
+# omlx-song (Song Studio) — ACE-Step1.5-MLX music/song generation venv
+#
+# Setup (python3.13):
+#   python3.13 -m venv .venv
+#   ./.venv/bin/pip install --upgrade pip wheel
+#   ./.venv/bin/pip install "git+https://github.com/Blaizzy/mlx-audio.git@pc/add-ace"
+#   ./.venv/bin/pip install "transformers==4.57.1"   # MUST pin: 5.x breaks mlx-lm's
+#                                                     # AutoTokenizer.register at import
+#
+# The 5Hz planner (ACE-Step/acestep-5Hz-lm-0.6B, ~1.2GB) auto-downloads via mlx-lm
+# on first generation and is cached under ~/.cache/huggingface.
+#
+# Model weights (not pip): mlx-community/ACE-Step1.5-MLX at
+#   /Users/joebains/.omlx/models/mlx-community/ACE-Step1.5-MLX  (Apache-2.0)
+#
+# Pinned versions known-good on Apple M5 Max (verified):
+mlx-audio @ git+https://github.com/Blaizzy/mlx-audio.git@pc/add-ace
+transformers==4.57.1
+mlx-lm==0.31.1
+mlx==0.31.2
+numpy==2.4.6
+scipy==1.18.0
+soundfile==0.14.0
+librosa==0.11.0

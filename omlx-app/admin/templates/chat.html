@@ -6644,11 +6644,19 @@
             imgBtn.innerHTML = '<i data-lucide="image" class="w-4 h-4" style="color:var(--text-tertiary)"></i>';
             imgBtn.onclick = openImageStudio;
 
+            // Song Studio button — ACE-Step music/song generation (sidecar :8600)
+            const songBtn = document.createElement('button');
+            songBtn.type = 'button';
+            songBtn.className = 'omlx-song-studio ' + BTN + ' ' + IDLE.join(' ');
+            songBtn.title = 'Song Studio — generate music & songs (ACE-Step)';
+            songBtn.innerHTML = '<i data-lucide="music" class="w-4 h-4" style="color:var(--text-tertiary)"></i>';
+            songBtn.onclick = openSongStudio;
+
             if (ta) { row.insertBefore(voiceSelect, ta); row.insertBefore(micBtn, ta); row.insertBefore(hfBtn, ta); }
             else { row.appendChild(voiceSelect); row.appendChild(micBtn); row.appendChild(hfBtn); }
-            // Audio/image buttons grouped on the right, next to send: [image][studio][tts][send]
-            if (sendWrap) { row.insertBefore(imgBtn, sendWrap); row.insertBefore(studioBtn, sendWrap); row.insertBefore(ttsBtn, sendWrap); }
-            else { row.appendChild(imgBtn); row.appendChild(studioBtn); row.appendChild(ttsBtn); }
+            // Audio/image buttons grouped on the right, next to send: [song][image][studio][tts][send]
+            if (sendWrap) { row.insertBefore(songBtn, sendWrap); row.insertBefore(imgBtn, sendWrap); row.insertBefore(studioBtn, sendWrap); row.insertBefore(ttsBtn, sendWrap); }
+            else { row.appendChild(songBtn); row.appendChild(imgBtn); row.appendChild(studioBtn); row.appendChild(ttsBtn); }
 
             renderVoiceOptions();
             updateMic();
@@ -6714,7 +6722,62 @@
             });
         }
 
-        // ---------- Image Studio overlay (HiDream-O1 text-to-image) ----------
+        // ---------- Song Studio overlay (ACE-Step music/song generation) ----------
+        const SONG_STUDIO_URL = (window.OLMLX_SONG_URL || 'http://127.0.0.1:8600').replace(/\/$/, '') + '/';
+        let songStatsUnmount = null;
+        function songStartStats() {
+            const el = document.getElementById('songSysStats');
+            if (songStatsUnmount) { songStatsUnmount(); songStatsUnmount = null; }
+            songStatsUnmount = window.OMLXStats ? OMLXStats.mount(el) : null;
+        }
+        function songStopStats() {
+            if (songStatsUnmount) { songStatsUnmount(); songStatsUnmount = null; }
+        }
+        function openSongStudio() {
+            let ov = document.getElementById('omlx-song-overlay');
+            if (ov) { ov.style.display = 'flex'; songStartStats(); return; }
+            ov = document.createElement('div');
+            ov.id = 'omlx-song-overlay';
+            ov.style.cssText = 'position:fixed;inset:0;z-index:9999;background:rgba(0,0,0,.55);' +
+                'display:flex;align-items:center;justify-content:center;backdrop-filter:blur(2px);';
+            ov.addEventListener('click', e => { if (e.target === ov) { ov.style.display = 'none'; songStopStats(); } });
+
+            const panel = document.createElement('div');
+            panel.style.cssText = 'width:min(880px,94vw);height:min(820px,94vh);background:#0d1117;' +
+                'border:1px solid var(--line,#30363d);border-radius:14px;overflow:hidden;' +
+                'box-shadow:0 20px 60px rgba(0,0,0,.5);display:flex;flex-direction:column;';
+
+            const bar = document.createElement('div');
+            bar.style.cssText = 'display:flex;align-items:center;justify-content:space-between;' +
+                'padding:8px 12px;background:#161b22;border-bottom:1px solid #30363d;flex-shrink:0;gap:12px;';
+            bar.innerHTML = '<span style="font-size:13px;font-weight:600;color:#e6edf3;display:flex;gap:8px;align-items:center;white-space:nowrap;">' +
+                '<i data-lucide="music" class="w-4 h-4"></i> Song Studio — music &amp; songs (ACE-Step)</span>';
+            const songStats = document.createElement('span');
+            songStats.id = 'songSysStats';
+            songStats.style.cssText = 'font-size:11px;color:#8b949e;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;flex:1;text-align:right;';
+            bar.appendChild(songStats);
+            const closeBtn = document.createElement('button');
+            closeBtn.innerHTML = '<i data-lucide="x" class="w-4 h-4"></i>';
+            closeBtn.title = 'Close';
+            closeBtn.style.cssText = 'background:transparent;border:none;color:#8b949e;cursor:pointer;padding:4px;border-radius:6px;flex-shrink:0;';
+            closeBtn.onclick = () => { ov.style.display = 'none'; songStopStats(); };
+            bar.appendChild(closeBtn);
+
+            const frame = document.createElement('iframe');
+            frame.src = SONG_STUDIO_URL;
+            frame.style.cssText = 'flex:1;border:none;width:100%;background:#0d1117;';
+            frame.allow = 'autoplay';
+
+            panel.appendChild(bar);
+            panel.appendChild(frame);
+            ov.appendChild(panel);
+            document.body.appendChild(ov);
+            if (window.lucide && lucide.createIcons) lucide.createIcons();
+            songStartStats();
+            document.addEventListener('keydown', function esc(e) {
+                if (e.key === 'Escape') { ov.style.display = 'none'; songStopStats(); }
+            });
+        }
         const IMAGE_URL = (window.OLMLX_IMAGE_URL || 'http://127.0.0.1:8400').replace(/\/$/, '');
         const VIDEO_URL = (window.OLMLX_VIDEO_URL || 'http://127.0.0.1:8500').replace(/\/$/, '');
 
