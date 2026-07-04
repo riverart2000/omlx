@@ -46,21 +46,29 @@ MODEL_DIR = os.environ.get(
     "/Users/joebains/.omlx/models/mlx-community/ACE-Step1.5-MLX")
 VENV_PY = os.environ.get("SONG_PY", os.path.join(BASE_DIR, ".venv", "bin", "python"))
 GEN_SCRIPT = os.path.join(BASE_DIR, "gen_song.py")
-MODEL_LABEL = "ACE-Step1.5 (MLX) — text-to-music + songs, Apache-2.0"
+DIFF_BASE = os.environ.get("SONG_DIFF_BASE", "/Users/joebains/omlx-diffrhythm")
+DIFF_REPO = os.environ.get("SONG_DIFF_REPO", os.path.join(DIFF_BASE, "DiffRhythm"))
+DIFF_PY = os.environ.get("SONG_DIFF_PY", os.path.join(DIFF_BASE, ".venv", "bin", "python"))
+DIFF_GEN_SCRIPT = os.path.join(BASE_DIR, "gen_song_diffrhythm.py")
+ESPEAK_LIB = os.environ.get("PHONEMIZER_ESPEAK_LIBRARY", "/opt/homebrew/lib/libespeak-ng.dylib")
+MODEL_LABEL = "DiffRhythm v1.2 (local) + ACE-Step fallback"
 
 # --- generation defaults / limits -----------------------------------------
 SAMPLE_RATE = 48000
 DEF_SECONDS = 30.0
 MIN_SECONDS = 4.0
 MAX_SECONDS = 240.0            # 4 min ceiling keeps render time + memory sane
-DEF_STEPS_INSTRUMENTAL = 8    # turbo (CFG-distilled) — fast, good for instrumentals
-DEF_STEPS_VOCAL = 20          # more steps for cleaner sung vocals
+DEF_STEPS_INSTRUMENTAL = 16   # better baseline fidelity for instruments
+DEF_STEPS_VOCAL = 28          # stronger baseline for sung-vocal clarity
 MIN_STEPS = 4
 MAX_STEPS = 60
 DEF_SHIFT = 3.0
 DEF_GUIDANCE = 1.0            # turbo model default
 DEF_LM_SIZE = "0.6B"
 LM_SIZES = ["0.6B", "4B"]
+DEF_TAKES_INSTR_SHORT = 2
+DEF_TAKES_VOCAL_SHORT = 3
+DEF_TAKES_VOCAL_MED = 2
 
 # Keep both a lossless master and a shareable mp3; the user's rule is "always
 # keep the originals" so nothing here is auto-deleted.
@@ -131,14 +139,23 @@ _work_cv = threading.Condition()
 _STEP_RE = re.compile(r"(\d+)\s*/\s*(\d+)")
 
 
-def _weights_ready() -> bool:
+def _ace_weights_ready() -> bool:
     return (os.path.isdir(MODEL_DIR)
             and os.path.isfile(os.path.join(MODEL_DIR, "model.safetensors"))
             and os.path.isfile(os.path.join(MODEL_DIR, "config.json")))
 
 
+def _diff_ready() -> bool:
+    return (os.path.isdir(DIFF_REPO)
+            and os.path.isfile(DIFF_GEN_SCRIPT)
+            and os.path.isfile(DIFF_PY)
+            and os.path.isfile(os.path.join(DIFF_REPO, "infer", "infer.py")))
+
+
 def _available() -> bool:
-    return _weights_ready() and os.path.isfile(GEN_SCRIPT) and os.path.isfile(VENV_PY)
+    return _diff_ready() or (_ace_weights_ready()
+                             and os.path.isfile(GEN_SCRIPT)
+                             and os.path.isfile(VENV_PY))
 
 
 # --- oMLX chat-LLM auto-unload (same pattern as omlx-video) ----------------
@@ -372,29 +389,55 @@ def _ffmpeg_bin():
 
 def _run_song(jid, opts):
     stem = _stem_for(opts)
-    spec = {
-        "model_dir": MODEL_DIR,
-        "out_dir": OUT_DIR,
-        "stem": stem,
-        "text": opts["prompt"],
-        "lyrics": opts.get("lyrics", ""),
-        "duration": float(opts["duration"]),
-        "num_steps": int(opts["num_steps"]),
-        "seed": int(opts["seed"]),
-        "shift": float(opts.get("shift", DEF_SHIFT)),
-        "guidance_scale": float(opts.get("guidance_scale", DEF_GUIDANCE)),
-        "vocal_language": opts.get("vocal_language", DEF_VOCAL_LANG),
-        "lm_model_size": opts.get("lm_model_size", DEF_LM_SIZE),
-        "use_lm": True,
-        "make_mp3": MAKE_MP3,
-        "keep_wav": KEEP_WAV,
-        "ffmpeg": _ffmpeg_bin(),
-    }
+    engine = str(opts.get("engine") or "diffrhythm")
+    if engine == "diffrhythm":
+        spec = {
+            "engine": "diffrhythm",
+            "dr_repo": DIFF_REPO,
+            "dr_py": DIFF_PY,
+            "espeak_lib": ESPEAK_LIB,
+            "out_dir": OUT_DIR,
+            "stem": stem,
+            "text": opts["prompt"],
+            "lyrics": opts.get("lyrics", ""),
+            "duration": float(opts["duration"]),
+            "seed": int(opts["seed"]),
+            "make_mp3": MAKE_MP3,
+            "keep_wav": KEEP_WAV,
+            "ffmpeg": _ffmpeg_bin(),
+        }
+        script = DIFF_GEN_SCRIPT
+    else:
+        spec = {
+            "engine": "ace_step",
+            "model_dir": MODEL_DIR,
+            "out_dir": OUT_DIR,
+            "stem": stem,
+            "text": opts["prompt"],
+            "lyrics": opts.get("lyrics", ""),
+            "duration": float(opts["duration"]),
+            "num_steps": int(opts["num_steps"]),
+            "seed": int(opts["seed"]),
+            "shift": float(opts.get("shift", DEF_SHIFT)),
+            "guidance_scale": float(opts.get("guidance_scale", DEF_GUIDANCE)),
+            "vocal_language": opts.get("vocal_language", DEF_VOCAL_LANG),
+            "lm_model_size": opts.get("lm_model_size", DEF_LM_SIZE),
+            "attempts": int(opts.get("attempts", 1)),
+            "max_attempts": int(opts.get("max_attempts", opts.get("attempts", 1))),
+            "min_vocal_words": int(opts.get("min_vocal_words", 6)),
+            "whisper_repo": "mlx-community/whisper-large-v3-turbo",
+            "use_lm": True,
+            "make_mp3": MAKE_MP3,
+            "keep_wav": KEEP_WAV,
+            "ffmpeg": _ffmpeg_bin(),
+        }
+        script = GEN_SCRIPT
     spec_path = os.path.join(TMP_DIR, f"{jid}.json")
     with open(spec_path, "w") as f:
         json.dump(spec, f)
 
-    cmd = [VENV_PY, GEN_SCRIPT, spec_path]
+    py_exec = DIFF_PY if engine == "diffrhythm" else VENV_PY
+    cmd = [py_exec, script, spec_path]
     t0 = time.time()
     proc = subprocess.Popen(cmd, cwd=BASE_DIR, stdout=subprocess.PIPE,
                             stderr=subprocess.STDOUT, text=True, bufsize=1)
@@ -443,8 +486,9 @@ def _run_job(jid):
         result = _run_song(jid, opts)
         files = result.get("files", [])
         primary = result.get("flac") or (files[0] if files else None)
+        engine = result.get("engine", opts.get("engine", "ace-step"))
         _set(jid, status="done", stage="done", progress=100, result={
-            "engine": "ace-step",
+            "engine": engine,
             "filename": primary,
             "url": f"/files/{primary}" if primary else None,
             "files": [{"name": f, "url": f"/files/{f}"} for f in files],
@@ -457,7 +501,13 @@ def _run_job(jid):
             "metadata": result.get("metadata", {}),
             "prompt": opts.get("prompt"),
             "lyrics": opts.get("lyrics", ""),
-            "seed": opts.get("seed"),
+            "seed": result.get("selected_seed", opts.get("seed")),
+            "selected_take": result.get("selected_take", 1),
+            "attempts": result.get("attempts", opts.get("attempts", 1)),
+            "selection_score": result.get("selection_score"),
+            "transcript_preview": result.get("transcript_preview", ""),
+            "lm_model_size": result.get("lm_model_size", opts.get("lm_model_size")),
+            "num_steps": result.get("num_steps", opts.get("num_steps")),
         })
     except Exception as e:
         _set(jid, status="error", stage="error", error=str(e))
@@ -550,7 +600,7 @@ The catchy part"></textarea>
       <div>
         <label>Quality (steps): <span id="stepVal">auto</span></label>
         <input type="range" id="steps" min="4" max="60" value="8" step="1" style="width:100%">
-        <div class="hint">More steps = cleaner (slower). 8 for instrumentals, ~20 for vocals.</div>
+        <div class="hint">More steps = cleaner (slower). Baselines: ~16 instrumental, ~28 vocal.</div>
       </div>
     </div>
 
@@ -565,7 +615,7 @@ The catchy part"></textarea>
       <div>
         <label>Planner</label>
         <select id="lm"></select>
-        <div class="hint">4B = higher quality, slower.</div>
+        <div class="hint">ACE-only control. DiffRhythm (default) ignores planner/steps and uses its own high-quality path.</div>
       </div>
     </div>
 
@@ -611,7 +661,7 @@ function instrumental(){ return $('instrumental').checked || !$('lyrics').value.
 function syncSteps(){
   // If the user hasn't dragged steps, show/apply the sensible default for the mode.
   if(!$('steps').dataset.touched){
-    const d = instrumental()? (INFO?INFO.defaults.num_steps_instrumental:8) : (INFO?INFO.defaults.num_steps_vocal:20);
+    const d = instrumental()? (INFO?INFO.defaults.num_steps_instrumental:16) : (INFO?INFO.defaults.num_steps_vocal:28);
     $('steps').value=d; $('stepVal').textContent=d+' (auto)';
   } else { $('stepVal').textContent=$('steps').value; }
 }
@@ -619,6 +669,7 @@ function updLyricsBox(){ $('lyricsBox').style.opacity=$('instrumental').checked?
 
 $('duration').oninput=()=>$('durVal').textContent=$('duration').value;
 $('steps').oninput=()=>{$('steps').dataset.touched='1';$('stepVal').textContent=$('steps').value;};
+$('lm').onchange=()=>{$('lm').dataset.touched='1';};
 $('instrumental').onchange=updLyricsBox;
 $('lyrics').oninput=syncSteps;
 $('dice').onclick=()=>{$('seed').value=Math.floor(Math.random()*16777215);};
@@ -629,16 +680,22 @@ document.querySelectorAll('.tag').forEach(t=>t.onclick=()=>{
 
 async function generate(){
   $('err').textContent=''; $('result').innerHTML='';
+  const lyricText = $('lyrics').value.trim();
+  const wantsInstrumental = $('instrumental').checked && !lyricText;
+  if (lyricText && $('instrumental').checked) {
+    $('instrumental').checked = false;
+    updLyricsBox();
+  }
   const body={
     style:$('style').value,
     prompt:$('prompt').value.trim(),
-    instrumental:$('instrumental').checked,
-    lyrics:$('instrumental').checked?'':$('lyrics').value,
+    instrumental:wantsInstrumental,
+    lyrics:wantsInstrumental?'':$('lyrics').value,
     vocal_language:$('lang').value,
     duration:parseFloat($('duration').value),
     num_steps:parseInt($('steps').value),
-    lm_model_size:$('lm').value,
   };
+  if ($('lm').dataset.touched) body.lm_model_size=$('lm').value;
   const s=$('seed').value.trim(); if(s!=='')body.seed=parseInt(s);
   $('go').disabled=true; $('statusText').textContent='Submitting…';
   $('progWrap').style.display='block'; $('bar').style.width='2%';
@@ -665,7 +722,11 @@ function poll(jid){
 
 function done(res){
   $('go').disabled=false; $('progWrap').style.display='none';
-  $('statusText').textContent='Done in '+(res.elapsed||'?')+'s (gen '+(res.gen_s||'?')+'s)';
+  if((res.engine||'')==='diffrhythm'){
+    $('statusText').textContent='Done in '+(res.elapsed||'?')+'s (DiffRhythm local, clip '+(res.duration||'?')+'s)';
+  }else{
+    $('statusText').textContent='Done in '+(res.elapsed||'?')+'s (gen '+(res.gen_s||'?')+'s, '+(res.num_steps||'?')+' steps, LM '+(res.lm_model_size||'?')+', take '+(res.selected_take||1)+'/'+(res.attempts||1)+')';
+  }
   const flac=(res.files||[]).find(f=>f.name.endsWith('.flac'));
   const mp3=(res.files||[]).find(f=>f.name.endsWith('.mp3'));
   const play=mp3||flac;
@@ -676,6 +737,7 @@ function done(res){
   if(mp3)html+='<a class="dl" href="'+BASE+mp3.url+'" download>⬇ MP3</a>';
   html+='</div>';
   if(res.metadata&&res.metadata.bpm){html+='<div class="muted" style="margin-top:6px">~'+res.metadata.bpm+' BPM · '+(res.metadata.keyscale||'')+' · '+(res.metadata.genres||'')+'</div>';}
+  if(res.transcript_preview){html+='<div class="muted" style="margin-top:6px">vocal check: '+res.transcript_preview.replace(/</g,'&lt;')+'</div>';}
   $('result').innerHTML=html;
   loadLibrary();
 }
@@ -750,7 +812,11 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(200, {
                 "ok": True,
                 "available": _available(),
-                "weights_ready": _weights_ready(),
+                "weights_ready": _diff_ready() or _ace_weights_ready(),
+                "engines": {
+                    "diffrhythm": {"available": _diff_ready(), "label": "DiffRhythm v1.2 local"},
+                    "ace_step": {"available": _ace_weights_ready(), "label": "ACE-Step1.5 local"},
+                },
                 "model": MODEL_LABEL,
                 "model_dir": MODEL_DIR,
                 "queue": len(_work_q),
@@ -761,8 +827,9 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(200, {
                 "model": MODEL_LABEL,
                 "available": _available(),
-                "weights_ready": _weights_ready(),
+                "weights_ready": _diff_ready() or _ace_weights_ready(),
                 "sample_rate": SAMPLE_RATE,
+                "engine_default": "diffrhythm",
                 "styles": STYLE_PRESETS,
                 "style_default": DEF_STYLE,
                 "vocal_languages": VOCAL_LANGUAGES,
@@ -772,6 +839,9 @@ class Handler(BaseHTTPRequestHandler):
                     "duration_seconds": DEF_SECONDS,
                     "num_steps_instrumental": DEF_STEPS_INSTRUMENTAL,
                     "num_steps_vocal": DEF_STEPS_VOCAL,
+                    "takes_instr_short": DEF_TAKES_INSTR_SHORT,
+                    "takes_vocal_short": DEF_TAKES_VOCAL_SHORT,
+                    "takes_vocal_med": DEF_TAKES_VOCAL_MED,
                     "shift": DEF_SHIFT,
                     "guidance_scale": DEF_GUIDANCE,
                     "lm_model_size": DEF_LM_SIZE,
@@ -818,9 +888,21 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         path = urlparse(self.path).path
         if path == "/generate":
-            if not _available():
-                return self._json(400, {"error": "ACE-Step model/venv not ready"})
             d = self._read_body()
+            req_engine = str(d.get("engine") or "diffrhythm").lower().replace("-", "_")
+            if req_engine not in ("diffrhythm", "ace_step", "ace"):
+                req_engine = "diffrhythm"
+            if req_engine == "ace":
+                req_engine = "ace_step"
+            if req_engine == "diffrhythm" and not _diff_ready():
+                if _ace_weights_ready():
+                    req_engine = "ace_step"
+                else:
+                    return self._json(400, {"error": "DiffRhythm runtime is not ready"})
+            if req_engine == "ace_step" and not _ace_weights_ready():
+                return self._json(400, {"error": "ACE-Step model is not ready"})
+            if not _available():
+                return self._json(400, {"error": "No song engine is ready"})
             user_prompt = (d.get("prompt") or "").strip()
             style_id = str(d.get("style") or DEF_STYLE)
             style = STYLE_BY_ID.get(style_id, STYLE_BY_ID[DEF_STYLE])
@@ -831,9 +913,18 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json(400, {"error": "Describe the music, or pick a style"})
 
             lyrics = (d.get("lyrics") or "").strip()
-            instrumental = bool(d.get("instrumental")) or not lyrics
-            if instrumental:
+            # Treat a lyrics box containing only section markers (e.g. [Verse]) as
+            # effectively empty; otherwise any real lyric text forces vocal mode.
+            lyr_words = re.sub(r"\[[^\]]+\]", " ", lyrics)
+            has_lyrics = bool(re.search(r"[A-Za-z0-9]{2,}", lyr_words))
+            instrumental = bool(d.get("instrumental")) and not has_lyrics
+            if not has_lyrics:
+                instrumental = True
                 lyrics = ""
+            else:
+                # Nudge ACE-Step toward actual singing when lyrics are supplied.
+                prompt = ("clear lead vocals, sung lyrics, intelligible vocal line, "
+                          + prompt)
 
             try:
                 duration = float(d.get("duration", DEF_SECONDS))
@@ -847,14 +938,22 @@ class Handler(BaseHTTPRequestHandler):
             except (TypeError, ValueError):
                 num_steps = default_steps
             num_steps = max(MIN_STEPS, min(MAX_STEPS, num_steps))
+            if instrumental:
+                num_steps = max(12, num_steps)
+            else:
+                num_steps = max(24, num_steps)
 
             vocal_language = str(d.get("vocal_language") or DEF_VOCAL_LANG)
             if vocal_language not in VOCAL_LANG_IDS:
                 vocal_language = DEF_VOCAL_LANG
 
-            lm_size = str(d.get("lm_model_size") or DEF_LM_SIZE)
-            if lm_size not in LM_SIZES:
-                lm_size = DEF_LM_SIZE
+            req_lm = str(d.get("lm_model_size") or "").strip()
+            if req_lm in LM_SIZES:
+                lm_size = req_lm
+            else:
+                # For lyric/vocal jobs, default to the 4B planner for better
+                # vocal/language adherence. (First run may download it.)
+                lm_size = "4B" if not instrumental else DEF_LM_SIZE
 
             seed = d.get("seed")
             try:
@@ -862,8 +961,44 @@ class Handler(BaseHTTPRequestHandler):
             except (TypeError, ValueError):
                 seed = int.from_bytes(os.urandom(3), "big")
 
+            # Quality-first auto cherry-pick:
+            # - vocals: short clips best-of-3, medium best-of-2
+            # - instrumentals: short best-of-2
+            req_takes = d.get("takes")
+            try:
+                attempts = int(req_takes)
+            except (TypeError, ValueError):
+                attempts = 0
+            if attempts <= 0:
+                if not instrumental:
+                    if duration <= 25:
+                        attempts = DEF_TAKES_VOCAL_SHORT
+                    elif duration <= 60:
+                        attempts = DEF_TAKES_VOCAL_MED
+                    else:
+                        attempts = 1
+                else:
+                    attempts = DEF_TAKES_INSTR_SHORT if duration <= 20 else 1
+            attempts = max(1, min(5, attempts))
+            max_attempts = attempts
+            min_vocal_words = 6
+            if not instrumental:
+                if duration <= 20:
+                    max_attempts = max(attempts, 8)
+                    min_vocal_words = 6
+                elif duration <= 45:
+                    max_attempts = max(attempts, 6)
+                    min_vocal_words = 8
+                else:
+                    max_attempts = max(attempts, 4)
+                    min_vocal_words = 10
+            if req_engine == "diffrhythm":
+                attempts = 1
+                max_attempts = 1
+                lm_size = None
+
             opts = {
-                "engine": "ace-step",
+                "engine": "diffrhythm" if req_engine == "diffrhythm" else "ace-step",
                 "prompt": prompt[:1500],
                 "title": (d.get("title") or user_prompt or style.get("label", "song")),
                 "style": style_id,
@@ -876,6 +1011,9 @@ class Handler(BaseHTTPRequestHandler):
                 "guidance_scale": float(d.get("guidance_scale", DEF_GUIDANCE)),
                 "vocal_language": vocal_language,
                 "lm_model_size": lm_size,
+                "attempts": attempts,
+                "max_attempts": max_attempts,
+                "min_vocal_words": min_vocal_words,
             }
             jid = "song_" + uuid.uuid4().hex[:12]
             _set(jid, status="running", stage="queued", progress=0,
@@ -884,9 +1022,13 @@ class Handler(BaseHTTPRequestHandler):
                 _work_q.append(jid)
                 _work_cv.notify()
             reclaim = _omlx_model_memory_gb() if AUTO_UNLOAD_LLM else 0
-            return self._json(200, {"ok": True, "job_id": jid, "engine": "ace-step",
+            return self._json(200, {"ok": True, "job_id": jid,
+                                    "engine": opts["engine"],
                                     "instrumental": instrumental, "seed": seed,
                                     "duration": duration, "num_steps": num_steps,
+                                    "lm_model_size": lm_size,
+                                    "attempts": attempts,
+                                    "max_attempts": max_attempts,
                                     "reclaim_gb": reclaim})
         return self._json(404, {"error": "not found"})
 
@@ -920,7 +1062,7 @@ def main():
     threading.Thread(target=_power_worker, daemon=True).start()
     srv = ThreadingHTTPServer((HOST, PORT), Handler)
     print(f"omlx-song ready at http://{HOST}:{PORT} "
-          f"(weights_ready={_weights_ready()})", flush=True)
+          f"(diff_ready={_diff_ready()}, ace_ready={_ace_weights_ready()})", flush=True)
     srv.serve_forever()
 
 
