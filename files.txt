@@ -26,6 +26,10 @@
 /Users/joebains/omlx-video/video.sh|omlx-video/video.sh
 /Users/joebains/omlx-video/requirements.txt|omlx-video/requirements.txt
 /Users/joebains/Library/LaunchAgents/com.joebains.omlx-video.plist|launchagents/com.joebains.omlx-video.plist
+# oMLX Orchestrator (workflow coordinator microservice, port 8700)
+/Users/joebains/omlx-orchestrator/orchestrator_server.py|omlx-orchestrator/orchestrator_server.py
+/Users/joebains/omlx-orchestrator/orchestrator.sh|omlx-orchestrator/orchestrator.sh
+/Users/joebains/Library/LaunchAgents/com.joebains.omlx-orchestrator.plist|launchagents/com.joebains.omlx-orchestrator.plist
 # LongCat-Video engine customizations (separate repo clone + venv)
 #  - lora.py: quantization-aware LoRA merge (dequantize->add->requantize) so the
 #    cfg_step_lora fast path works on the q8 DiT (upstream merge only handles bf16)

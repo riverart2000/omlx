@@ -10,9 +10,9 @@
 #   * tts-studio        — :8200  (launchd: com.joebains.tts-studio)
 #   * omlx-image        — :8400  (launchd: com.joebains.omlx-image)
 #   * omlx-video        — :8500  (launchd: com.joebains.omlx-video)
-#   * omlx-song         — :8600  (launchd: com.joebains.omlx-song)
+#   * omlx-orchestrator — :8700  (launchd: com.joebains.omlx-orchestrator)
 #
-# The four sidecars are launchd user-agents with KeepAlive=true, so a plain
+# The sidecars are launchd user-agents with KeepAlive=true, so a plain
 # `kill` just gets them respawned — this script drives them via `launchctl`
 # (bootstrap / bootout / kickstart) so stop actually sticks. The GUI is a
 # normal .app, launched with `open -a` and quit via AppleScript.
@@ -34,7 +34,7 @@ SERVICES=(
   "com.joebains.tts-studio|8200|tts-studio (voice/viral)"
   "com.joebains.omlx-image|8400|image (HiDream/Kontext)"
   "com.joebains.omlx-video|8500|video (Wan2.2)"
-  "com.joebains.omlx-song|8600|song (ACE-Step)"
+  "com.joebains.omlx-orchestrator|8700|orchestrator (workflow coordinator)"
 )
 
 # --- colours (fall back to plain if not a tty) ------------------------------

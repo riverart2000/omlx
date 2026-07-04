@@ -6644,19 +6644,28 @@
             imgBtn.innerHTML = '<i data-lucide="image" class="w-4 h-4" style="color:var(--text-tertiary)"></i>';
             imgBtn.onclick = openImageStudio;
 
-            // Song Studio button — ACE-Step music/song generation (sidecar :8600)
-            const songBtn = document.createElement('button');
-            songBtn.type = 'button';
-            songBtn.className = 'omlx-song-studio ' + BTN + ' ' + IDLE.join(' ');
-            songBtn.title = 'Song Studio — generate music & songs (ACE-Step)';
-            songBtn.innerHTML = '<i data-lucide="music" class="w-4 h-4" style="color:var(--text-tertiary)"></i>';
-            songBtn.onclick = openSongStudio;
+            // Orchestrator button — workflow coordinator (sidecar :8700)
+            const orchBtn = document.createElement('button');
+            orchBtn.type = 'button';
+            orchBtn.className = 'omlx-orch-studio ' + BTN + ' ' + IDLE.join(' ');
+            orchBtn.title = 'Workflow Orchestrator — coordinate image/video/tts pipelines';
+            orchBtn.innerHTML = '<i data-lucide="compass" class="w-4 h-4" style="color:var(--text-tertiary)"></i>';
+            orchBtn.onclick = openOrchestrator;
 
             if (ta) { row.insertBefore(voiceSelect, ta); row.insertBefore(micBtn, ta); row.insertBefore(hfBtn, ta); }
             else { row.appendChild(voiceSelect); row.appendChild(micBtn); row.appendChild(hfBtn); }
-            // Audio/image buttons grouped on the right, next to send: [song][image][studio][tts][send]
-            if (sendWrap) { row.insertBefore(songBtn, sendWrap); row.insertBefore(imgBtn, sendWrap); row.insertBefore(studioBtn, sendWrap); row.insertBefore(ttsBtn, sendWrap); }
-            else { row.appendChild(songBtn); row.appendChild(imgBtn); row.appendChild(studioBtn); row.appendChild(ttsBtn); }
+            // Audio/image buttons grouped on the right, next to send: [orchestrator][image][studio][tts][send]
+            if (sendWrap) {
+                row.insertBefore(orchBtn, sendWrap);
+                row.insertBefore(imgBtn, sendWrap);
+                row.insertBefore(studioBtn, sendWrap);
+                row.insertBefore(ttsBtn, sendWrap);
+            } else {
+                row.appendChild(orchBtn);
+                row.appendChild(imgBtn);
+                row.appendChild(studioBtn);
+                row.appendChild(ttsBtn);
+            }
 
             renderVoiceOptions();
             updateMic();
@@ -6722,28 +6731,23 @@
             });
         }
 
-        // ---------- Song Studio overlay (ACE-Step music/song generation) ----------
-        const SONG_STUDIO_URL = (window.OLMLX_SONG_URL || 'http://127.0.0.1:8600').replace(/\/$/, '') + '/';
-        let songStatsUnmount = null;
-        function songStartStats() {
-            const el = document.getElementById('songSysStats');
-            if (songStatsUnmount) { songStatsUnmount(); songStatsUnmount = null; }
-            songStatsUnmount = window.OMLXStats ? OMLXStats.mount(el) : null;
-        }
-        function songStopStats() {
-            if (songStatsUnmount) { songStatsUnmount(); songStatsUnmount = null; }
-        }
-        function openSongStudio() {
-            let ov = document.getElementById('omlx-song-overlay');
-            if (ov) { ov.style.display = 'flex'; songStartStats(); return; }
+        // ---------- Image Studio overlay (HiDream-O1 text-to-image) ----------
+        const IMAGE_URL = (window.OLMLX_IMAGE_URL || 'http://127.0.0.1:8400').replace(/\/$/, '');
+        const VIDEO_URL = (window.OLMLX_VIDEO_URL || 'http://127.0.0.1:8500').replace(/\/$/, '');
+        const ORCH_URL = (window.OLMLX_ORCH_URL || 'http://127.0.0.1:8700').replace(/\/$/, '');
+
+        // ---------- Orchestrator overlay (workflow coordinator) ----------
+        function openOrchestrator() {
+            let ov = document.getElementById('omlx-orch-overlay');
+            if (ov) { ov.style.display = 'flex'; return; }
             ov = document.createElement('div');
-            ov.id = 'omlx-song-overlay';
+            ov.id = 'omlx-orch-overlay';
             ov.style.cssText = 'position:fixed;inset:0;z-index:9999;background:rgba(0,0,0,.55);' +
                 'display:flex;align-items:center;justify-content:center;backdrop-filter:blur(2px);';
-            ov.addEventListener('click', e => { if (e.target === ov) { ov.style.display = 'none'; songStopStats(); } });
+            ov.addEventListener('click', e => { if (e.target === ov) ov.style.display = 'none'; });
 
             const panel = document.createElement('div');
-            panel.style.cssText = 'width:min(880px,94vw);height:min(820px,94vh);background:#0d1117;' +
+            panel.style.cssText = 'width:min(980px,95vw);height:min(860px,95vh);background:#0d1117;' +
                 'border:1px solid var(--line,#30363d);border-radius:14px;overflow:hidden;' +
                 'box-shadow:0 20px 60px rgba(0,0,0,.5);display:flex;flex-direction:column;';
 
@@ -6751,20 +6755,26 @@
             bar.style.cssText = 'display:flex;align-items:center;justify-content:space-between;' +
                 'padding:8px 12px;background:#161b22;border-bottom:1px solid #30363d;flex-shrink:0;gap:12px;';
             bar.innerHTML = '<span style="font-size:13px;font-weight:600;color:#e6edf3;display:flex;gap:8px;align-items:center;white-space:nowrap;">' +
-                '<i data-lucide="music" class="w-4 h-4"></i> Song Studio — music &amp; songs (ACE-Step)</span>';
-            const songStats = document.createElement('span');
-            songStats.id = 'songSysStats';
-            songStats.style.cssText = 'font-size:11px;color:#8b949e;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;flex:1;text-align:right;';
-            bar.appendChild(songStats);
+                '<i data-lucide="compass" class="w-4 h-4"></i> Workflow Orchestrator — Auto media pipeline</span>';
+            const health = document.createElement('span');
+            health.id = 'orchStatus';
+            health.style.cssText = 'font-size:11px;color:#8b949e;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;flex:1;text-align:right;';
+            health.textContent = 'checking :8700…';
+            bar.appendChild(health);
+            fetch(ORCH_URL + '/health').then(r => r.json()).then(h => {
+                health.textContent = h && h.ok
+                    ? 'ready · ' + (h.model || 'Orchestrator') + ' · tools ' + ((h.tools || []).length || 0)
+                    : 'unreachable';
+            }).catch(() => { health.textContent = 'unreachable'; });
             const closeBtn = document.createElement('button');
             closeBtn.innerHTML = '<i data-lucide="x" class="w-4 h-4"></i>';
             closeBtn.title = 'Close';
             closeBtn.style.cssText = 'background:transparent;border:none;color:#8b949e;cursor:pointer;padding:4px;border-radius:6px;flex-shrink:0;';
-            closeBtn.onclick = () => { ov.style.display = 'none'; songStopStats(); };
+            closeBtn.onclick = () => { ov.style.display = 'none'; };
             bar.appendChild(closeBtn);
 
             const frame = document.createElement('iframe');
-            frame.src = SONG_STUDIO_URL;
+            frame.src = ORCH_URL + '/';
             frame.style.cssText = 'flex:1;border:none;width:100%;background:#0d1117;';
             frame.allow = 'autoplay';
 
@@ -6773,13 +6783,10 @@
             ov.appendChild(panel);
             document.body.appendChild(ov);
             if (window.lucide && lucide.createIcons) lucide.createIcons();
-            songStartStats();
             document.addEventListener('keydown', function esc(e) {
-                if (e.key === 'Escape') { ov.style.display = 'none'; songStopStats(); }
+                if (e.key === 'Escape') ov.style.display = 'none';
             });
         }
-        const IMAGE_URL = (window.OLMLX_IMAGE_URL || 'http://127.0.0.1:8400').replace(/\/$/, '');
-        const VIDEO_URL = (window.OLMLX_VIDEO_URL || 'http://127.0.0.1:8500').replace(/\/$/, '');
 
         // ---------- Shared system-stats widget (GPU / Watts / RAM) ----------
         // ONE poller shared by every mount point: a single /stats fetch per tick

@@ -317,10 +317,10 @@ def main():
         raise RuntimeError("DiffRhythm produced no candidates")
 
     best = max(candidates, key=lambda x: x["score"])
+    warning = ""
     if vocal_mode and int(best["vocal"].get("words", 0)) < 3:
-        raise RuntimeError(
-            f"DiffRhythm could not produce clear vocals for this prompt/lyrics (best words={best['vocal'].get('words',0)})."
-        )
+        warning = ("Low vocal confidence: generated audio may be mostly instrumental or unclear "
+                   f"(detected words={best['vocal'].get('words', 0)}).")
 
     progress(88, "encoding outputs")
     files, flac_name, sr, dur, peak = _encode_outputs(
@@ -366,6 +366,7 @@ def main():
         "selection_score": round(float(best["score"]), 3),
         "selection_debug": debug,
         "transcript_preview": best["transcript"],
+        "warning": warning,
         "num_steps": quality_value,
         "lm_model_size": None,
     })

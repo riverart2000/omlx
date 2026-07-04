@@ -507,6 +507,7 @@ def _run_job(jid):
             "attempts": result.get("attempts", opts.get("attempts", 1)),
             "selection_score": result.get("selection_score"),
             "transcript_preview": result.get("transcript_preview", ""),
+            "warning": result.get("warning", ""),
             "lm_model_size": result.get("lm_model_size", opts.get("lm_model_size")),
             "num_steps": result.get("num_steps", opts.get("num_steps")),
         })
