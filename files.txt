@@ -59,3 +59,5 @@
 # DiffRhythm local runtime customization (quality picker + deterministic/best pick)
 /Users/joebains/omlx-diffrhythm/DiffRhythm/infer/infer.py|omlx-diffrhythm/infer.py
 /Users/joebains/omlx-stack.sh|omlx-stack.sh
+# FlowAgent service-control script (external oMLX LLM mode, login fixes, finish-login/login-check)
+/Users/joebains/FlowAgent/flowagent.sh|flowagent/flowagent.sh

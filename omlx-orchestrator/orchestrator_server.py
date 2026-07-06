@@ -31,6 +31,7 @@ import gc
 import json
 import os
 import re
+import subprocess
 import threading
 import time
 import traceback
@@ -53,6 +54,11 @@ TTS_URL = os.environ.get("TTS_URL", "http://127.0.0.1:8200")
 MEMORY_URL = os.environ.get("MEMORY_URL", "http://127.0.0.1:8300")
 IMAGE_URL = os.environ.get("IMAGE_URL", "http://127.0.0.1:8400")
 VIDEO_URL = os.environ.get("VIDEO_URL", "http://127.0.0.1:8500")
+FLOWAGENT_URL = os.environ.get("FLOWAGENT_URL", "http://127.0.0.1:3000")
+FLOWAGENT_SH = os.environ.get("FLOWAGENT_SH", "/Users/joebains/FlowAgent/flowagent.sh")
+# Only these socials are supervised here; the rest are handled elsewhere.
+FA_PLATFORMS = [p.strip() for p in os.environ.get(
+    "FA_PLATFORMS", "medium,quora,flipboard,blogger,substack").split(",") if p.strip()]
 
 MAX_ITERS = int(os.environ.get("ORCH_MAX_ITERS", "16"))
 MAX_TOKENS = int(os.environ.get("ORCH_MAX_TOKENS", "1024"))
@@ -329,6 +335,156 @@ def tool_list_media_library(args, step_cb):
     }
 
 
+# ---------------------------------------------------------------------------
+# FlowAgent (social publishing agent on :3000) tools
+# ---------------------------------------------------------------------------
+def _fa_up():
+    try:
+        _get_json(f"{FLOWAGENT_URL}/api/status", timeout=5)
+        return True
+    except Exception:
+        return False
+
+
+def tool_flowagent_status(args, step_cb):
+    h = _get_json(f"{FLOWAGENT_URL}/api/health", timeout=10)
+    out = {
+        "agent_ok": h.get("ok"),
+        "uptime_s": h.get("uptime_s"),
+        "queue_counts": h.get("queue"),
+        "paused": h.get("kill_switch"),
+        "manual_login_mode": h.get("manual_login_mode"),
+        "paused_platforms": [p for p in (h.get("paused_platforms") or []) if p in FA_PLATFORMS],
+        "llm": h.get("llm"),
+        "last_diagnostic": h.get("last_diagnostic"),
+        "supervised_platforms": FA_PLATFORMS,
+    }
+    # per-platform login/readiness from stored preflight results
+    try:
+        pf = _get_json(f"{FLOWAGENT_URL}/api/preflight", timeout=10)
+        plats = pf.get("platforms") or {}
+        out["preflight"] = {
+            name: {"status": (r or {}).get("status"),
+                   "checked_at": (r or {}).get("checkedAt"),
+                   "reason": (str((r or {}).get("reason") or "")[:200]) or None}
+            for name, r in plats.items() if name in FA_PLATFORMS
+        }
+    except Exception:
+        out["preflight"] = None
+    return out
+
+
+def tool_flowagent_failures(args, step_cb):
+    n = max(1, min(20, int(args.get("limit", 8))))
+    items = _get_json(f"{FLOWAGENT_URL}/api/tasks?status=failed&limit=50", timeout=10)
+    if not isinstance(items, list):
+        items = items.get("tasks", [])
+    out = []
+    for t in items:
+        if t.get("platform") not in FA_PLATFORMS:
+            continue
+        out.append({
+            "id": t.get("id"),
+            "platform": t.get("platform"),
+            "title": (str(t.get("title") or "")[:80]) or None,
+            "error": (str(t.get("last_error") or t.get("result") or "")[:300]) or None,
+            "retries": t.get("retries"),
+            "updated_at": t.get("updated_at"),
+        })
+        if len(out) >= n:
+            break
+    return {"failed_tasks": out, "count": len(out)}
+
+
+def tool_flowagent_control(args, step_cb):
+    action = str(args.get("action", "")).strip()
+    if action == "resume":
+        try:
+            return _post_json(f"{FLOWAGENT_URL}/api/resume", {}, timeout=15)
+        except Exception as e:
+            return {"ok": False, "error": str(e)[:300]}
+    if action == "pause":
+        return _post_json(f"{FLOWAGENT_URL}/api/stop", {}, timeout=15)
+    if action == "publish_next":
+        return _post_json(f"{FLOWAGENT_URL}/api/publish-next", {}, timeout=15)
+    if action == "restart_agent":
+        step_cb("flowagent: restarting via flowagent.sh (may take ~30s)")
+        try:
+            r = subprocess.run(["bash", FLOWAGENT_SH, "restart"], capture_output=True,
+                               text=True, timeout=120)
+            ok = _fa_up()
+            return {"ok": ok, "output": (r.stdout + r.stderr)[-600:]}
+        except Exception as e:
+            return {"ok": False, "error": str(e)[:300]}
+    if action == "retry_task":
+        tid = str(args.get("task_id", "")).strip()
+        if not tid:
+            return {"ok": False, "error": "task_id required for retry_task"}
+        return _http_json("PATCH", f"{FLOWAGENT_URL}/api/tasks/{urllib.parse.quote(tid)}",
+                          {"status": "pending"}, timeout=15)
+    return {"ok": False, "error": f"unknown action '{action}'"}
+
+
+# ---------------------------------------------------------------------------
+# FlowAgent watchdog (deterministic — no LLM involved)
+# ---------------------------------------------------------------------------
+WATCHDOG_ON = os.environ.get("ORCH_WATCHDOG", "1") != "0"
+WATCHDOG_INTERVAL = int(os.environ.get("ORCH_WATCHDOG_INTERVAL", "300"))
+STALE_LOGIN_MIN = int(os.environ.get("ORCH_STALE_LOGIN_MIN", "30"))
+
+_wd_lock = threading.Lock()
+_wd_log = []          # ring buffer of {"ts","event","detail"}
+_wd_login_since = None  # first time we saw manual_login_mode=true
+
+
+def _wd_note(event, detail=""):
+    with _wd_lock:
+        _wd_log.append({"ts": time.strftime("%Y-%m-%d %H:%M:%S"), "event": event, "detail": detail})
+        del _wd_log[:-50]
+    print(f"[watchdog] {event} {detail}", flush=True)
+
+
+def _watchdog_tick():
+    global _wd_login_since
+    try:
+        h = _get_json(f"{FLOWAGENT_URL}/api/health", timeout=8)
+    except Exception as e:
+        _wd_note("flowagent_down", f"health unreachable ({str(e)[:120]}) -> flowagent.sh start")
+        try:
+            subprocess.Popen(["bash", FLOWAGENT_SH, "start"],
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except Exception as e2:
+            _wd_note("restart_failed", str(e2)[:200])
+        return
+
+    # stale manual-login pause: user logged in ages ago but never resumed
+    if h.get("manual_login_mode"):
+        now = time.time()
+        if _wd_login_since is None:
+            _wd_login_since = now
+        elif now - _wd_login_since >= STALE_LOGIN_MIN * 60:
+            try:
+                _post_json(f"{FLOWAGENT_URL}/api/resume", {}, timeout=15)
+                _wd_note("auto_resume", f"manual_login_mode stale >{STALE_LOGIN_MIN}min -> resumed")
+                _wd_login_since = None
+            except Exception as e:
+                _wd_note("auto_resume_blocked", str(e)[:200])
+                _wd_login_since = now  # re-arm, don't spam
+    else:
+        _wd_login_since = None
+
+
+def _watchdog_loop():
+    _wd_note("started", f"interval={WATCHDOG_INTERVAL}s stale_login={STALE_LOGIN_MIN}min "
+                        f"platforms={','.join(FA_PLATFORMS)}")
+    while True:
+        time.sleep(WATCHDOG_INTERVAL)
+        try:
+            _watchdog_tick()
+        except Exception as e:
+            _wd_note("tick_error", str(e)[:200])
+
+
 TOOL_IMPL = {
     "search_memory": tool_search_memory,
     "save_memory": tool_save_memory,
@@ -336,6 +492,9 @@ TOOL_IMPL = {
     "generate_image": tool_generate_image,
     "generate_video": tool_generate_video,
     "list_media_library": tool_list_media_library,
+    "flowagent_status": tool_flowagent_status,
+    "flowagent_failures": tool_flowagent_failures,
+    "flowagent_control": tool_flowagent_control,
 }
 
 # ---------------------------------------------------------------------------
@@ -397,6 +556,26 @@ TOOLS = [
         "description": "List existing generated audio and image files available on disk, so you can reuse an asset instead of regenerating it.",
         "parameters": {"type": "object", "properties": {}},
     }},
+    {"type": "function", "function": {
+        "name": "flowagent_status",
+        "description": "Get the health of FlowAgent, the social blog-publishing agent (supervised platforms: medium, quora, flipboard, blogger, substack). Returns queue counts, paused state, manual-login mode, per-platform login/readiness (preflight), paused platforms, and the last diagnostic. Call this FIRST for any publishing/diagnosis goal.",
+        "parameters": {"type": "object", "properties": {}},
+    }},
+    {"type": "function", "function": {
+        "name": "flowagent_failures",
+        "description": "List recent FAILED publishing tasks on the supervised social platforms, with their error messages. Use to understand what is going wrong before fixing.",
+        "parameters": {"type": "object", "properties": {
+            "limit": {"type": "integer", "description": "max failures to return (1-20)", "default": 8},
+        }},
+    }},
+    {"type": "function", "function": {
+        "name": "flowagent_control",
+        "description": "Control FlowAgent. action='resume' un-pauses the publishing queue; 'pause' stops it; 'publish_next' force-publishes the next queued blog now; 'restart_agent' fully restarts a stuck/dead agent process; 'retry_task' re-queues one failed task (requires task_id from flowagent_failures).",
+        "parameters": {"type": "object", "properties": {
+            "action": {"type": "string", "enum": ["resume", "pause", "publish_next", "restart_agent", "retry_task"]},
+            "task_id": {"type": "string", "description": "only for retry_task"},
+        }, "required": ["action"]},
+    }},
 ]
 
 SYSTEM_PROMPT = """You are the Orchestrator for a local AI media studio running on the user's Mac. \
@@ -405,10 +584,15 @@ feeding the output of one tool into the next.
 
 The studio can: search/save memory, synthesize speech (generate_speech), create images (generate_image), \
 and create video (generate_video: longcat=text-to-video, wan=image-to-video, avatar=talking head from a \
-portrait image + a speech audio_file).
+portrait image + a speech audio_file). It also supervises FlowAgent, the social blog-publishing agent \
+(platforms: medium, quora, flipboard, blogger, substack) via flowagent_status / flowagent_failures / flowagent_control.
 
 Guidelines:
 - Think briefly, then act. Prefer the fewest steps that fully satisfy the goal.
+- For FlowAgent health/diagnosis goals: call flowagent_status first, then flowagent_failures if anything \
+looks wrong. Only use flowagent_control actions the goal permits. Never call restart_agent unless the agent \
+is unreachable or the goal explicitly allows restarts. Errors mentioning captcha, verification, or login \
+require a human - report them clearly instead of retrying.
 - For a "talking head"/"spokesperson"/"presenter" video: write a short script, call generate_speech to get an \
 audio_file, call generate_image to get a portrait, then generate_video(engine="avatar", image=<portrait>, audio_file=<audio_file>).
 - For a general b-roll/scene video with narration: generate_speech for the voiceover AND generate_video(engine="longcat") \
@@ -520,6 +704,17 @@ WORKFLOWS = [
              "options": ["bold high-contrast", "clean minimal", "dramatic cinematic", "playful colorful"],
              "default": "bold high-contrast"},
             {"name": "aspect", "label": "Aspect", "type": "select", "options": ["16:9", "1:1", "9:16"], "default": "16:9"},
+        ],
+    },
+    {
+        "id": "social_doctor",
+        "label": "🩺 Social publishing doctor",
+        "description": "Check FlowAgent (medium, quora, flipboard, blogger, substack): diagnose stuck queues and failures, optionally fix what is safe to fix, and report.",
+        "fields": [
+            {"name": "focus", "label": "Focus (optional)", "type": "text",
+             "placeholder": "e.g. why are quora posts failing?"},
+            {"name": "fix", "label": "Auto-fix safe issues", "type": "select",
+             "options": ["yes", "no"], "default": "yes"},
         ],
     },
     {
@@ -650,6 +845,35 @@ def _build_goal(wid, inp):
             f"leaves room for a short text overlay) and aspect=\"{aspect}\". Finish with the image URL."
         )
 
+    if wid == "social_doctor":
+        focus = str(_g(inp, "focus")).strip()
+        fix = str(_g(inp, "fix", "yes")).strip().lower() != "no"
+        if fix:
+            fix_step = (
+                "3. FIX what is safe to fix:\n"
+                "   - Queue paused (paused=true) but manual_login_mode=false and no captcha/verification "
+                "errors: call flowagent_control action=\"resume\".\n"
+                "   - Failed tasks whose error looks TRANSIENT (timeout, navigation, network, "
+                "element-not-found): retry AT MOST 2 of them with flowagent_control action=\"retry_task\".\n"
+                "   - Do NOT retry tasks with captcha / verification / login / account-restricted errors — "
+                "those need a human.\n"
+                "   - Only use restart_agent if flowagent_status itself failed or agent_ok is false."
+            )
+        else:
+            fix_step = "3. Do NOT change anything (no flowagent_control calls) — diagnose and report only."
+        return (
+            "GOAL: Health-check the social blog-publishing agent (FlowAgent) and report clearly."
+            + (f" Focus especially on: {focus}." if focus else "") + "\n"
+            "Only these platforms matter: medium, quora, flipboard, blogger, substack. Ignore all others.\n"
+            "1. Call flowagent_status.\n"
+            "2. If the queue is paused, a platform is paused, failed count > 0, or anything looks off, "
+            "call flowagent_failures to see the recent errors.\n"
+            f"{fix_step}\n"
+            "4. Finish with a short report: overall state (healthy / degraded / blocked), queue counts, "
+            "per-platform issues with the likely cause in plain English, any actions you took, and what "
+            "(if anything) needs the human — e.g. solving a captcha via the browser-login flow."
+        )
+
     # fallback
     return str(_g(inp, "goal")).strip() or f"Workflow {wid}"
 
@@ -745,7 +969,31 @@ def _parse_output(text):
     return think, body, calls
 
 
-def _run_job(jid, goal):
+def _wf_policy(wid, inp):
+    """Deterministic per-job tool restrictions (don't trust the 8B to self-police)."""
+    deny = set()
+    if wid == "social_doctor" and str(inp.get("fix", "yes")).strip().lower() == "no":
+        deny.add("flowagent_control")
+    return {"deny_tools": deny}
+
+
+def _run_job(jid, goal, policy=None):
+    deny = (policy or {}).get("deny_tools") or set()
+    seen_calls = {}
+
+    def _force_final(msgs):
+        msgs.append({"role": "user", "content":
+                     "STOP. Do not call any more tools. Based on the observations above, write your "
+                     "final report now as plain text (no <tool_call> tags)."})
+        text2 = _generate(msgs, None)
+        t2, b2, _ = _parse_output(text2)
+        final = _TOOLCALL_RE.sub("", b2).strip() or t2 or "(no report)"
+        with _jobs_lock:
+            j = _jobs[jid]
+            j["status"] = "done"
+            j["result"] = final
+        _add_step(jid, "final", final[:2000])
+
     messages = [
         {"role": "system", "content": SYSTEM_PROMPT},
         {"role": "user", "content": goal},
@@ -777,8 +1025,20 @@ def _run_job(jid, goal):
                     except Exception:
                         args = {}
                 _add_step(jid, "tool_call", f"{name}", data=args)
+                key = f"{name}|{json.dumps(args, sort_keys=True)}"
+                seen_calls[key] = seen_calls.get(key, 0) + 1
                 impl = TOOL_IMPL.get(name)
-                if impl is None:
+                if name in deny:
+                    result = {"error": f"Tool '{name}' is DISABLED for this job (report-only mode). "
+                                       "Do not call tools to change anything; write your final report."}
+                elif seen_calls[key] >= 3:
+                    _add_step(jid, "progress", "loop detected — forcing final report")
+                    _force_final(messages)
+                    return
+                elif seen_calls[key] == 2:
+                    result = {"error": "Duplicate call ignored — you already have this result above. "
+                                       "Stop calling tools and write your final plain-text report."}
+                elif impl is None:
                     result = {"error": f"unknown tool '{name}'"}
                 else:
                     try:
@@ -797,11 +1057,8 @@ def _run_job(jid, goal):
                 messages.append({"role": "tool", "content": json.dumps(result)[:4000]})
 
         # ran out of iterations
-        with _jobs_lock:
-            j = _jobs[jid]
-            j["status"] = "done"
-            j["result"] = "Reached step limit. Partial results are in artifacts."
-        _add_step(jid, "final", "Reached step limit.")
+        _add_step(jid, "progress", "step limit reached — forcing final report")
+        _force_final(messages)
     except Exception as e:
         tb = traceback.format_exc()
         with _jobs_lock:
@@ -859,7 +1116,15 @@ class Handler(BaseHTTPRequestHandler):
                 "load_error": _load_error,
                 "tools": list(TOOL_IMPL.keys()),
                 "queue": sum(1 for j in _jobs.values() if j["status"] == "running"),
+                "watchdog": {"enabled": WATCHDOG_ON,
+                             "last": (_wd_log[-1] if _wd_log else None)},
             })
+            return
+        if path == "/watchdog":
+            with _wd_lock:
+                self._send(200, {"enabled": WATCHDOG_ON, "interval_s": WATCHDOG_INTERVAL,
+                                 "stale_login_min": STALE_LOGIN_MIN,
+                                 "platforms": FA_PLATFORMS, "log": list(_wd_log)})
             return
         if path == "/info":
             self._send(200, {
@@ -935,13 +1200,15 @@ class Handler(BaseHTTPRequestHandler):
                     self._send(400, {"error": "workflow produced an empty goal"})
                     return
                 jid = _new_job(goal, workflow=wid)
+                policy = _wf_policy(wid, inputs)
             else:
                 goal = str(data.get("goal", "")).strip()
                 if not goal:
                     self._send(400, {"error": "goal is required"})
                     return
                 jid = _new_job(goal)
-            t = threading.Thread(target=_run_job, args=(jid, goal), daemon=True)
+                policy = None
+            t = threading.Thread(target=_run_job, args=(jid, goal, policy), daemon=True)
             t.start()
             self._send(200, {"ok": True, "job_id": jid, "goal": goal})
             return
@@ -1073,6 +1340,8 @@ boot();
 
 
 def main():
+    if WATCHDOG_ON:
+        threading.Thread(target=_watchdog_loop, daemon=True).start()
     srv = ThreadingHTTPServer((HOST, PORT), Handler)
     print(f"omlx-orchestrator listening on http://{HOST}:{PORT}  model={os.path.basename(MODEL_PATH)}")
     srv.serve_forever()
