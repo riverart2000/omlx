@@ -263,6 +263,22 @@ def tool_generate_image(args, step_cb):
     for k in ("width", "height", "steps", "seed", "guidance"):
         if k in args:
             payload[k] = args[k]
+    refs = []
+    if isinstance(args.get("reference_images"), list):
+        refs.extend([str(x) for x in args.get("reference_images") if x])
+    elif args.get("reference_images"):
+        refs.append(str(args.get("reference_images")))
+    if args.get("reference_image"):
+        refs.append(str(args.get("reference_image")))
+    refs = refs[:3]
+    if refs:
+        resolved = []
+        for r in refs:
+            b64 = _resolve_image_ref(r)
+            if b64:
+                resolved.append(b64)
+        if resolved:
+            payload["reference_images"] = resolved[:3]
     if "steps" not in payload:
         payload["steps"] = 28
     if UNLOAD_BEFORE_MEDIA:
@@ -295,9 +311,12 @@ def tool_generate_video(args, step_cb):
         payload["video_type"] = str(args["video_type"])
     for k in ("negative_prompt", "aspect", "res", "resolution",
               "duration_seconds", "seed", "caption_style", "steps",
-              "guide_scale"):
+              "guide_scale", "voice_script", "voice", "voice_style",
+              "video_style", "voice_language"):
         if k in args:
             payload[k] = args[k]
+    if "voice_script" not in payload and args.get("script"):
+        payload["voice_script"] = str(args["script"])
     # image input (wan i2v + avatar need a reference image)
     img_ref = args.get("image") or args.get("image_ref")
     if img_ref:
@@ -363,15 +382,48 @@ def tool_flowagent_status(args, step_cb):
     try:
         pf = _get_json(f"{FLOWAGENT_URL}/api/preflight", timeout=10)
         plats = pf.get("platforms") or {}
-        out["preflight"] = {
-            name: {"status": (r or {}).get("status"),
-                   "checked_at": (r or {}).get("checkedAt"),
-                   "reason": (str((r or {}).get("reason") or "")[:200]) or None}
-            for name, r in plats.items() if name in FA_PLATFORMS
-        }
+        pre = {}
+        for name, r in plats.items():
+            if name not in FA_PLATFORMS:
+                continue
+            r = r or {}
+            status = r.get("status")
+            reason = str(r.get("reason") or "")
+            stale = bool(r.get("stale"))
+            # legacy junk rows written before the inconclusive fix
+            if "E_QUEUE_PAUSED" in reason or "Manual login mode" in reason:
+                status = "unknown"
+                reason = "artifact: preflight ran while queue was paused — NOT a login failure"
+                stale = True
+            pre[name] = {"status": status,
+                         "logged_in": (None if stale else status == "ok"),
+                         "age_minutes": r.get("ageMinutes"),
+                         "stale": stale,
+                         "reason": (reason[:200] or None)}
+        out["preflight"] = pre
+        out["preflight_note"] = ("Entries with stale=true say nothing about CURRENT login state. "
+                                 "If login state matters, call flowagent_login_check for a fresh check.")
     except Exception:
         out["preflight"] = None
     return out
+
+
+def tool_flowagent_login_check(args, step_cb):
+    """Fresh, authoritative login check: visits each supervised platform headlessly."""
+    step_cb(f"running fresh login preflight on {', '.join(FA_PLATFORMS)} (may take 1-3 min)")
+    r = _post_json(f"{FLOWAGENT_URL}/api/preflight", {"platforms": FA_PLATFORMS}, timeout=420)
+    out = {}
+    for p in (r.get("results") or []):
+        name = (p or {}).get("platform")
+        if name not in FA_PLATFORMS:
+            continue
+        out[name] = {"status": p.get("status"),
+                     "logged_in": p.get("status") == "ok",
+                     "inconclusive": bool(p.get("inconclusive")),
+                     "reason": (str(p.get("reason") or "")[:200]) or None}
+    return {"checked_now": True,
+            "summary": {k: r.get(k) for k in ("total", "ready", "needsAttention", "failed")},
+            "platforms": out}
 
 
 def tool_flowagent_failures(args, step_cb):
@@ -380,9 +432,16 @@ def tool_flowagent_failures(args, step_cb):
     if not isinstance(items, list):
         items = items.get("tasks", [])
     out = []
+    now = time.time()
     for t in items:
         if t.get("platform") not in FA_PLATFORMS:
             continue
+        age_days = None
+        try:
+            ts = time.mktime(time.strptime(str(t.get("updated_at")), "%Y-%m-%d %H:%M:%S"))
+            age_days = round((now - ts) / 86400, 1)
+        except Exception:
+            pass
         out.append({
             "id": t.get("id"),
             "platform": t.get("platform"),
@@ -390,10 +449,14 @@ def tool_flowagent_failures(args, step_cb):
             "error": (str(t.get("last_error") or t.get("result") or "")[:300]) or None,
             "retries": t.get("retries"),
             "updated_at": t.get("updated_at"),
+            "age_days": age_days,
+            "historical": bool(age_days is not None and age_days > 2),
         })
         if len(out) >= n:
             break
-    return {"failed_tasks": out, "count": len(out)}
+    return {"failed_tasks": out, "count": len(out),
+            "note": "Tasks marked historical=true failed more than 2 days ago — treat as history, "
+                    "NOT evidence of a current problem or login issue."}
 
 
 def tool_flowagent_control(args, step_cb):
@@ -494,6 +557,7 @@ TOOL_IMPL = {
     "list_media_library": tool_list_media_library,
     "flowagent_status": tool_flowagent_status,
     "flowagent_failures": tool_flowagent_failures,
+    "flowagent_login_check": tool_flowagent_login_check,
     "flowagent_control": tool_flowagent_control,
 }
 
@@ -529,22 +593,30 @@ TOOLS = [
     }},
     {"type": "function", "function": {
         "name": "generate_image",
-        "description": "Generate a still image with HiDream. Returns image_file + url. Use for thumbnails, portraits (for avatar video), product shots, or the reference frame for image-to-video.",
+        "description": "Generate a still image with HiDream. Returns image_file + url. Use for thumbnails, portraits (for avatar video), product shots, or the reference frame for image-to-video. Supports 1-3 reference images for identity/style consistency.",
         "parameters": {"type": "object", "properties": {
             "prompt": {"type": "string"},
             "aspect": {"type": "string", "enum": ["1:1", "9:16", "16:9", "4:5", "3:2"], "default": "9:16"},
             "steps": {"type": "integer", "default": 28},
             "seed": {"type": "integer"},
+            "reference_image": {"type": "string", "description": "single reference image (data URL, image filename, /files path, or URL)"},
+            "reference_images": {"type": "array", "items": {"type": "string"},
+                                 "description": "up to 3 reference images (data URLs, image filenames, /files paths, or URLs)"},
         }, "required": ["prompt"]},
     }},
     {"type": "function", "function": {
         "name": "generate_video",
-        "description": "Generate a video. engine='longcat' = text-to-video (no image needed). engine='wan' = image-to-video (needs image). engine='avatar' = audio-driven talking head (needs image portrait AND audio_file from generate_speech). Pass image as an image_file/url returned by generate_image.",
+        "description": "Generate a video. engine='longcat' = text-to-video (no image needed). engine='wan' = image-to-video (needs image). engine='avatar' = local audio-driven talking head (needs portrait + audio_file). engine='replicate_avatar' = cloud talking avatar (needs portrait + voice_script).",
         "parameters": {"type": "object", "properties": {
-            "engine": {"type": "string", "enum": ["longcat", "wan", "avatar"], "default": "longcat"},
+            "engine": {"type": "string", "enum": ["longcat", "wan", "avatar", "replicate_avatar"], "default": "longcat"},
             "prompt": {"type": "string", "description": "scene description (longcat/wan)"},
             "image": {"type": "string", "description": "image_file or url from generate_image (wan/avatar)"},
             "audio_file": {"type": "string", "description": "audio_file from generate_speech (avatar only)"},
+            "voice_script": {"type": "string", "description": "script text (replicate_avatar)"},
+            "voice": {"type": "string", "description": "cloud voice id (replicate_avatar)"},
+            "voice_style": {"type": "string", "description": "cloud voice style (replicate_avatar)"},
+            "video_style": {"type": "string", "description": "cloud visual style (replicate_avatar)"},
+            "voice_language": {"type": "string", "description": "cloud language code (replicate_avatar)"},
             "aspect": {"type": "string", "enum": ["9:16", "16:9", "1:1"], "default": "9:16"},
             "duration_seconds": {"type": "number", "default": 10},
             "caption_style": {"type": "string", "enum": ["karaoke", "subtitle", "none"], "default": "karaoke"},
@@ -569,6 +641,11 @@ TOOLS = [
         }},
     }},
     {"type": "function", "function": {
+        "name": "flowagent_login_check",
+        "description": "Run a FRESH, authoritative login check on the supervised platforms (slow: 1-3 min, visits each site headlessly). Use ONLY when login state is in question AND flowagent_status preflight data is stale/unknown. Result status 'ready' means logged in.",
+        "parameters": {"type": "object", "properties": {}},
+    }},
+    {"type": "function", "function": {
         "name": "flowagent_control",
         "description": "Control FlowAgent. action='resume' un-pauses the publishing queue; 'pause' stops it; 'publish_next' force-publishes the next queued blog now; 'restart_agent' fully restarts a stuck/dead agent process; 'retry_task' re-queues one failed task (requires task_id from flowagent_failures).",
         "parameters": {"type": "object", "properties": {
@@ -582,9 +659,10 @@ SYSTEM_PROMPT = """You are the Orchestrator for a local AI media studio running 
 Your job is to accomplish the user's GOAL by planning and calling the available tools in the right order, \
 feeding the output of one tool into the next.
 
-The studio can: search/save memory, synthesize speech (generate_speech), create images (generate_image), \
-and create video (generate_video: longcat=text-to-video, wan=image-to-video, avatar=talking head from a \
-portrait image + a speech audio_file). It also supervises FlowAgent, the social blog-publishing agent \
+The studio can: search/save memory, synthesize speech (generate_speech), create images (generate_image with optional reference images for consistency), \
+and create video (generate_video: longcat=text-to-video, wan=image-to-video, avatar=local talking head from a \
+portrait image + a speech audio_file, replicate_avatar=cloud talking head from a portrait + voice_script). \
+It also supervises FlowAgent, the social blog-publishing agent \
 (platforms: medium, quora, flipboard, blogger, substack) via flowagent_status / flowagent_failures / flowagent_control.
 
 Guidelines:
@@ -593,8 +671,9 @@ Guidelines:
 looks wrong. Only use flowagent_control actions the goal permits. Never call restart_agent unless the agent \
 is unreachable or the goal explicitly allows restarts. Errors mentioning captcha, verification, or login \
 require a human - report them clearly instead of retrying.
-- For a "talking head"/"spokesperson"/"presenter" video: write a short script, call generate_speech to get an \
-audio_file, call generate_image to get a portrait, then generate_video(engine="avatar", image=<portrait>, audio_file=<audio_file>).
+- For a "talking head"/"spokesperson"/"presenter" video:
+  - local avatar path: write script -> generate_speech -> generate_image -> generate_video(engine="avatar", image=<portrait>, audio_file=<audio_file>)
+  - cloud avatar path: write script -> generate_image -> generate_video(engine="replicate_avatar", image=<portrait>, voice_script=<script>)
 - For a general b-roll/scene video with narration: generate_speech for the voiceover AND generate_video(engine="longcat") \
 for the visuals; tell the user both artifacts in your final summary.
 - Pass files between tools using the exact image_file/audio_file/url values returned by earlier tool calls.
@@ -615,7 +694,7 @@ WORKFLOWS = [
         "label": "🎯 Sales video (talking head)",
         "description": "A spokesperson/avatar video that sells your product. Writes a script, "
                        "voices it, generates a presenter portrait, then an audio-driven talking video.",
-        "note": "Local avatar engine — a 15s clip takes several minutes to render.",
+        "note": "Video engine is configurable: local avatar or cloud replicate avatar.",
         "fields": [
             {"name": "offer", "label": "Product / offer", "type": "text", "required": True,
              "placeholder": "NoteZen — a minimalist markdown note-taking app"},
@@ -626,6 +705,7 @@ WORKFLOWS = [
             {"name": "presenter", "label": "Presenter / face", "type": "text",
              "default": "friendly professional presenter, warm smile, soft studio lighting, plain neutral background",
              "help": "Describe the person who appears and talks (a portrait is generated from this)."},
+            {"name": "video_engine", "label": "Video engine", "type": "select", "source": "video_engines_talking"},
             {"name": "voice", "label": "Voice", "type": "select", "source": "voices"},
             {"name": "aspect", "label": "Aspect", "type": "select", "options": ["9:16", "1:1", "16:9"], "default": "9:16"},
             {"name": "duration", "label": "Duration (s)", "type": "number", "default": 15, "min": 5, "max": 30},
@@ -636,9 +716,9 @@ WORKFLOWS = [
     {
         "id": "narrated_promo",
         "label": "🎬 Narrated promo / b-roll clip",
-        "description": "A cinematic text-to-video scene (LongCat) with a separate voiceover track. "
+        "description": "A cinematic promo scene with a separate voiceover track. "
                        "Returns both artifacts so you can combine them in the editor.",
-        "note": "LongCat text-to-video is slow: ~10 min per 5s segment.",
+        "note": "Video engine is configurable: LongCat text-to-video or Wan image-to-video.",
         "fields": [
             {"name": "topic", "label": "Topic / product", "type": "text", "required": True,
              "placeholder": "a productivity app launch"},
@@ -647,6 +727,7 @@ WORKFLOWS = [
             {"name": "narration", "label": "Narration script (optional)", "type": "textarea",
              "placeholder": "Leave blank to auto-write a short narration about the topic."},
             {"name": "voice", "label": "Voice", "type": "select", "source": "voices"},
+            {"name": "video_engine", "label": "Video engine", "type": "select", "source": "video_engines_scene"},
             {"name": "aspect", "label": "Aspect", "type": "select", "options": ["9:16", "16:9", "1:1"], "default": "9:16"},
             {"name": "duration", "label": "Duration (s)", "type": "number", "default": 10, "min": 5, "max": 30},
         ],
@@ -668,10 +749,12 @@ WORKFLOWS = [
     {
         "id": "image_set",
         "label": "📸 Marketing image set",
-        "description": "Generate a set of on-brand marketing images of your product or subject.",
+        "description": "Generate a set of on-brand marketing images of your product or subject (optionally guided by attached reference images).",
         "fields": [
             {"name": "product", "label": "Subject / product", "type": "textarea", "required": True,
              "placeholder": "a matte-black wireless headphone on a marble surface"},
+            {"name": "reference_images", "label": "Reference images (optional, up to 3)", "type": "images",
+             "help": "Attach product/brand images. The workflow will pass them to HiDream so outputs stay consistent."},
             {"name": "style", "label": "Style", "type": "select",
              "options": ["photorealistic studio", "lifestyle", "minimalist", "vibrant marketing", "cinematic"],
              "default": "photorealistic studio"},
@@ -755,6 +838,9 @@ def _build_goal(wid, inp):
         pts = _g(inp, "talking_points")
         script = str(_g(inp, "script")).strip()
         presenter = _g(inp, "presenter") or "friendly professional presenter, soft studio lighting, plain background"
+        vengine = str(_g(inp, "video_engine") or "avatar").strip().lower()
+        if vengine not in ("avatar", "replicate_avatar"):
+            vengine = "avatar"
         voice = _g(inp, "voice") or "af_heart"
         aspect = _g(inp, "aspect") or "9:16"
         dur = int(float(_g(inp, "duration", 15)))
@@ -765,8 +851,22 @@ def _build_goal(wid, inp):
         else:
             script_step = (f"Write a punchy, persuasive ~{dur}s spokesperson script (about {words} words) "
                            f"that sells: {offer}." + (f" Base it on these talking points: {pts}." if pts else ""))
+        if vengine == "replicate_avatar":
+            return (
+                f"GOAL: Produce a {dur}-second {aspect} talking-head SALES VIDEO for: {offer}.\n"
+                f"Use video engine: replicate_avatar (cloud).\n"
+                f"Execute these steps in order, passing each output to the next:\n"
+                f"1. {script_step}\n"
+                f"2. Call generate_image to create a photorealistic PORTRAIT of the presenter "
+                f"(this is the face that will talk): {presenter}. Use aspect \"{aspect}\".\n"
+                f"3. Call generate_video with engine=\"replicate_avatar\", video_type=\"talking_head\", "
+                f"image=<the portrait image_file from step 2>, voice_script=<the exact script from step 1>, "
+                f"aspect=\"{aspect}\", caption_style=\"{caps}\", duration_seconds={dur}.\n"
+                f"4. Finish with a summary containing the final video URL and the exact script used."
+            )
         return (
             f"GOAL: Produce a {dur}-second {aspect} talking-head SALES VIDEO for: {offer}.\n"
+            f"Use video engine: avatar (local).\n"
             f"Execute these steps in order, passing each output to the next:\n"
             f"1. {script_step}\n"
             f"2. Call generate_speech with that script and voice=\"{voice}\" to get an audio_file.\n"
@@ -783,6 +883,9 @@ def _build_goal(wid, inp):
         scene = _g(inp, "scene")
         narration = str(_g(inp, "narration")).strip()
         voice = _g(inp, "voice") or "af_heart"
+        vengine = str(_g(inp, "video_engine") or "longcat").strip().lower()
+        if vengine not in ("longcat", "wan"):
+            vengine = "longcat"
         aspect = _g(inp, "aspect") or "9:16"
         dur = int(float(_g(inp, "duration", 10)))
         words = max(18, int(dur * 2.4))
@@ -790,8 +893,20 @@ def _build_goal(wid, inp):
             narr_step = f'Use EXACTLY this narration:\n"""{narration}"""'
         else:
             narr_step = f"Write a short ~{dur}s narration (about {words} words) about: {topic}."
+        if vengine == "wan":
+            return (
+                f"GOAL: Produce a {dur}-second {aspect} narrated promo/b-roll clip about: {topic}.\n"
+                f"Use video engine: wan (image-to-video).\n"
+                f"1. {narr_step} Then call generate_speech(voice=\"{voice}\") to get the voiceover audio_file.\n"
+                f"2. Call generate_image with prompt=\"{scene}\" and aspect=\"{aspect}\" to create the first frame.\n"
+                f"3. Call generate_video with engine=\"wan\", image=<the image_file from step 2>, "
+                f"prompt=\"{scene}\", aspect=\"{aspect}\", duration_seconds={dur} to create the visuals.\n"
+                f"4. Finish with a summary listing BOTH the voiceover audio URL and the video URL, and note "
+                f"they are separate tracks to combine in the editor."
+            )
         return (
             f"GOAL: Produce a {dur}-second {aspect} narrated promo/b-roll clip about: {topic}.\n"
+            f"Use video engine: longcat (text-to-video).\n"
             f"1. {narr_step} Then call generate_speech(voice=\"{voice}\") to get the voiceover audio_file.\n"
             f"2. Call generate_video with engine=\"longcat\", prompt=\"{scene}\", aspect=\"{aspect}\", "
             f"duration_seconds={dur} to create the visuals.\n"
@@ -817,8 +932,15 @@ def _build_goal(wid, inp):
         style = _g(inp, "style") or "photorealistic studio"
         aspect = _g(inp, "aspect") or "1:1"
         count = max(1, min(4, int(float(_g(inp, "count", 3)))))
+        refs = _g(inp, "reference_images", [])
+        ref_count = len(refs) if isinstance(refs, list) else 0
+        ref_note = ("Reference images are attached (" + str(ref_count) + "). "
+                    "Treat them as the source-of-truth for product identity/branding consistency."
+                    if ref_count > 0 else "")
         return (
             f"GOAL: Generate {count} distinct {style} marketing images of: {product}.\n"
+            + (ref_note + "\n" if ref_note else "")
+            +
             f"Call generate_image {count} separate times, each with aspect=\"{aspect}\", a DIFFERENT seed, "
             f"and a slightly varied prompt/angle/lighting so the images differ. "
             f"Finish with a summary listing every image URL."
@@ -853,8 +975,9 @@ def _build_goal(wid, inp):
                 "3. FIX what is safe to fix:\n"
                 "   - Queue paused (paused=true) but manual_login_mode=false and no captcha/verification "
                 "errors: call flowagent_control action=\"resume\".\n"
-                "   - Failed tasks whose error looks TRANSIENT (timeout, navigation, network, "
-                "element-not-found): retry AT MOST 2 of them with flowagent_control action=\"retry_task\".\n"
+                "   - Failed tasks that are RECENT (historical=false) with a TRANSIENT error (timeout, "
+                "navigation, network, element-not-found): retry AT MOST 2 with flowagent_control "
+                "action=\"retry_task\". Never retry historical=true tasks.\n"
                 "   - Do NOT retry tasks with captcha / verification / login / account-restricted errors — "
                 "those need a human.\n"
                 "   - Only use restart_agent if flowagent_status itself failed or agent_ok is false."
@@ -865,13 +988,21 @@ def _build_goal(wid, inp):
             "GOAL: Health-check the social blog-publishing agent (FlowAgent) and report clearly."
             + (f" Focus especially on: {focus}." if focus else "") + "\n"
             "Only these platforms matter: medium, quora, flipboard, blogger, substack. Ignore all others.\n"
+            "HOW TO INTERPRET DATA (important):\n"
+            "- Failed tasks with historical=true (or age_days > 2) are OLD history from before recent fixes. "
+            "Report them as history only. They are NOT current problems and NOT evidence of login issues.\n"
+            "- Preflight entries marked 'stale artifact' or 'unknown' say NOTHING about login state. "
+            "Never claim a platform needs login based on stale data.\n"
+            "- Only a FRESH flowagent_login_check result of E_LOGIN_REQUIRED/E_CAPTCHA_REQUIRED means a "
+            "platform actually needs human login.\n"
             "1. Call flowagent_status.\n"
-            "2. If the queue is paused, a platform is paused, failed count > 0, or anything looks off, "
-            "call flowagent_failures to see the recent errors.\n"
+            "2. If failed count > 0 or something looks off, call flowagent_failures.\n"
+            "2b. If login state is unclear (stale/unknown preflight) AND it matters for your verdict, call "
+            "flowagent_login_check once to get the truth.\n"
             f"{fix_step}\n"
-            "4. Finish with a short report: overall state (healthy / degraded / blocked), queue counts, "
-            "per-platform issues with the likely cause in plain English, any actions you took, and what "
-            "(if anything) needs the human — e.g. solving a captcha via the browser-login flow."
+            "4. Finish with a short report: overall state (healthy / degraded / blocked) judged on CURRENT "
+            "data only, queue counts, current per-platform issues (clearly separated from historical "
+            "failures), actions you took, and what (if anything) truly needs the human."
         )
 
     # fallback
@@ -890,6 +1021,7 @@ def _workflows_public():
 def _options():
     voices = ["af_heart", "af_bella", "am_michael", "am_adam", "bf_emma", "bm_george"]
     vdefault = "af_heart"
+    vavail = {}
     try:
         v = _get_json(f"{TTS_URL}/say/voices", timeout=8)
         if v.get("voices"):
@@ -897,8 +1029,28 @@ def _options():
         vdefault = v.get("default", vdefault)
     except Exception:
         pass
+    try:
+        vinf = _get_json(f"{VIDEO_URL}/info", timeout=8)
+        vavail = {k: bool((vinf.get("engines", {}).get(k, {}) or {}).get("available", True))
+                  for k in ("avatar", "replicate_avatar", "longcat", "wan")}
+    except Exception:
+        vavail = {}
+    talking_opts = [e for e in ("avatar", "replicate_avatar") if vavail.get(e, True)]
+    if not talking_opts:
+        talking_opts = ["avatar", "replicate_avatar"]
+    scene_opts = [e for e in ("longcat", "wan") if vavail.get(e, True)]
+    if not scene_opts:
+        scene_opts = ["longcat", "wan"]
     return {
         "voices": {"options": voices, "default": vdefault},
+        "video_engines_talking": {
+            "options": talking_opts,
+            "default": "avatar" if "avatar" in talking_opts else talking_opts[0],
+        },
+        "video_engines_scene": {
+            "options": scene_opts,
+            "default": "longcat" if "longcat" in scene_opts else scene_opts[0],
+        },
         "aspects": ["9:16", "16:9", "1:1", "4:5", "3:2"],
     }
 
@@ -972,13 +1124,40 @@ def _parse_output(text):
 def _wf_policy(wid, inp):
     """Deterministic per-job tool restrictions (don't trust the 8B to self-police)."""
     deny = set()
+    default_tool_args = {}
     if wid == "social_doctor" and str(inp.get("fix", "yes")).strip().lower() == "no":
         deny.add("flowagent_control")
-    return {"deny_tools": deny}
+    if wid == "image_set":
+        refs = inp.get("reference_images")
+        if isinstance(refs, list):
+            refs = [str(x) for x in refs if isinstance(x, str) and x.strip()][:3]
+            if refs:
+                default_tool_args["generate_image"] = {"reference_images": refs}
+    return {"deny_tools": deny, "default_tool_args": default_tool_args}
+
+
+def _scrub_tool_args(args):
+    """Redact huge/base64 payloads from UI logs and loop-detection keys."""
+    if not isinstance(args, dict):
+        return args
+    out = {}
+    for k, v in args.items():
+        if k == "reference_images" and isinstance(v, list):
+            out[k] = [f"<image#{i + 1}:{len(str(x))} chars>" for i, x in enumerate(v)]
+            continue
+        if k == "reference_image" and isinstance(v, str):
+            out[k] = f"<image:{len(v)} chars>"
+            continue
+        if isinstance(v, str) and (v.startswith("data:") or len(v) > 240):
+            out[k] = v[:120] + "…"
+        else:
+            out[k] = v
+    return out
 
 
 def _run_job(jid, goal, policy=None):
     deny = (policy or {}).get("deny_tools") or set()
+    default_tool_args = (policy or {}).get("default_tool_args") or {}
     seen_calls = {}
 
     def _force_final(msgs):
@@ -1024,8 +1203,12 @@ def _run_job(jid, goal, policy=None):
                         args = json.loads(args)
                     except Exception:
                         args = {}
-                _add_step(jid, "tool_call", f"{name}", data=args)
-                key = f"{name}|{json.dumps(args, sort_keys=True)}"
+                if isinstance(args, dict) and isinstance(default_tool_args.get(name), dict):
+                    for k, v in default_tool_args[name].items():
+                        args.setdefault(k, v)
+                log_args = _scrub_tool_args(args)
+                _add_step(jid, "tool_call", f"{name}", data=log_args)
+                key = f"{name}|{json.dumps(log_args, sort_keys=True)}"
                 seen_calls[key] = seen_calls.get(key, 0) + 1
                 impl = TOOL_IMPL.get(name)
                 if name in deny:
@@ -1270,6 +1453,16 @@ function renderForm(){
  document.getElementById('wfdesc').innerHTML=d;
  const f=document.getElementById('form');
  f.innerHTML=(w.fields||[]).map(fieldHtml).join('');
+ for(const fl of (w.fields||[])){
+  if(fl.type==='images'){
+   const id='f_'+fl.name;
+   const el=document.getElementById(id);
+   const meta=document.getElementById(id+'_meta');
+   if(el&&meta){
+    el.onchange=()=>{const n=(el.files||[]).length;meta.textContent=n?(n+' image(s) selected'):'No images selected';};
+   }
+  }
+ }
 }
 
 function fieldHtml(fl){
@@ -1280,6 +1473,8 @@ function fieldHtml(fl){
  if(fl.source&&OPTS[fl.source]){const s=OPTS[fl.source];opts=s.options||s;if(def==null)def=s.default;}
  if(fl.type==='textarea'){
   ctl='<textarea id="'+id+'" placeholder="'+esc(fl.placeholder||'')+'">'+esc(def||'')+'</textarea>';
+ }else if(fl.type==='images'){
+  ctl='<input id="'+id+'" type=file accept="image/*" multiple><div id="'+id+'_meta" class=help>No images selected</div>';
  }else if(fl.type==='select'){
   ctl='<select id="'+id+'">'+(opts||[]).map(o=>'<option'+(o===def?' selected':'')+'>'+esc(o)+'</option>').join('')+'</select>';
  }else if(fl.type==='number'){
@@ -1294,12 +1489,26 @@ function fieldHtml(fl){
  return h;
 }
 
-function collect(){
+function fileToDataURL(file){
+ return new Promise((resolve,reject)=>{
+  const fr=new FileReader();
+  fr.onload=()=>resolve(String(fr.result||''));
+  fr.onerror=()=>reject(new Error('failed to read image'));
+  fr.readAsDataURL(file);
+ });
+}
+
+async function collect(){
  const w=curWf();const inputs={};
  for(const fl of (w.fields||[])){
   const el=document.getElementById('f_'+fl.name);if(!el)continue;
   let v=el.value;
-  if(fl.type==='number')v=v===''?null:Number(v);
+  if(fl.type==='images'){
+   const files=Array.from(el.files||[]).slice(0,3);
+   v=await Promise.all(files.map(fileToDataURL));
+  }else if(fl.type==='number'){
+   v=v===''?null:Number(v);
+  }
   inputs[fl.name]=v;
  }
  return {workflow:w.id,inputs};
@@ -1307,7 +1516,7 @@ function collect(){
 
 async function go(){
  const w=curWf();if(!w)return;
- const body=collect();
+ const body=await collect();
  const btn=document.getElementById('runbtn');btn.disabled=true;
  document.getElementById('out').innerHTML='<hr><div class=step>starting…</div>';
  let j;

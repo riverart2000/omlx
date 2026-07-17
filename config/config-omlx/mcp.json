@@ -2,10 +2,10 @@
   "servers": {
     "shopify": {
       "transport": "stdio",
-      "command": "/bin/sh",
+      "command": "/bin/bash",
       "args": [
-        "-c",
-        "cd /Users/joebains/qwen-coder/shopify-mcp && exec /Users/joebains/.nvm/versions/node/v25.9.0/bin/node index.js"
+        "-lc",
+        "cd /Users/joebains/FlowAgent/shopify-mcp-ext && set -a && source /Users/joebains/FlowAgent/.env >/dev/null 2>&1 && set +a && exec /Users/joebains/.nvm/versions/node/v25.9.0/bin/node index.js"
       ],
       "env": {
         "DOTENV_CONFIG_QUIET": "true",
@@ -53,6 +53,23 @@
       ],
       "enabled": true,
       "timeout": 120
+    },
+    "google-workspace": {
+      "transport": "stdio",
+      "command": "/bin/bash",
+      "args": [
+        "-lc",
+        "set -a && source /Users/joebains/.omlx/.env >/dev/null 2>&1 && set +a && exec /opt/homebrew/bin/uvx workspace-mcp --tool-tier complete"
+      ],
+      "env": {
+        "WORKSPACE_MCP_CREDENTIALS_DIR": "/Users/joebains/.omlx/google_workspace_mcp/credentials",
+        "USER_GOOGLE_EMAIL": "riverart2000@gmail.com",
+        "OAUTHLIB_INSECURE_TRANSPORT": "1",
+        "PATH": "/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin",
+        "HOME": "/Users/joebains"
+      },
+      "enabled": true,
+      "timeout": 180
     }
   },
   "max_tool_calls": 10,

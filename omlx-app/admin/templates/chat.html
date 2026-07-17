@@ -1055,7 +1055,7 @@
 
         <!-- Chat History -->
         <div class="flex-1 min-h-0 overflow-y-auto custom-scrollbar px-3">
-            <template x-for="chat in chatHistory" :key="chat.id">
+            <template x-for="chat in profileFilteredChatHistory()" :key="chat.id">
                 <div @click="if (renamingChatId !== chat.id) loadChat(chat.id)"
                     class="group flex items-center gap-2 px-3 py-2 rounded-lg cursor-pointer hover:bg-surface-muted mb-1"
                     :class="{ 'bg-surface-muted': currentChatId === chat.id }">
@@ -1144,7 +1144,7 @@
                     </select>
                 </div>
             </div>
-            <button @click="clearAllHistory()" x-show="chatHistory.length > 0"
+            <button @click="clearAllHistory()" x-show="profileFilteredChatHistory().length > 0"
                 class="w-full flex items-center gap-1.5 px-2 py-1 text-xs text-danger hover:bg-danger-bg rounded">
                 <i data-lucide="trash-2" class="w-3 h-3"></i>
                 {{ t('chat.clear_all_history') }}
@@ -1174,6 +1174,14 @@
             <i data-lucide="settings" class="w-5 h-5"></i>
         </button>
 
+        <div x-show="apiKeySet" class="absolute z-[90] flex items-center gap-2 px-3 py-1.5 rounded-lg border border-line bg-surface/95 shadow-sm"
+            style="top: 1rem; left: 4.2rem; backdrop-filter: blur(4px);">
+            <span class="text-[10px] uppercase tracking-wider" style="color: var(--text-tertiary);">Profile</span>
+            <span class="text-xs font-semibold" style="color: var(--text-primary);" x-text="activeProfileDisplayName()"></span>
+            <span class="text-[10px]" style="color: var(--text-tertiary);">•</span>
+            <span class="text-[11px] truncate max-w-56" style="color: var(--text-secondary);" x-text="currentModel || 'No model'"></span>
+        </div>
+
         <!-- Messages area with rail -->
         <div class="flex-1 min-h-0 relative">
             <!-- Messages Container -->
@@ -1192,6 +1200,18 @@
                     <div class="p-4 bg-surface-alt rounded-xl text-sm text-fg-secondary">
                         <i data-lucide="shield-check" class="w-4 h-4 inline mr-1"></i>
                         {{ t('chat.welcome_privacy') }}
+                    </div>
+                    <div class="mt-4 text-left">
+                        <div class="text-[11px] font-semibold uppercase tracking-wider mb-2"
+                            style="color: var(--text-tertiary);">Starter prompts</div>
+                        <div class="grid gap-2">
+                            <template x-for="starter in starterPromptsForProfile(activePromptProfile)" :key="starter">
+                                <button @click="useStarterPrompt(starter)"
+                                    class="w-full text-left px-3 py-2 rounded-lg border border-line bg-surface hover:bg-surface-alt text-xs transition-colors"
+                                    style="color: var(--text-primary);"
+                                    x-text="starter"></button>
+                            </template>
+                        </div>
                     </div>
                 </div>
             </div>
@@ -1783,6 +1803,22 @@
                     <i data-lucide="plus" class="w-3.5 h-3.5"></i>
                     <span>Add Profile</span>
                 </button>
+                <div class="grid grid-cols-2 gap-2">
+                    <button @click="exportPromptProfiles()"
+                        class="w-full flex items-center justify-center gap-1.5 px-3 py-2 rounded-lg text-xs transition-colors border border-line hover:bg-surface-muted"
+                        style="color: var(--text-secondary);">
+                        <i data-lucide="download" class="w-3.5 h-3.5"></i>
+                        <span>Export</span>
+                    </button>
+                    <button @click="openProfileImportDialog()"
+                        class="w-full flex items-center justify-center gap-1.5 px-3 py-2 rounded-lg text-xs transition-colors border border-line hover:bg-surface-muted"
+                        style="color: var(--text-secondary);">
+                        <i data-lucide="upload" class="w-3.5 h-3.5"></i>
+                        <span>Import</span>
+                    </button>
+                    <input type="file" x-ref="profileImportInput" accept="application/json,.json" class="hidden"
+                        @change="importPromptProfilesFromFile($event)">
+                </div>
 
                 <!-- Prompt textarea -->
                 <div class="space-y-1">
@@ -1793,6 +1829,39 @@
                         placeholder="Enter instructions for this session..."
                         class="w-full px-3 py-2 text-xs border border-line rounded-xl focus:outline-none focus:border-line-strong transition-all resize-y bg-surface-muted"
                         style="color: var(--text-primary);"></textarea>
+                </div>
+
+                <div class="space-y-1">
+                    <label class="text-[10px] font-bold uppercase tracking-wider block"
+                        style="color: var(--text-secondary);">Starter prompts (one per line)</label>
+                    <textarea x-model="profileStarterDraft" rows="4"
+                        @input="updateProfileStarterDraft($event.target.value)"
+                        placeholder="Add reusable openers for this profile..."
+                        class="w-full px-3 py-2 text-xs border border-line rounded-xl focus:outline-none focus:border-line-strong transition-all resize-y bg-surface-muted"
+                        style="color: var(--text-primary);"></textarea>
+                </div>
+
+                <div class="space-y-1">
+                    <div class="flex items-center justify-between">
+                        <label class="text-[10px] font-bold uppercase tracking-wider block"
+                            style="color: var(--text-secondary);">Allowed MCP servers</label>
+                        <button @click="allowAllToolServersForActiveProfile()"
+                            class="text-[10px] px-2 py-1 rounded border border-line hover:bg-surface-muted"
+                            style="color: var(--text-secondary);">Allow all</button>
+                    </div>
+                    <div class="max-h-32 overflow-y-auto border border-line rounded-xl bg-surface-muted p-2 space-y-1">
+                        <template x-if="mcpServers.length === 0">
+                            <div class="text-[11px]" style="color: var(--text-tertiary);">No MCP servers detected yet.</div>
+                        </template>
+                        <template x-for="server in mcpServers" :key="server">
+                            <label class="flex items-center gap-2 text-xs cursor-pointer" style="color: var(--text-primary);">
+                                <input type="checkbox"
+                                    :checked="isServerAllowedForActiveProfile(server)"
+                                    @change="toggleActiveProfileToolServer(server)">
+                                <span x-text="server"></span>
+                            </label>
+                        </template>
+                    </div>
                 </div>
 
                 <!-- Save -->
@@ -2039,6 +2108,10 @@
     }
 
     const CHAT_UNTITLED_I18N_KEY = 'chat.untitled_title';
+    const LS_SELECTED_MODEL = 'omlx_chat_selected_model';
+    const LS_SELECTED_PROFILE = 'omlx_chat_selected_profile';
+    const LS_SELECTED_PROFILE_CUSTOM = '__custom__';
+    const LS_PROFILE_PREFS = 'omlx_chat_profile_prefs';
 
     function resolveChatUntitledLabel() {
         if (typeof window.t === 'function') {
@@ -2134,6 +2207,10 @@
             editingPromptProfileName: false,
             newProfileNameDraft: '',
             profileDeleteConfirm: null,
+            profileStarterDraft: '',
+            profilePrefsMap: {},
+            mcpToolServerByName: {},
+            mcpServers: [],
 
             // MODEL SETTINGS Section State (shared prompt profiles from PROFILE tab)
             // MCP Tool Call Limits
@@ -2450,6 +2527,254 @@
                 return this.aliasToGateway[modelId] || modelId;
             },
 
+            getPersistedSelectedModel() {
+                const stored = localStorage.getItem(LS_SELECTED_MODEL);
+                return stored ? this.resolveGatewayModelId(stored) : null;
+            },
+
+            persistSelectedModel(modelId) {
+                const gatewayId = this.resolveGatewayModelId(modelId);
+                if (gatewayId) {
+                    localStorage.setItem(LS_SELECTED_MODEL, gatewayId);
+                } else {
+                    localStorage.removeItem(LS_SELECTED_MODEL);
+                }
+            },
+
+            getPersistedSelectedProfile() {
+                const stored = localStorage.getItem(LS_SELECTED_PROFILE);
+                if (stored == null) return { hasPreference: false, name: null };
+                if (stored === LS_SELECTED_PROFILE_CUSTOM) return { hasPreference: true, name: null };
+                return { hasPreference: true, name: stored };
+            },
+
+            persistSelectedProfile(name) {
+                if (name) {
+                    localStorage.setItem(LS_SELECTED_PROFILE, String(name));
+                } else {
+                    localStorage.setItem(LS_SELECTED_PROFILE, LS_SELECTED_PROFILE_CUSTOM);
+                }
+            },
+
+            profileStorageKey(name = this.activePromptProfile) {
+                const raw = String(name ?? '').trim();
+                return raw || LS_SELECTED_PROFILE_CUSTOM;
+            },
+
+            loadProfilePrefs() {
+                try {
+                    const raw = localStorage.getItem(LS_PROFILE_PREFS);
+                    const parsed = raw ? JSON.parse(raw) : {};
+                    this.profilePrefsMap = parsed && typeof parsed === 'object' ? parsed : {};
+                } catch (e) {
+                    this.profilePrefsMap = {};
+                }
+            },
+
+            saveProfilePrefs() {
+                localStorage.setItem(LS_PROFILE_PREFS, JSON.stringify(this.profilePrefsMap || {}));
+            },
+
+            getProfilePrefs(name = this.activePromptProfile, create = false) {
+                const key = this.profileStorageKey(name);
+                if (!this.profilePrefsMap || typeof this.profilePrefsMap !== 'object') {
+                    this.profilePrefsMap = {};
+                }
+                if (!this.profilePrefsMap[key] && create) {
+                    this.profilePrefsMap[key] = {};
+                }
+                return this.profilePrefsMap[key] || null;
+            },
+
+            deleteProfilePrefs(name) {
+                const key = this.profileStorageKey(name);
+                if (this.profilePrefsMap && this.profilePrefsMap[key]) {
+                    delete this.profilePrefsMap[key];
+                    this.saveProfilePrefs();
+                }
+            },
+
+            activeProfileDisplayName() {
+                return this.activePromptProfile || 'Custom';
+            },
+
+            starterPromptsForProfile(name = this.activePromptProfile) {
+                const prefs = this.getProfilePrefs(name, false);
+                const list = Array.isArray(prefs?.starterPrompts)
+                    ? prefs.starterPrompts.map(v => String(v || '').trim()).filter(Boolean)
+                    : [];
+                if (list.length) return list;
+                const n = String(name || '').toLowerCase();
+                if (n.includes('mentor')) {
+                    return [
+                        'Review my plan and suggest the 3 highest-impact improvements.',
+                        'Challenge my assumptions and point out risks I may have missed.',
+                        'Turn this rough idea into a clear execution checklist.'
+                    ];
+                }
+                if (n.includes('assistant')) {
+                    return [
+                        'Summarize this thread into next actions.',
+                        'Draft a concise message I can send to my team.',
+                        'Give me a step-by-step to complete this task now.'
+                    ];
+                }
+                return [
+                    'Help me scope this task and propose next steps.',
+                    'Summarize what I should do first.',
+                    'Draft the output I need from this request.'
+                ];
+            },
+
+            syncProfileEditorState() {
+                this.profileStarterDraft = this.starterPromptsForProfile(this.activePromptProfile).join('\n');
+            },
+
+            updateProfileStarterDraft(value) {
+                this.profileStarterDraft = value;
+                const starters = String(value || '')
+                    .split('\n')
+                    .map(v => v.trim())
+                    .filter(Boolean);
+                const prefs = this.getProfilePrefs(this.activePromptProfile, true);
+                prefs.starterPrompts = starters;
+                this.saveProfilePrefs();
+            },
+
+            useStarterPrompt(prompt) {
+                this.inputMessage = String(prompt || '');
+                this.$nextTick(() => this.$refs.messageInput?.focus());
+            },
+
+            persistActiveProfileModelPreferences() {
+                const prefs = this.getProfilePrefs(this.activePromptProfile, true);
+                prefs.preferredModel = this.resolveGatewayModelId(this.currentModel) || null;
+                const snap = this.captureSessionModelSettings();
+                prefs.modelSettings = this.cloneData(snap.modelSettings);
+                prefs.speculativeEngine = snap.speculativeEngine ?? 'none';
+                prefs.speculativeDraftModel = snap.speculativeDraftModel ?? '';
+                this.saveProfilePrefs();
+            },
+
+            async applyProfilePreferences(name = this.activePromptProfile, { session = null } = {}) {
+                const prefs = this.getProfilePrefs(name, false);
+                if (!prefs) {
+                    this.syncProfileEditorState();
+                    window.dispatchEvent(new CustomEvent('omlx-profile-changed', { detail: { profile: this.activePromptProfile } }));
+                    return;
+                }
+                const chatSession = session || this.getChatSession(this.currentChatId, true);
+                const preferredModel = this.resolveGatewayModelId(prefs.preferredModel);
+                if (preferredModel && this.isModelAvailableOnServer(preferredModel) && this.currentModel !== preferredModel) {
+                    this.currentModel = preferredModel;
+                    this.persistSelectedModel(preferredModel);
+                    if (chatSession) {
+                        chatSession.model = preferredModel;
+                        await this.ensureSessionModelSettings(chatSession, preferredModel);
+                    }
+                }
+                if (prefs.modelSettings && chatSession?.model) {
+                    const merged = { ...this.defaultModelSettings(), ...this.cloneData(prefs.modelSettings) };
+                    if (merged.thinking_budget_enabled) {
+                        merged.thinking_budget_tokens = this.normalizeThinkingBudgetTokens(merged.thinking_budget_tokens);
+                    }
+                    this.modelSettings = merged;
+                    this.speculativeEngine = prefs.speculativeEngine ?? 'none';
+                    this.speculativeDraftModel = prefs.speculativeDraftModel ?? '';
+                    chatSession.modelSettings = this.cloneData(this.modelSettings);
+                    chatSession.speculativeEngine = this.speculativeEngine;
+                    chatSession.speculativeDraftModel = this.speculativeDraftModel;
+                    this.saveModelSettingsForModel(chatSession, chatSession.model);
+                    this.modelSettingsDirty = false;
+                }
+                this.syncProfileEditorState();
+                this.persistChatSettingsToHistory(this.currentChatId);
+                window.dispatchEvent(new CustomEvent('omlx-profile-changed', { detail: { profile: this.activePromptProfile } }));
+            },
+
+            inferToolServerName(tool) {
+                const server = tool?.server || tool?.server_name || tool?.mcp_server || tool?.provider;
+                if (server) return String(server);
+                const name = String(tool?.name || '');
+                if (!name) return 'default';
+                if (name.startsWith('mcp__')) {
+                    const parts = name.split('__').filter(Boolean);
+                    if (parts.length >= 2) return parts[1];
+                }
+                if (name.includes(':')) return name.split(':')[0];
+                if (name.includes('.')) return name.split('.')[0];
+                const chunks = name.split('_');
+                return chunks.length > 1 ? chunks[0] : 'default';
+            },
+
+            isToolAllowedForActiveProfile(toolName) {
+                const prefs = this.getProfilePrefs(this.activePromptProfile, false);
+                const allowed = prefs?.mcpAllowedServers;
+                if (!Array.isArray(allowed)) return true;
+                const server = this.mcpToolServerByName?.[toolName] || 'default';
+                return allowed.includes(server);
+            },
+
+            isServerAllowedForActiveProfile(serverName) {
+                const prefs = this.getProfilePrefs(this.activePromptProfile, false);
+                const allowed = prefs?.mcpAllowedServers;
+                if (!Array.isArray(allowed)) return true;
+                return allowed.includes(serverName);
+            },
+
+            filteredMcpToolsForActiveProfile() {
+                return (this.mcpTools || []).filter(t => this.isToolAllowedForActiveProfile(t.function?.name));
+            },
+
+            toggleActiveProfileToolServer(serverName) {
+                const all = this.mcpServers || [];
+                if (!all.includes(serverName)) return;
+                const prefs = this.getProfilePrefs(this.activePromptProfile, true);
+                const current = Array.isArray(prefs.mcpAllowedServers)
+                    ? [...prefs.mcpAllowedServers]
+                    : [...all];
+                if (current.includes(serverName)) {
+                    prefs.mcpAllowedServers = current.filter(s => s !== serverName);
+                } else {
+                    prefs.mcpAllowedServers = Array.from(new Set([...current, serverName]));
+                }
+                this.saveProfilePrefs();
+            },
+
+            allowAllToolServersForActiveProfile() {
+                const prefs = this.getProfilePrefs(this.activePromptProfile, true);
+                delete prefs.mcpAllowedServers;
+                this.saveProfilePrefs();
+            },
+
+            getActiveProfileRagCollection() {
+                const prefs = this.getProfilePrefs(this.activePromptProfile, false);
+                return (prefs?.ragCollection || 'default');
+            },
+
+            setActiveProfileRagCollection(collection) {
+                const prefs = this.getProfilePrefs(this.activePromptProfile, true);
+                prefs.ragCollection = String(collection || 'default').trim() || 'default';
+                this.saveProfilePrefs();
+                window.dispatchEvent(new CustomEvent('omlx-profile-rag-collection', {
+                    detail: { profile: this.activePromptProfile, collection: prefs.ragCollection }
+                }));
+            },
+
+            resolvePreferredAvailableModelId() {
+                if (!this.availableModels?.length) return null;
+                const preferred = this.getPersistedSelectedModel();
+                if (!preferred) return null;
+                const gatewayPreferred = this.resolveGatewayModelId(preferred);
+                const match = this.availableModels.find(m =>
+                    m.id === gatewayPreferred
+                    || m.name === gatewayPreferred
+                    || m.id === preferred
+                    || m.name === preferred
+                );
+                return match ? match.id : null;
+            },
+
             isModelAvailableOnServer(modelId) {
                 if (!modelId || !this.availableModels?.length) return false;
                 const gatewayId = this.resolveGatewayModelId(modelId);
@@ -2511,11 +2836,15 @@
                     this.currentModel = null;
                     return;
                 }
-                if (!this.currentModel || !this.isModelAvailableOnServer(this.currentModel)) {
+                const preferredModelId = this.resolvePreferredAvailableModelId();
+                if (preferredModelId) {
+                    this.currentModel = preferredModelId;
+                } else if (!this.currentModel || !this.isModelAvailableOnServer(this.currentModel)) {
                     this.currentModel = this.resolvePreferredDefaultModel(defaultModel);
                 } else {
                     this.currentModel = this.resolveGatewayModelId(this.currentModel);
                 }
+                this.persistSelectedModel(this.currentModel);
             },
 
             /** Keep messages through the user turn that precedes endIndex (drops assistant + tool rows). */
@@ -3017,6 +3346,7 @@
                     : null;
                 const model = this.resolveApiModel(messages, context.model, variantUserIndex);
                 const generation = this.resolveApiGenerationOverrides(messages, variantUserIndex);
+                const scopedTools = this.filteredMcpToolsForActiveProfile();
                 return {
                     model,
                     messages: this.buildMessagesForApi(messages, context.systemPrompt, {
@@ -3027,7 +3357,7 @@
                     stream: true,
                     stream_options: { include_usage: true },
                     ...generation,
-                    ...(this.mcpTools.length > 0 && { tools: this.mcpTools }),
+                    ...(scopedTools.length > 0 && { tools: scopedTools }),
                 };
             },
 
@@ -3336,7 +3666,9 @@
 
             async init() {
 
+        this.loadProfilePrefs();
         this.loadPromptProfiles();
+        this.syncProfileEditorState();
 
                 const serverApiKey = {{ api_key | tojson }};
 
@@ -3348,6 +3680,7 @@
         if (storedKey) {
             this.apiKeySet = true;
             await this.loadModels();
+            await this.applyProfilePreferences(this.activePromptProfile);
             if (this.currentModel) {
                 await this.loadModelCapabilities(this.currentModel);
             }
@@ -3467,14 +3800,22 @@
             });
             if (!resp.ok) return;
             const data = await resp.json();
-            this.mcpTools = (data.tools || []).map(t => ({
-                type: 'function',
-                function: {
-                    name: t.name,
-                    description: t.description || '',
-                    parameters: t.parameters || { type: 'object', properties: {} }
-                }
-            }));
+            this.mcpToolServerByName = {};
+            this.mcpTools = (data.tools || []).map(t => {
+                const serverName = this.inferToolServerName(t);
+                if (t?.name) this.mcpToolServerByName[t.name] = serverName;
+                return {
+                    type: 'function',
+                    function: {
+                        name: t.name,
+                        description: t.description || '',
+                        parameters: t.parameters || { type: 'object', properties: {} }
+                    }
+                };
+            });
+            this.mcpServers = Array.from(new Set(Object.values(this.mcpToolServerByName))).sort((a, b) =>
+                a.localeCompare(b, undefined, { sensitivity: 'base' })
+            );
         } catch (e) { /* MCP not configured */ }
     },
 
@@ -3949,6 +4290,7 @@
             }
 
             this.reconcileCurrentModelAfterLoad(defaultModel);
+            await this.applyProfilePreferences(this.activePromptProfile);
         } catch (error) {
             console.error('Error loading models:', error);
         }
@@ -4045,6 +4387,7 @@
 
     onModelSettingsChange() {
         this.modelSettingsDirty = true;
+        this.persistActiveProfileModelPreferences();
         this.schedulePersistModelSettings();
     },
 
@@ -4144,14 +4487,31 @@
                 this.promptProfiles.unshift({ name: 'System Default', content: '' });
                 this._persistPromptProfiles();
             }
-            // Apply System Default profile's prompt if none set
-            if (!this.systemPrompt) {
+            const preferredProfile = this.getPersistedSelectedProfile();
+            if (preferredProfile.hasPreference) {
+                if (preferredProfile.name) {
+                    const profile = this.promptProfiles.find(p => p.name === preferredProfile.name);
+                    if (profile) {
+                        this.activePromptProfile = profile.name;
+                        this.systemPrompt = profile.content;
+                    } else {
+                        const sysDefault = this.promptProfiles.find(p => p.name === 'System Default');
+                        this.activePromptProfile = sysDefault ? sysDefault.name : null;
+                        this.systemPrompt = sysDefault ? sysDefault.content : this.systemPrompt;
+                        this.persistSelectedProfile(this.activePromptProfile);
+                    }
+                } else {
+                    this.activePromptProfile = null;
+                }
+            } else if (!this.systemPrompt) {
                 const sysDefault = this.promptProfiles.find(p => p.name === 'System Default');
                 if (sysDefault) {
                     this.systemPrompt = sysDefault.content;
                     this.activePromptProfile = 'System Default';
+                    this.persistSelectedProfile('System Default');
                 }
             }
+            this.syncProfileEditorState();
         } catch (e) {
             this.promptProfiles = [];
         }
@@ -4161,18 +4521,22 @@
         localStorage.setItem('omlx_chat_prompt_profiles', JSON.stringify(this.promptProfiles));
     },
 
-    selectPromptProfile(name) {
+    async selectPromptProfile(name) {
         if (!name) {
             // Custom — keep current prompt, just clear association
             this.activePromptProfile = null;
+            this.persistSelectedProfile(null);
+            this.promptDirty = false;
             const session = this.getChatSession(this.currentChatId, true);
             if (session) session.activeProfile = null;
+            await this.applyProfilePreferences(null, { session });
             return;
         }
         const profile = this.promptProfiles.find(p => p.name === name);
         if (profile) {
             this.systemPrompt = profile.content;
             this.activePromptProfile = name;
+            this.persistSelectedProfile(name);
             this.promptDirty = false;
             // Sync to current session
             const session = this.getChatSession(this.currentChatId, true);
@@ -4180,6 +4544,7 @@
                 session.systemPrompt = profile.content;
                 session.activeProfile = this.activePromptProfile;
             }
+            await this.applyProfilePreferences(name, { session });
         }
     },
 
@@ -4189,6 +4554,7 @@
         if (profile) {
             profile.content = this.systemPrompt;
             this._persistPromptProfiles();
+            this.persistActiveProfileModelPreferences();
             this.promptDirty = false;
             // Sync to session
             const session = this.getChatSession(this.currentChatId, true);
@@ -4202,11 +4568,25 @@
     deletePromptProfile(name) {
         if (name === 'System Default') return;
         this.promptProfiles = this.promptProfiles.filter(p => p.name !== name);
+        this.deleteProfilePrefs(name);
         if (this.activePromptProfile === name) {
-            this.activePromptProfile = null;
+            const sysDefault = this.promptProfiles.find(p => p.name === 'System Default');
+            this.activePromptProfile = sysDefault ? sysDefault.name : null;
+            this.systemPrompt = sysDefault ? sysDefault.content : this.systemPrompt;
+            const session = this.getChatSession(this.currentChatId, false);
+            if (session) {
+                session.activeProfile = this.activePromptProfile;
+                session.systemPrompt = this.systemPrompt;
+            }
+        }
+        const preferred = this.getPersistedSelectedProfile();
+        if (preferred.hasPreference && preferred.name === name) {
+            this.persistSelectedProfile(this.activePromptProfile);
         }
         this._persistPromptProfiles();
         this.profileDeleteConfirm = null;
+        this.syncProfileEditorState();
+        window.dispatchEvent(new CustomEvent('omlx-profile-changed', { detail: { profile: this.activePromptProfile } }));
     },
 
     startRenamingPromptProfile() {
@@ -4221,6 +4601,7 @@
             this.cancelRenamingPromptProfile();
             return;
         }
+        const previousName = this.activePromptProfile;
         // Check for duplicate name (excluding current)
         if (this.promptProfiles.some(p => p.name === trimmed && p.name !== this.activePromptProfile)) {
             this.cancelRenamingPromptProfile();
@@ -4230,10 +4611,23 @@
         if (profile) {
             profile.name = trimmed;
             this._persistPromptProfiles();
+            const prevKey = this.profileStorageKey(previousName);
+            const nextKey = this.profileStorageKey(trimmed);
+            if (this.profilePrefsMap?.[prevKey]) {
+                this.profilePrefsMap[nextKey] = this.profilePrefsMap[prevKey];
+                delete this.profilePrefsMap[prevKey];
+                this.saveProfilePrefs();
+            }
             this.activePromptProfile = trimmed;
+            this.persistSelectedProfile(trimmed);
+            const session = this.getChatSession(this.currentChatId, false);
+            if (session?.activeProfile === previousName) {
+                session.activeProfile = trimmed;
+            }
         }
         this.editingPromptProfileName = false;
         this.newProfileNameDraft = '';
+        this.syncProfileEditorState();
     },
 
     cancelRenamingPromptProfile() {
@@ -4254,6 +4648,7 @@
         this.promptProfiles.push({ name, content: '' });
         this._persistPromptProfiles();
         this.activePromptProfile = name;
+        this.persistSelectedProfile(name);
         this.systemPrompt = '';
         this.promptDirty = false;
         this.newProfileNameDraft = name;
@@ -4263,7 +4658,70 @@
             if (input) input.focus();
         });
         const session = this.getChatSession(this.currentChatId, true);
-        if (session) session.systemPrompt = '';
+        if (session) {
+            session.systemPrompt = '';
+            session.activeProfile = name;
+        }
+        const prefs = this.getProfilePrefs(name, true);
+        prefs.preferredModel = this.resolveGatewayModelId(this.currentModel) || null;
+        const snap = this.captureSessionModelSettings();
+        prefs.modelSettings = this.cloneData(snap.modelSettings);
+        prefs.speculativeEngine = snap.speculativeEngine ?? 'none';
+        prefs.speculativeDraftModel = snap.speculativeDraftModel ?? '';
+        this.saveProfilePrefs();
+        this.syncProfileEditorState();
+        window.dispatchEvent(new CustomEvent('omlx-profile-changed', { detail: { profile: name } }));
+    },
+
+    exportPromptProfiles() {
+        const payload = {
+            version: 1,
+            exportedAt: new Date().toISOString(),
+            promptProfiles: this.promptProfiles || [],
+            profilePrefs: this.profilePrefsMap || {},
+        };
+        const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `omlx-profiles-${new Date().toISOString().slice(0, 10)}.json`;
+        a.click();
+        setTimeout(() => URL.revokeObjectURL(url), 1000);
+    },
+
+    openProfileImportDialog() {
+        this.$refs.profileImportInput?.click();
+    },
+
+    async importPromptProfilesFromFile(event) {
+        const file = event?.target?.files?.[0];
+        if (!file) return;
+        try {
+            const text = await file.text();
+            const parsed = JSON.parse(text);
+            if (!Array.isArray(parsed?.promptProfiles)) {
+                throw new Error('Invalid profile file');
+            }
+            this.promptProfiles = parsed.promptProfiles
+                .map(p => ({ name: String(p?.name || '').trim(), content: String(p?.content || '') }))
+                .filter(p => p.name);
+            if (!this.promptProfiles.some(p => p.name === 'System Default')) {
+                this.promptProfiles.unshift({ name: 'System Default', content: '' });
+            }
+            this.profilePrefsMap = (parsed.profilePrefs && typeof parsed.profilePrefs === 'object')
+                ? parsed.profilePrefs : {};
+            this._persistPromptProfiles();
+            this.saveProfilePrefs();
+            this.loadPromptProfiles();
+            await this.selectPromptProfile(this.activePromptProfile);
+            this.syncProfileEditorState();
+            window.dispatchEvent(new CustomEvent('omlx-profile-changed', { detail: { profile: this.activePromptProfile } }));
+        } catch (e) {
+            console.error('Failed importing profiles:', e);
+            alert('Failed to import profile file.');
+        } finally {
+            if (event?.target) event.target.value = '';
+        }
     },
 
     async selectModel(modelId) {
@@ -4275,6 +4733,8 @@
                 this.saveModelSettingsForModel(session, session.model);
             }
             this.currentModel = gatewayId;
+            this.persistSelectedModel(gatewayId);
+            this.persistActiveProfileModelPreferences();
             if (session) {
                 session.model = gatewayId;
                 if (!this.loadModelSettingsForModel(session, gatewayId)) {
@@ -4287,6 +4747,7 @@
                     await this.loadModelCapabilities(gatewayId);
                 }
                 this.persistChatSettingsToHistory(this.currentChatId);
+                this.persistActiveProfileModelPreferences();
             } else {
                 await this.loadModelCapabilities(gatewayId);
             }
@@ -4348,6 +4809,29 @@
         }
     },
 
+    inferHistoryProfileName(entity = {}) {
+        const raw = String(entity?.activeProfile ?? '').trim();
+        const profiles = Array.isArray(this.promptProfiles) ? this.promptProfiles : [];
+        if (raw) {
+            return profiles.some(p => p.name === raw) ? raw : null;
+        }
+        const sysDefault = profiles.find(p => p.name === 'System Default');
+        if (sysDefault && String(entity?.systemPrompt ?? '') === String(sysDefault.content ?? '')) {
+            return 'System Default';
+        }
+        return null;
+    },
+
+    profileFilteredChatHistory() {
+        const selected = this.inferHistoryProfileName({
+            activeProfile: this.activePromptProfile,
+            systemPrompt: this.systemPrompt,
+        });
+        return this.chatHistory.filter(chat =>
+            this.inferHistoryProfileName(chat) === selected
+        );
+    },
+
     async startNewChat() {
         this.cancelPersistModelSettingsTimer();
         const prevChatId = this.currentChatId;
@@ -4360,14 +4844,20 @@
         }
 
         const chatId = 'chat_' + Date.now();
-        const sysDefault = this.promptProfiles.find(p => p.name === 'System Default');
-        const systemPrompt = sysDefault ? sysDefault.content : '';
+        const selectedProfileName = this.inferHistoryProfileName({
+            activeProfile: this.activePromptProfile,
+            systemPrompt: this.systemPrompt,
+        });
+        const selectedProfile = selectedProfileName
+            ? this.promptProfiles.find(p => p.name === selectedProfileName)
+            : null;
+        const systemPrompt = selectedProfile ? selectedProfile.content : (this.systemPrompt || '');
         this.currentChatId = chatId;
         this.uploadImages = [];
         this.uploadDocuments = [];
         this.inputMessage = '';
         this.systemPrompt = systemPrompt;
-        this.activePromptProfile = sysDefault ? sysDefault.name : null;
+        this.activePromptProfile = selectedProfile ? selectedProfile.name : null;
         this.editingIndex = null;
         this.editContent = '';
         this.editImages = [];
@@ -4387,10 +4877,13 @@
         };
         this.chatSessions[chatId] = session;
         this.messages = session.messages;
+        await this.applyProfilePreferences(this.activePromptProfile, { session });
         await this.ensureSessionModelSettings(session, this.currentModel);
         if (this.currentModel) {
             this.saveModelSettingsForModel(session, this.currentModel);
         }
+        this.persistActiveProfileModelPreferences();
+        window.dispatchEvent(new CustomEvent('omlx-profile-changed', { detail: { profile: this.activePromptProfile } }));
         this.resetStreamSession(this.getStreamSession(chatId, true));
         this.recentStats = this.emptyStats();
         this.stopStatsPollingIfIdle();
@@ -4430,15 +4923,35 @@
             session.messages.forEach(m => this.ensureVariantMeta(m, session));
             this.currentChatId = chatId;
             this.messages = session.messages;
-            this.systemPrompt = session.systemPrompt || '';
-            this.activePromptProfile = session.activeProfile
-                && this.promptProfiles.some(p => p.name === session.activeProfile)
-                ? session.activeProfile : null;
+            const preferredProfile = this.getPersistedSelectedProfile();
+            if (preferredProfile.hasPreference) {
+                if (preferredProfile.name && this.promptProfiles.some(p => p.name === preferredProfile.name)) {
+                    const profile = this.promptProfiles.find(p => p.name === preferredProfile.name);
+                    this.activePromptProfile = profile ? profile.name : null;
+                    this.systemPrompt = profile ? profile.content : (session.systemPrompt || '');
+                    session.activeProfile = this.activePromptProfile;
+                    session.systemPrompt = this.systemPrompt;
+                } else {
+                    this.activePromptProfile = null;
+                    session.activeProfile = null;
+                    this.systemPrompt = session.systemPrompt || '';
+                }
+            } else {
+                this.systemPrompt = session.systemPrompt || '';
+                const sessionProfile = this.inferHistoryProfileName(session);
+                this.activePromptProfile = sessionProfile;
+                session.activeProfile = sessionProfile;
+            }
+            const preferredModelId = this.resolvePreferredAvailableModelId();
+            if (preferredModelId) {
+                session.model = preferredModelId;
+            }
             if (session.model) {
                 // Resolve legacy alias → gateway id for backward compatibility
                 const gatewayId = this.aliasToGateway[session.model] || session.model;
                 this.currentModel = gatewayId;
                 session.model = gatewayId;
+                this.persistSelectedModel(gatewayId);
                 if (!session.modelSettingsByModel) session.modelSettingsByModel = {};
                 if (session.modelSettings && !session.modelSettingsByModel[gatewayId]) {
                     session.modelSettingsByModel[gatewayId] = {
@@ -4454,6 +4967,7 @@
                     await this.loadModelCapabilities(gatewayId);
                 }
             }
+            await this.applyProfilePreferences(this.activePromptProfile, { session });
             if (session.messages && session.messages.length > 0) {
                 this.syncFooterStatsFromMessages(session.messages);
             } else {
@@ -4520,7 +5034,10 @@
             messages: messagesForStorage,
             model: chatModel,
             systemPrompt: chatSystemPrompt,
-            activeProfile: session?.activeProfile ?? this.activePromptProfile ?? null,
+            activeProfile: this.inferHistoryProfileName({
+                activeProfile: session?.activeProfile ?? this.activePromptProfile ?? null,
+                systemPrompt: chatSystemPrompt,
+            }),
             modelSettings: settingsSnap.modelSettings,
             speculativeEngine: settingsSnap.speculativeEngine,
             speculativeDraftModel: settingsSnap.speculativeDraftModel,
@@ -4534,6 +5051,7 @@
             session.messages = messagesToSave;
             session.model = chatModel;
             session.systemPrompt = chatSystemPrompt;
+            session.activeProfile = chatData.activeProfile;
             session.modelSettings = settingsSnap.modelSettings;
             session.speculativeEngine = settingsSnap.speculativeEngine;
             session.speculativeDraftModel = settingsSnap.speculativeDraftModel;
@@ -5525,14 +6043,30 @@
         this.recentStats = this.emptyStats();
         this.stopStatsPollingIfIdle();
 
-        if (this.chatHistory.length > 0) {
-            await this.loadChat(this.chatHistory[0].id);
+        const visibleHistory = this.profileFilteredChatHistory();
+        if (visibleHistory.length > 0) {
+            await this.loadChat(visibleHistory[0].id);
             return;
         }
 
-        const sysDefault = this.promptProfiles.find(p => p.name === 'System Default');
-        this.systemPrompt = sysDefault ? sysDefault.content : '';
-        this.activePromptProfile = sysDefault ? sysDefault.name : null;
+        const selectedProfileName = this.inferHistoryProfileName({
+            activeProfile: this.activePromptProfile,
+            systemPrompt: this.systemPrompt,
+        });
+        const selectedProfile = selectedProfileName
+            ? this.promptProfiles.find(p => p.name === selectedProfileName)
+            : null;
+        if (selectedProfile) {
+            this.systemPrompt = selectedProfile.content;
+            this.activePromptProfile = selectedProfile.name;
+        } else {
+            this.activePromptProfile = null;
+            if (!this.systemPrompt) {
+                const sysDefault = this.promptProfiles.find(p => p.name === 'System Default');
+                this.systemPrompt = sysDefault ? sysDefault.content : '';
+                this.activePromptProfile = sysDefault ? sysDefault.name : null;
+            }
+        }
 
         this.$nextTick(() => {
             const container = document.getElementById('messagesContainer');
@@ -6901,25 +7435,130 @@
                 '<label style="display:block;font-weight:600;margin-bottom:4px">Prompt</label>' +
                 '<textarea id="imgPrompt" rows="3" placeholder="a cinematic portrait of a red fox in autumn forest, golden light, 85mm" ' +
                 'style="width:100%;background:#010409;border:1px solid #30363d;border-radius:8px;color:#e6edf3;padding:8px;resize:vertical"></textarea>' +
+                '<div id="imgUrlWrap" style="margin-top:8px">' +
+                  '<label style="display:block;font-size:12px;color:#8b949e">Product URL (optional: auto-build prompt with local LLM)</label>' +
+                  '<input id="imgProductUrl" type="url" placeholder="https://example.com/products/your-product" ' +
+                  'style="width:100%;background:#010409;border:1px solid #30363d;border-radius:8px;color:#e6edf3;padding:7px">' +
+                  '<div id="imgUrlMeta" style="font-size:11px;color:#8b949e;margin-top:5px">If provided, Generate will extract product details from the URL and synthesize a high-quality prompt using your selected image type + preset.</div>' +
+                '</div>' +
+                '<div id="imgPromptPresetWrap" style="margin-top:8px">' +
+                  '<label style="display:block;font-size:12px;color:#8b949e">High-quality prompt preset</label>' +
+                  '<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">' +
+                    '<select id="imgPromptPreset" style="background:#010409;border:1px solid #30363d;border-radius:8px;color:#e6edf3;padding:6px;min-width:340px">' +
+                      '<option value="">— choose a prompt starter —</option>' +
+                      '<option value="premium_product_hero">Premium product hero (studio)</option>' +
+                      '<option value="luxury_closeup_detail">Luxury close-up detail shot</option>' +
+                      '<option value="lifestyle_editorial">Lifestyle editorial campaign</option>' +
+                      '<option value="ecommerce_white_bg">E-commerce white background listing</option>' +
+                      '<option value="social_paid_ad">Paid social ad creative</option>' +
+                      '<option value="seasonal_campaign">Seasonal campaign hero</option>' +
+                      '<option value="feature_comparison">Feature/benefit comparison visual</option>' +
+                    '</select>' +
+                    '<button id="imgPromptInsert" type="button" style="background:#21262d;border:1px solid #30363d;border-radius:8px;color:#e6edf3;padding:7px 10px;cursor:pointer">Insert preset</button>' +
+                  '</div>' +
+                  '<div id="imgPromptPresetMeta" style="font-size:11px;color:#8b949e;margin-top:5px">Choose a starter prompt, then tweak product specifics in the main prompt box.</div>' +
+                '</div>' +
+                '<div id="imgTypeWrap" style="margin-top:10px">' +
+                  '<label style="display:block;font-size:12px;color:#8b949e">Marketing image type</label>' +
+                  '<select id="imgType" style="background:#010409;border:1px solid #30363d;border-radius:8px;color:#e6edf3;padding:6px;min-width:320px">' +
+                    '<option value="product_hero" selected>Product hero shot</option>' +
+                    '<option value="lifestyle">Lifestyle in-use scene</option>' +
+                    '<option value="studio_packshot">Studio packshot</option>' +
+                    '<option value="ecommerce_white_bg">E-commerce white background</option>' +
+                    '<option value="feature_callout">Feature/benefit callout visual</option>' +
+                    '<option value="social_ad">Social ad creative</option>' +
+                    '<option value="promo_banner">Promo banner visual</option>' +
+                    '<option value="before_after">Before/after concept</option>' +
+                    '<option value="closeup_macro">Close-up detail/macro</option>' +
+                    '<option value="custom">Custom (no preset prompt shaping)</option>' +
+                  '</select>' +
+                  '<div style="font-size:11px;color:#8b949e;margin-top:5px">Applies high-conversion prompt shaping automatically for HiDream. Use reference images below to keep product/brand identity.</div>' +
+                '</div>' +
                 // ---- IMAGE controls ----
                 '<div id="imgImageControls" style="display:flex;gap:10px;flex-wrap:wrap;margin-top:10px;align-items:flex-end">' +
                   '<div><label style="display:block;font-size:12px;color:#8b949e">Engine</label>' +
                     '<select id="imgEngine" style="background:#010409;border:1px solid #30363d;border-radius:8px;color:#e6edf3;padding:6px">' +
                       '<option value="hidream">HiDream text-to-image</option>' +
                       '<option value="kontext">FLUX.1 Kontext (reference edit)</option>' +
+                      '<option value="nano_banana_2">Nano Banana 2 (Replicate)</option>' +
                     '</select></div>' +
-                  '<div><label style="display:block;font-size:12px;color:#8b949e">Aspect</label>' +
-                    '<select id="imgPreset" style="background:#010409;border:1px solid #30363d;border-radius:8px;color:#e6edf3;padding:6px">' +
-                      '<option value="1:1">1:1 — 1024×1024</option>' +
-                      '<option value="9:16">9:16 — 768×1344</option>' +
-                      '<option value="16:9">16:9 — 1344×768</option>' +
-                      '<option value="4:5">4:5 — 1024×1280</option>' +
-                      '<option value="3:2">3:2 — 1216×832</option>' +
+                  '<div><label style="display:block;font-size:12px;color:#8b949e">Aspect ratio</label>' +
+                    '<select id="imgAspect" style="background:#010409;border:1px solid #30363d;border-radius:8px;color:#e6edf3;padding:6px">' +
+                      '<option value="1:1">1:1 square</option>' +
+                      '<option value="9:16" selected>9:16 vertical</option>' +
+                      '<option value="16:9">16:9 wide</option>' +
+                      '<option value="4:5">4:5 portrait</option>' +
+                      '<option value="3:2">3:2</option>' +
                     '</select></div>' +
+                  '<div><label style="display:block;font-size:12px;color:#8b949e">Image size (short side)</label>' +
+                    '<select id="imgSize" style="background:#010409;border:1px solid #30363d;border-radius:8px;color:#e6edf3;padding:6px">' +
+                      '<option value="512">512p</option>' +
+                      '<option value="720" selected>720p</option>' +
+                      '<option value="1024">1024p</option>' +
+                      '<option value="1440">1440p</option>' +
+                      '<option value="2048">2048p (max-fit)</option>' +
+                    '</select></div>' +
+                  '<div style="display:flex;align-items:center;gap:6px;margin-bottom:3px">' +
+                    '<input id="imgSnap" type="checkbox" style="margin:0">' +
+                    '<label for="imgSnap" style="font-size:12px;color:#8b949e;cursor:pointer">Snap to HiDream trained resolutions</label>' +
+                  '</div>' +
                   '<div><label style="display:block;font-size:12px;color:#8b949e">Steps</label>' +
                     '<input id="imgSteps" type="number" min="4" max="50" value="28" style="width:80px;background:#010409;border:1px solid #30363d;border-radius:8px;color:#e6edf3;padding:6px"></div>' +
                   '<div id="imgGuidanceWrap" style="display:none"><label style="display:block;font-size:12px;color:#8b949e">Guidance</label>' +
                     '<input id="imgGuidance" type="number" step="0.1" value="2.8" style="width:90px;background:#010409;border:1px solid #30363d;border-radius:8px;color:#e6edf3;padding:6px"></div>' +
+                '</div>' +
+                '<div id="imgDimPreview" style="font-size:11px;color:#8b949e;margin-top:6px"></div>' +
+                '<div id="imgNanoWrap" style="display:none;margin-top:10px;padding:10px;border:1px solid #30363d;border-radius:10px;background:#0b1118">' +
+                  '<div style="font-size:12px;color:#8b949e;margin-bottom:8px"><b style="color:#e6edf3">Nano Banana 2</b> runs at fixed <b>1K resolution</b>. Aspect ratio controls composition; quality is prompt/lighting/detail, not pixel count. Stage 2 ad lines are auto-reused for native text render here.</div>' +
+                  '<div style="display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end">' +
+                    '<div><label style="display:block;font-size:12px;color:#8b949e">Aspect ratio (1K)</label>' +
+                      '<select id="imgNanoAspect" style="background:#010409;border:1px solid #30363d;border-radius:8px;color:#e6edf3;padding:6px">' +
+                        '<option value="1:1">1:1 square</option>' +
+                        '<option value="9:16" selected>9:16 vertical</option>' +
+                        '<option value="16:9">16:9 wide</option>' +
+                        '<option value="4:5">4:5 portrait</option>' +
+                        '<option value="5:4">5:4</option>' +
+                        '<option value="3:4">3:4</option>' +
+                        '<option value="4:3">4:3</option>' +
+                        '<option value="2:3">2:3</option>' +
+                        '<option value="3:2">3:2</option>' +
+                        '<option value="21:9">21:9 cinematic</option>' +
+                        '<option value="1:4">1:4</option>' +
+                        '<option value="4:1">4:1</option>' +
+                        '<option value="1:8">1:8</option>' +
+                        '<option value="8:1">8:1</option>' +
+                        '<option value="match_input_image">Match input image(s)</option>' +
+                      '</select></div>' +
+                    '<div><label style="display:block;font-size:12px;color:#8b949e">Output format</label>' +
+                      '<select id="imgNanoFormat" style="background:#010409;border:1px solid #30363d;border-radius:8px;color:#e6edf3;padding:6px">' +
+                        '<option value="png" selected>PNG (best for overlays)</option>' +
+                        '<option value="jpg">JPG (smaller file)</option>' +
+                      '</select></div>' +
+                    '<div style="display:flex;align-items:center;gap:6px;margin-bottom:3px">' +
+                      '<input id="imgNanoGoogleSearch" type="checkbox" style="margin:0">' +
+                      '<label for="imgNanoGoogleSearch" style="font-size:12px;color:#8b949e;cursor:pointer">Google search grounding</label>' +
+                    '</div>' +
+                    '<div style="display:flex;align-items:center;gap:6px;margin-bottom:3px">' +
+                      '<input id="imgNanoImageSearch" type="checkbox" style="margin:0">' +
+                      '<label for="imgNanoImageSearch" style="font-size:12px;color:#8b949e;cursor:pointer">Image search grounding</label>' +
+                    '</div>' +
+                  '</div>' +
+                  '<div style="display:flex;gap:10px;flex-wrap:wrap;margin-top:10px;align-items:flex-end">' +
+                    '<div style="min-width:250px;flex:2"><label style="display:block;font-size:12px;color:#8b949e">In-image headline (native text render)</label><input id="imgNanoHeadline" type="text" placeholder="BIG SALE TODAY" style="width:100%;background:#010409;border:1px solid #30363d;border-radius:8px;color:#e6edf3;padding:6px"></div>' +
+                    '<div style="min-width:220px;flex:2"><label style="display:block;font-size:12px;color:#8b949e">In-image subheadline</label><input id="imgNanoSub" type="text" placeholder="Premium quality, fast shipping" style="width:100%;background:#010409;border:1px solid #30363d;border-radius:8px;color:#e6edf3;padding:6px"></div>' +
+                    '<div style="min-width:140px"><label style="display:block;font-size:12px;color:#8b949e">In-image CTA</label><input id="imgNanoCta" type="text" placeholder="Shop now" style="width:140px;background:#010409;border:1px solid #30363d;border-radius:8px;color:#e6edf3;padding:6px"></div>' +
+                  '</div>' +
+                  '<div style="margin-top:8px"><label style="display:block;font-size:12px;color:#8b949e">In-image signs (comma-separated)</label><input id="imgNanoSigns" type="text" placeholder="FREE SHIPPING, 2-YEAR WARRANTY, LIMITED DROP" style="width:100%;background:#010409;border:1px solid #30363d;border-radius:8px;color:#e6edf3;padding:6px"></div>' +
+                '</div>' +
+                '<div id="imgHiRefWrap" style="display:none;margin-top:10px">' +
+                  '<label id="imgHiRefLabel" style="display:block;font-size:12px;color:#8b949e;margin-bottom:4px">HiDream reference image(s) (optional, up to 3)</label>' +
+                  '<input id="imgHiRefFiles" type="file" accept="image/*" multiple style="display:block;width:100%;color:#c9d1d9">' +
+                  '<div style="display:flex;gap:8px;align-items:center;margin-top:6px;flex-wrap:wrap">' +
+                    '<button id="imgHiRefClear" type="button" style="background:#21262d;border:1px solid #30363d;border-radius:8px;color:#e6edf3;padding:6px 9px;cursor:pointer;font-size:12px">Clear references</button>' +
+                    '<span id="imgHiRefTip" style="font-size:11px;color:#8b949e">Tip: you can pick files multiple times — selections will accumulate.</span>' +
+                  '</div>' +
+                  '<div id="imgHiRefList" style="margin-top:6px;display:flex;gap:6px;flex-wrap:wrap"></div>' +
+                  '<div id="imgHiRefMeta" style="font-size:11px;color:#8b949e;margin-top:5px"></div>' +
                 '</div>' +
                 // ---- VIDEO controls (:8500) ----
                 '<div id="imgVideoControls" style="display:none">' +
@@ -7100,10 +7739,11 @@
                   '<div><label style="display:block;font-size:12px;color:#8b949e">Seed</label>' +
                     '<input id="imgSeed" type="number" value="32" style="width:110px;background:#010409;border:1px solid #30363d;border-radius:8px;color:#e6edf3;padding:6px"></div>' +
                   '<button id="imgDice" type="button" title="Random seed" style="background:#21262d;border:1px solid #30363d;border-radius:8px;color:#e6edf3;padding:7px 10px;cursor:pointer">🎲</button>' +
+                  '<button id="imgCompile" type="button" style="background:#21262d;border:1px solid #30363d;border-radius:8px;color:#e6edf3;padding:7px 14px;font-weight:600;cursor:pointer">Compile prompt to edit</button>' +
                   '<button id="imgGo" type="button" style="background:#238636;border:none;border-radius:8px;color:#fff;padding:8px 16px;font-weight:600;cursor:pointer">Generate</button>' +
                 '</div>' +
                 '<div id="imgRefWrap" style="display:none;margin-top:10px">' +
-                  '<label id="imgRefLabel" style="display:block;font-size:12px;color:#8b949e;margin-bottom:4px">Reference image (required for Kontext)</label>' +
+                  '<label id="imgRefLabel" style="display:block;font-size:12px;color:#8b949e;margin-bottom:4px">Kontext reference image (required)</label>' +
                   '<input id="imgRefFile" type="file" accept="image/*" style="display:block;width:100%;color:#c9d1d9">' +
                 '</div>' +
                 '<div id="imgProgWrap" style="display:none;margin-top:12px">' +
@@ -7111,6 +7751,58 @@
                   '<div id="imgStage" style="font-size:12px;color:#8b949e;margin-top:6px"></div>' +
                 '</div>' +
                 '<div id="imgResult" style="margin-top:14px"></div>';
+
+            const overlayBox = document.createElement('div');
+            overlayBox.id = 'imgOverlayWrap';
+            overlayBox.style.cssText = 'margin-top:14px;padding-top:12px;border-top:1px solid #30363d;';
+            overlayBox.innerHTML =
+                '<div style="display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap">' +
+                  '<div style="font-size:12px;font-weight:700;color:#e6edf3">Stage 2 — Ad text & signs overlay (reusable)</div>' +
+                  '<button id="imgOverlayRefresh" type="button" style="background:#21262d;border:1px solid #30363d;border-radius:8px;color:#e6edf3;padding:6px 10px;cursor:pointer;font-size:12px">Refresh image library</button>' +
+                '</div>' +
+                '<div style="font-size:11px;color:#8b949e;margin-top:4px">Generate base image first (Stage 1), then apply different overlays repeatedly without regenerating the image. Use Auto-arrange to let the local LLM tighten copy and choose a cleaner layout.</div>' +
+                '<div style="display:flex;gap:10px;flex-wrap:wrap;margin-top:10px;align-items:flex-end">' +
+                  '<div style="min-width:260px;flex:1"><label style="display:block;font-size:12px;color:#8b949e">Base image (saved)</label>' +
+                    '<select id="imgOverlayBase" style="width:100%;background:#010409;border:1px solid #30363d;border-radius:8px;color:#e6edf3;padding:6px"><option value="">— choose saved image —</option></select></div>' +
+                  '<div><label style="display:block;font-size:12px;color:#8b949e">or upload image</label>' +
+                    '<input id="imgOverlayUpload" type="file" accept="image/*" style="color:#c9d1d9;font-size:12px;max-width:230px"></div>' +
+                  '<div><label style="display:block;font-size:12px;color:#8b949e">Overlay style</label>' +
+                    '<select id="imgOverlayType" style="background:#010409;border:1px solid #30363d;border-radius:8px;color:#e6edf3;padding:6px;min-width:240px">' +
+                      '<option value="cinematic_banner">Cinematic banner + CTA</option>' +
+                      '<option value="luxury_left_panel">Luxury left panel</option>' +
+                      '<option value="flash_sale_sign">Flash sale sign</option>' +
+                      '<option value="split_offer_card">Split offer card</option>' +
+                      '<option value="testimonial_quote">Testimonial quote bubble</option>' +
+                      '<option value="feature_callouts">Feature callout signs</option>' +
+                    '</select></div>' +
+                '</div>' +
+                '<div style="display:flex;gap:10px;flex-wrap:wrap;margin-top:10px;align-items:flex-end">' +
+                  '<div style="min-width:300px;flex:1"><label style="display:block;font-size:12px;color:#8b949e">Product/blog URL for auto ad lines</label>' +
+                    '<input id="imgOverlayUrl" type="url" placeholder="https://example.com/product or /blog post" style="width:100%;background:#010409;border:1px solid #30363d;border-radius:8px;color:#e6edf3;padding:6px"></div>' +
+                  '<button id="imgOverlayGenFromUrl" type="button" style="background:#1f6feb;border:none;border-radius:8px;color:#fff;padding:8px 14px;font-weight:600;cursor:pointer">Generate lines from URL</button>' +
+                  '<button id="imgOverlayAutoArrange" type="button" style="background:#6f42c1;border:none;border-radius:8px;color:#fff;padding:8px 14px;font-weight:600;cursor:pointer">Auto-arrange with local LLM</button>' +
+                '</div>' +
+                '<div id="imgOverlayUrlMeta" style="font-size:11px;color:#8b949e;margin-top:4px"></div>' +
+                '<div id="imgOverlayBasePreviewWrap" style="display:none;margin-top:10px">' +
+                  '<div style="font-size:11px;color:#8b949e;margin-bottom:5px">Selected base preview</div>' +
+                  '<img id="imgOverlayBasePreview" style="max-width:100%;max-height:260px;border-radius:10px;border:1px solid #30363d;object-fit:contain;background:#0d1117">' +
+                '</div>' +
+                '<div style="display:flex;gap:10px;flex-wrap:wrap;margin-top:10px;align-items:flex-end">' +
+                  '<div style="min-width:280px;flex:2"><label style="display:block;font-size:12px;color:#8b949e">Headline</label><input id="imgOverlayHeadline" type="text" placeholder="The one line that sells the product" style="width:100%;background:#010409;border:1px solid #30363d;border-radius:8px;color:#e6edf3;padding:6px"></div>' +
+                  '<div style="min-width:220px;flex:1"><label style="display:block;font-size:12px;color:#8b949e">Subheadline</label><input id="imgOverlaySub" type="text" placeholder="Benefit/support line" style="width:100%;background:#010409;border:1px solid #30363d;border-radius:8px;color:#e6edf3;padding:6px"></div>' +
+                  '<div><label style="display:block;font-size:12px;color:#8b949e">CTA</label><input id="imgOverlayCta" type="text" placeholder="Shop now" style="width:130px;background:#010409;border:1px solid #30363d;border-radius:8px;color:#e6edf3;padding:6px"></div>' +
+                '</div>' +
+                '<div style="display:flex;gap:10px;flex-wrap:wrap;margin-top:10px;align-items:flex-end">' +
+                  '<div><label style="display:block;font-size:12px;color:#8b949e">Badge text</label><input id="imgOverlayBadge" type="text" placeholder="LIMITED OFFER" style="width:180px;background:#010409;border:1px solid #30363d;border-radius:8px;color:#e6edf3;padding:6px"></div>' +
+                  '<div><label style="display:block;font-size:12px;color:#8b949e">Price text</label><input id="imgOverlayPrice" type="text" placeholder="$49.99" style="width:120px;background:#010409;border:1px solid #30363d;border-radius:8px;color:#e6edf3;padding:6px"></div>' +
+                  '<div style="min-width:260px;flex:1"><label style="display:block;font-size:12px;color:#8b949e">Signs (comma-separated)</label><input id="imgOverlaySigns" type="text" placeholder="Free shipping, 2-year warranty, 24h dispatch" style="width:100%;background:#010409;border:1px solid #30363d;border-radius:8px;color:#e6edf3;padding:6px"></div>' +
+                  '<label style="display:flex;align-items:center;gap:6px;font-size:12px;color:#8b949e;white-space:nowrap;margin-bottom:2px"><input id="imgOverlayAutoLlm" type="checkbox" checked style="margin:0">Auto-arrange on apply</label>' +
+                  '<button id="imgOverlayApply" type="button" style="background:#2f81f7;border:none;border-radius:8px;color:#fff;padding:8px 14px;font-weight:600;cursor:pointer">Apply overlay</button>' +
+                  '<button id="imgOverlayResetBase" type="button" style="background:#21262d;border:1px solid #30363d;border-radius:8px;color:#e6edf3;padding:8px 14px;font-weight:600;cursor:pointer">Reset to original base</button>' +
+                '</div>' +
+                '<div id="imgOverlayStatus" style="font-size:11px;color:#8b949e;margin-top:6px"></div>' +
+                '<div id="imgOverlayResult" style="margin-top:10px"></div>';
+            body.appendChild(overlayBox);
 
             panel.appendChild(bar);
             panel.appendChild(body);
@@ -7124,13 +7816,55 @@
             const $ = id => document.getElementById(id);
             $('imgDice').onclick = () => { $('imgSeed').value = Math.floor(Math.random() * 1e9); };
             $('imgGo').onclick = () => { (imgMode === 'video') ? vidGenerate() : imgGenerate(); };
+            if ($('imgCompile')) $('imgCompile').onclick = () => {
+                if (imgMode === 'video') return;
+                const engine = ($('imgEngine') && $('imgEngine').value) || 'hidream';
+                const imageType = ($('imgType') && $('imgType').value) || 'product_hero';
+                let refCount = imgHiRefStore.length;
+                if (engine === 'kontext' && $('imgRefFile') && $('imgRefFile').files && $('imgRefFile').files.length) refCount = 1;
+                const box = $('imgPrompt');
+                if (box) box.value = imgBuildPrompt(box.value, engine, imageType, refCount);
+                if ($('imgStatus')) { $('imgStatus').innerHTML = 'Prompt compiled into text box. You can now edit it.'; $('imgStatus').style.color = '#58a6ff'; }
+            };
             $('imgEngine').onchange = imgEngineChanged;
+            if ($('imgAspect')) $('imgAspect').onchange = imgUpdateDimsPreview;
+            if ($('imgSize')) $('imgSize').onchange = imgUpdateDimsPreview;
+            if ($('imgSnap')) $('imgSnap').onchange = imgUpdateDimsPreview;
+            if ($('imgHiRefFiles')) $('imgHiRefFiles').onchange = imgHiRefChanged;
+            if ($('imgHiRefClear')) $('imgHiRefClear').onclick = imgHiRefClear;
+            if ($('imgPromptPreset')) $('imgPromptPreset').onchange = imgPromptPresetChanged;
+            if ($('imgPromptInsert')) $('imgPromptInsert').onclick = imgPromptPresetInsert;
             $('imgModeImage').onclick = () => imgSetMode('image');
             $('imgModeVideo').onclick = () => imgSetMode('video');
+            if ($('imgOverlayRefresh')) $('imgOverlayRefresh').onclick = () => imgRefreshLibrary();
+            if ($('imgOverlayApply')) $('imgOverlayApply').onclick = imgApplyOverlay;
+            if ($('imgOverlayResetBase')) $('imgOverlayResetBase').onclick = imgOverlayResetToOriginal;
+            if ($('imgOverlayType')) $('imgOverlayType').onchange = imgOverlayTypeChanged;
+            if ($('imgOverlayBase')) $('imgOverlayBase').onchange = imgOverlayBaseChanged;
+            if ($('imgOverlayUpload')) $('imgOverlayUpload').onchange = imgOverlayUploadChanged;
+            if ($('imgOverlayGenFromUrl')) $('imgOverlayGenFromUrl').onclick = imgOverlayGenerateFromUrl;
+            if ($('imgOverlayAutoArrange')) $('imgOverlayAutoArrange').onclick = async () => {
+                try {
+                    await imgOverlayArrangeWithLlm(false);
+                } catch (e) {
+                    if ($('imgOverlayStatus')) {
+                        $('imgOverlayStatus').textContent = 'Auto-arrange error: ' + e.message;
+                        $('imgOverlayStatus').style.color = '#f85149';
+                    }
+                }
+            };
+            if ($('imgOverlayUrl')) $('imgOverlayUrl').onkeydown = (ev) => {
+                if (ev.key === 'Enter') {
+                    ev.preventDefault();
+                    imgOverlayGenerateFromUrl();
+                }
+            };
             if ($('vidEngine')) $('vidEngine').onchange = vidEngineChanged;
             if ($('vidChain')) $('vidChain').onchange = vidChainNote;
             if ($('vidSegSec')) $('vidSegSec').oninput = vidChainNote;
             vidChainNote();
+            imgRefreshLibrary();
+            imgOverlayTypeChanged();
             imgEngineChanged();
             imgSetMode('image');
             imgStartStats();
@@ -7147,7 +7881,1028 @@
         }
         function imgPollStats() { /* shared OMLXStats poller refreshes on its own timer */ }
 
+        const IMG_TYPE_PROMPTS = {
+            product_hero: 'Create a premium product hero image for conversion-focused marketing: clean composition, premium lighting, realistic materials, sharp product focus, subtle depth of field, ad-ready framing with room for headline/copy.',
+            lifestyle: 'Create a high-end lifestyle image showing the product in real use: authentic setting, natural human interaction, aspirational mood, believable lighting, product remains clearly recognizable.',
+            studio_packshot: 'Create a polished studio packshot: controlled lighting, accurate color, crisp edges, premium shadows/reflections, catalog-grade product clarity, no clutter.',
+            ecommerce_white_bg: 'Create an e-commerce product image on pure white background (#FFFFFF): centered framing, realistic contact shadow, accurate color/shape, clean edges suitable for marketplace listings.',
+            feature_callout: 'Create a feature-focused marketing visual: highlight one key product benefit clearly, close framing on important details, clear visual hierarchy, ad campaign quality.',
+            social_ad: 'Create a thumb-stopping social ad creative: bold composition, high contrast, emotionally engaging scene, product-first storytelling, ready for paid social placement.',
+            promo_banner: 'Create a promotional banner-style image: wide campaign aesthetic, clear focal subject, premium color grading, negative space for offer text/CTA.',
+            before_after: 'Create a before-and-after style concept image for conversion: clearly communicate transformation/benefit while keeping the product and context realistic and brand-safe.',
+            closeup_macro: 'Create an ultra-detailed close-up/macro product image: texture fidelity, material realism, precise lighting control, premium commercial photography look.',
+            custom: '',
+        };
+
+        const IMG_PROMPT_PRESETS = {
+            premium_product_hero: {
+                label: 'Premium product hero (studio)',
+                text: 'masterpiece, best quality, premium commercial product photography of [PRODUCT], clean luxury studio setup, controlled three-point lighting, realistic materials and textures, sharp focal detail, subtle depth of field, tasteful reflections, high dynamic range, ad campaign quality, negative space for headline, no watermark, no text'
+            },
+            luxury_closeup_detail: {
+                label: 'Luxury close-up detail shot',
+                text: 'masterpiece, best quality, extreme close-up macro commercial photograph of [PRODUCT], ultra detailed texture fidelity, micro-contrast, realistic material highlights, premium lighting gradients, shallow depth of field, high-end catalog quality, no watermark, no text'
+            },
+            lifestyle_editorial: {
+                label: 'Lifestyle editorial campaign',
+                text: 'masterpiece, best quality, editorial lifestyle campaign photo featuring [PRODUCT] in authentic daily use, natural human context, cinematic composition, premium color grading, realistic skin/material detail, brand-safe high-conversion commercial look, no watermark, no text'
+            },
+            ecommerce_white_bg: {
+                label: 'E-commerce white background listing',
+                text: 'masterpiece, best quality, isolated product image of [PRODUCT] on pure white background #FFFFFF, centered composition, accurate color and shape, crisp edges, clean natural contact shadow, marketplace-ready listing quality, no watermark, no text'
+            },
+            social_paid_ad: {
+                label: 'Paid social ad creative',
+                text: 'masterpiece, best quality, thumb-stopping paid social ad visual for [PRODUCT], bold composition, high contrast, emotionally engaging lighting, conversion-focused storytelling, clear focal hierarchy, premium commercial retouching style, no watermark, no text'
+            },
+            seasonal_campaign: {
+                label: 'Seasonal campaign hero',
+                text: 'masterpiece, best quality, seasonal campaign hero image for [PRODUCT], cohesive seasonal color palette, premium commercial styling, cinematic lighting, polished product integration, ad-ready composition with copy-safe space, no watermark, no text'
+            },
+            feature_comparison: {
+                label: 'Feature/benefit comparison visual',
+                text: 'masterpiece, best quality, commercial feature-focused image for [PRODUCT], clear visual emphasis on key benefit, side-by-side style composition cues, realistic product identity, premium lighting and detail, conversion-oriented ad creative, no watermark, no text'
+            },
+        };
+
+        const IMG_OVERLAY_HELP = {
+            cinematic_banner: 'Wide cinematic ad strip with large headline + CTA button.',
+            luxury_left_panel: 'Premium left panel for editorial/luxury campaign look.',
+            flash_sale_sign: 'High-contrast promo sign with top-right sale badge.',
+            split_offer_card: 'Right-side offer card, ideal for price/discount framing.',
+            testimonial_quote: 'Quote-style social-proof bubble with CTA.',
+            feature_callouts: 'Top hero text + bottom sign chips for key benefits.',
+        };
+
+        const IMG_MAX_DIM = 3104;
+        function imgAspectPair(aspect) {
+            const map = {
+                '1:1': [1, 1],
+                '9:16': [9, 16],
+                '16:9': [16, 9],
+                '4:5': [4, 5],
+                '3:2': [3, 2],
+            };
+            return map[aspect] || [1, 1];
+        }
+        function imgFit32(v) {
+            return Math.max(256, Math.min(IMG_MAX_DIM, Math.round(v / 32) * 32));
+        }
+        function imgComputeDims(aspect, shortSide) {
+            const [rw, rh] = imgAspectPair(aspect);
+            let w = shortSide, h = shortSide;
+            if (rw >= rh) {
+                h = shortSide;
+                w = Math.round(shortSide * (rw / rh));
+            } else {
+                w = shortSide;
+                h = Math.round(shortSide * (rh / rw));
+            }
+            const peak = Math.max(w, h);
+            if (peak > IMG_MAX_DIM) {
+                const k = IMG_MAX_DIM / peak;
+                w = Math.round(w * k);
+                h = Math.round(h * k);
+            }
+            w = imgFit32(w);
+            h = imgFit32(h);
+            return { width: w, height: h };
+        }
+        function imgUpdateDimsPreview() {
+            const $ = id => document.getElementById(id);
+            const out = $('imgDimPreview');
+            if (!out) return;
+            const aspect = ($('imgAspect') && $('imgAspect').value) || '9:16';
+            const size = parseInt(($('imgSize') && $('imgSize').value) || '720', 10) || 720;
+            const snap = !!($('imgSnap') && $('imgSnap').checked);
+            const d = imgComputeDims(aspect, size);
+            out.innerHTML = 'Output size: <b>' + d.width + '×' + d.height + '</b> (ratio ' + aspect + ').'
+                + (snap ? ' Snap-to-trained is ON (final size may shift to nearest trained HiDream resolution).' : ' Exact mode is ON.');
+        }
+
         let imgMode = 'image';
+
+        function imgPromptPresetChanged() {
+            const $ = id => document.getElementById(id);
+            const key = ($('imgPromptPreset') && $('imgPromptPreset').value) || '';
+            const meta = $('imgPromptPresetMeta');
+            if (!meta) return;
+            if (!key || !IMG_PROMPT_PRESETS[key]) {
+                meta.textContent = 'Choose a starter prompt, then tweak product specifics in the main prompt box.';
+                return;
+            }
+            meta.textContent = IMG_PROMPT_PRESETS[key].label + ' preset selected. Click "Insert preset".';
+        }
+
+        function imgPromptPresetInsert() {
+            const $ = id => document.getElementById(id);
+            const key = ($('imgPromptPreset') && $('imgPromptPreset').value) || '';
+            const box = $('imgPrompt');
+            if (!box || !key || !IMG_PROMPT_PRESETS[key]) return;
+            const tpl = IMG_PROMPT_PRESETS[key].text;
+            const cur = (box.value || '').trim();
+            box.value = cur ? (cur + '\n\n' + tpl) : tpl;
+            if ($('imgStatus')) {
+                $('imgStatus').innerHTML = 'Prompt preset inserted. Replace [PRODUCT] with your product name/details.';
+                $('imgStatus').style.color = '#58a6ff';
+            }
+            box.focus();
+        }
+
+        let imgOverlayUploadDataUrl = '';
+        let imgOverlayOriginalBase = '';
+        let imgOverlayOriginalUploadDataUrl = '';
+        let imgOverlaySuppressOriginalCapture = false;
+        function imgOverlayTypeChanged() {
+            const $ = id => document.getElementById(id);
+            const key = ($('imgOverlayType') && $('imgOverlayType').value) || 'cinematic_banner';
+            if ($('imgOverlayStatus')) {
+                $('imgOverlayStatus').textContent = IMG_OVERLAY_HELP[key] || '';
+                $('imgOverlayStatus').style.color = '#8b949e';
+            }
+        }
+
+        function imgCopyText(v, maxLen) {
+            return String(v || '').replace(/\s+/g, ' ').trim().slice(0, maxLen || 999);
+        }
+
+        function imgCopySigns(v) {
+            if (Array.isArray(v)) {
+                return v.map(x => imgCopyText(x, 42)).filter(Boolean).slice(0, 6);
+            }
+            return String(v || '')
+                .split(/[,\n|;]+/)
+                .map(x => imgCopyText(x, 42))
+                .filter(Boolean)
+                .slice(0, 6);
+        }
+
+        function imgOverlayIsBlogLike(sourceUrl, details) {
+            const u = String(sourceUrl || '').toLowerCase();
+            const t = String((details && details.title) || '').toLowerCase();
+            return /\/blog|\/article|\/news|\/insights|\/guide/.test(u)
+                || /blog|article|guide|insight|how to/.test(t);
+        }
+
+        function imgLooksFeatureHeavy(text) {
+            const s = String(text || '').trim();
+            if (!s) return false;
+            const hasSpecificCount = /\b\d+\s*(bead|beads|pcs?|pieces?|pack|ml|l|oz|mm|cm|m|inch|inches|mah|w|watts?|hz|fps|gb|tb|mp)\b/i.test(s);
+            const hasFeatureCue = /\b(spec|specs|feature|features|material|capacity|dimension|size|count|model|version)\b/i.test(s);
+            const hasBenefitCue = /\b(comfort|relief|easy|easier|save|faster|feel|feels|better|confidence|calm|sleep|focus|clean|fresh|safe|safer|smooth|strong|durable|results?|enjoy|boost|protect|stress|pain)\b/i.test(s);
+            return (hasSpecificCount || hasFeatureCue) && !hasBenefitCue;
+        }
+
+        function imgBenefitFallback(kind, isBlog, idx) {
+            const i = Math.max(0, Number(idx) || 0);
+            if (kind === 'headline') {
+                const opts = isBlog
+                    ? ['Get practical results faster', 'Actionable insights you can use today', 'Turn ideas into better outcomes']
+                    : ['Feel the difference from day one', 'Designed to make everyday life easier', 'More comfort, less hassle'];
+                return opts[i % opts.length];
+            }
+            if (kind === 'subheadline') {
+                return isBlog
+                    ? 'Clear guidance that helps you make better decisions with less guesswork.'
+                    : 'Built to deliver a smoother, more comfortable experience you can feel immediately.';
+            }
+            const signOpts = isBlog
+                ? ['Actionable advice', 'Real-world examples', 'Quick wins']
+                : ['Instant comfort', 'Everyday ease', 'Trusted quality'];
+            return signOpts[i % signOpts.length];
+        }
+
+        function imgBenefitGuardText(text, kind, isBlog, idx) {
+            const maxLen = kind === 'subheadline' ? 180 : (kind === 'sign' ? 42 : 90);
+            const out = imgCopyText(text || '', maxLen);
+            if (!out) return '';
+            if (imgLooksFeatureHeavy(out)) {
+                return imgBenefitFallback(kind, !!isBlog, idx || 0);
+            }
+            return out;
+        }
+
+        function imgParseJsonLoose(text) {
+            const raw = String(text || '').trim();
+            if (!raw) return null;
+            const clean = raw
+                .replace(/^```(?:json)?/i, '')
+                .replace(/```$/i, '')
+                .trim();
+            try { return JSON.parse(clean); } catch (_) {}
+            const m = clean.match(/\{[\s\S]*\}/);
+            if (m) {
+                try { return JSON.parse(m[0]); } catch (_) {}
+            }
+            return null;
+        }
+
+        function imgOverlayFallbackCopy(details, sourceUrl) {
+            const isBlog = imgOverlayIsBlogLike(sourceUrl, details);
+            const title = imgBenefitGuardText(
+                details.product_name || details.title || '',
+                'headline',
+                isBlog,
+                0,
+            ) || (isBlog ? 'Get practical results faster' : 'Feel the difference from day one');
+            const desc = imgCopyText(details.description || details.text_excerpt || '', 180);
+            const price = imgCopyText(((details.price || '') + (details.currency ? (' ' + details.currency) : '')).trim(), 28);
+            const sub = imgBenefitGuardText(
+                desc || (isBlog ? 'Practical insights you can apply right away.' : 'A smoother, more comfortable experience every day.'),
+                'subheadline',
+                isBlog,
+                0,
+            );
+            const fallbackSigns = isBlog
+                ? ['Actionable tips', 'Expert insights', 'Updated guide']
+                : ['Instant comfort', 'Easy daily use', 'Trusted quality'];
+            return {
+                headline: isBlog ? ('Read now: ' + title) : title,
+                subheadline: sub,
+                cta: isBlog ? 'Read now' : 'Shop now',
+                badge: isBlog ? 'NEW ARTICLE' : (price ? 'LIMITED OFFER' : 'NEW'),
+                price: price,
+                signs: fallbackSigns,
+            };
+        }
+
+        function imgOverlayNormalizeCopy(raw, details, sourceUrl) {
+            const fb = imgOverlayFallbackCopy(details || {}, sourceUrl || '');
+            const o = (raw && typeof raw === 'object') ? raw : {};
+            const isBlog = imgOverlayIsBlogLike(sourceUrl, details || {});
+            const signs = imgCopySigns(o.signs || o.bullets || o.key_points || fb.signs)
+                .map((x, i) => imgBenefitGuardText(x, 'sign', isBlog, i))
+                .filter(Boolean)
+                .slice(0, 6);
+            return {
+                headline: imgBenefitGuardText(o.headline || o.title || fb.headline, 'headline', isBlog, 0),
+                subheadline: imgBenefitGuardText(o.subheadline || o.subtitle || o.description || fb.subheadline, 'subheadline', isBlog, 0),
+                cta: imgCopyText(o.cta || o.call_to_action || fb.cta, 28),
+                badge: imgCopyText(o.badge || o.ribbon || fb.badge, 34),
+                price: imgCopyText(o.price || fb.price, 28),
+                signs: signs.length ? signs : fb.signs,
+            };
+        }
+
+        function imgOverlayReadCopy() {
+            const $ = id => document.getElementById(id);
+            return {
+                overlay_type: (($('imgOverlayType') && $('imgOverlayType').value) || 'cinematic_banner'),
+                headline: imgCopyText(($('imgOverlayHeadline') && $('imgOverlayHeadline').value) || '', 90),
+                subheadline: imgCopyText(($('imgOverlaySub') && $('imgOverlaySub').value) || '', 180),
+                cta: imgCopyText(($('imgOverlayCta') && $('imgOverlayCta').value) || '', 28),
+                badge: imgCopyText(($('imgOverlayBadge') && $('imgOverlayBadge').value) || '', 34),
+                price: imgCopyText(($('imgOverlayPrice') && $('imgOverlayPrice').value) || '', 28),
+                signs: imgCopySigns(($('imgOverlaySigns') && $('imgOverlaySigns').value) || ''),
+            };
+        }
+
+        function imgOverlayAspectHint() {
+            const img = document.getElementById('imgOverlayBasePreview');
+            const w = (img && img.naturalWidth) ? Number(img.naturalWidth) : 0;
+            const h = (img && img.naturalHeight) ? Number(img.naturalHeight) : 0;
+            if (w > 0 && h > 0) {
+                if (w >= h * 1.12) return { kind: 'landscape', width: w, height: h };
+                if (h >= w * 1.12) return { kind: 'portrait', width: w, height: h };
+                return { kind: 'square', width: w, height: h };
+            }
+            return { kind: 'unknown', width: 0, height: 0 };
+        }
+
+        function imgOverlayHeuristicArrange(current) {
+            const dims = imgOverlayAspectHint();
+            const out = {
+                overlay_type: current.overlay_type || 'cinematic_banner',
+                headline: imgCopyText(current.headline || '', 72),
+                subheadline: imgCopyText(current.subheadline || '', 132),
+                cta: imgCopyText(current.cta || 'Shop now', 24),
+                badge: imgCopyText(current.badge || '', 24),
+                price: imgCopyText(current.price || '', 20),
+                signs: imgCopySigns(current.signs || []),
+            };
+            const signsN = out.signs.length;
+            const headLen = (out.headline || '').length;
+            const subLen = (out.subheadline || '').length;
+            if (signsN >= 3) out.overlay_type = 'feature_callouts';
+            else if (out.price) out.overlay_type = (dims.kind === 'portrait') ? 'split_offer_card' : 'luxury_left_panel';
+            else if (headLen > 54 || subLen > 110) out.overlay_type = (dims.kind === 'portrait') ? 'luxury_left_panel' : 'cinematic_banner';
+            else if (out.badge) out.overlay_type = 'flash_sale_sign';
+            return out;
+        }
+
+        function imgOverlayNormalizeArrangement(raw, current) {
+            const o = (raw && typeof raw === 'object') ? raw : {};
+            const type = String(o.overlay_type || o.style || current.overlay_type || 'cinematic_banner').trim();
+            const safeType = IMG_OVERLAY_HELP[type] ? type : (current.overlay_type || 'cinematic_banner');
+            return {
+                overlay_type: safeType,
+                headline: imgCopyText(o.headline || o.title || current.headline, 90),
+                subheadline: imgCopyText(o.subheadline || o.subtitle || o.description || current.subheadline, 180),
+                cta: imgCopyText(o.cta || o.call_to_action || current.cta || 'Shop now', 28),
+                badge: imgCopyText(o.badge || o.ribbon || current.badge, 34),
+                price: imgCopyText(o.price || current.price, 28),
+                signs: imgCopySigns(o.signs || o.bullets || o.key_points || current.signs),
+            };
+        }
+
+        function imgOverlayApplyArrangement(arr) {
+            const $ = id => document.getElementById(id);
+            const t = String(arr.overlay_type || '').trim();
+            if (t && $('imgOverlayType') && IMG_OVERLAY_HELP[t]) {
+                $('imgOverlayType').value = t;
+                imgOverlayTypeChanged();
+            }
+            imgOverlayApplyCopy(arr);
+        }
+
+        async function imgOverlayArrangeWithLlm(silentStatus) {
+            const $ = id => document.getElementById(id);
+            const status = $('imgOverlayStatus');
+            const btn = $('imgOverlayAutoArrange');
+            const current = imgOverlayReadCopy();
+            if (!current.headline) {
+                throw new Error('Add a headline first so the LLM can arrange Stage 2 layout.');
+            }
+            if (btn) btn.disabled = true;
+            if (!silentStatus && status) {
+                status.textContent = 'Using local LLM to arrange Stage 2 layout…';
+                status.style.color = '#58a6ff';
+            }
+            try {
+                const dims = imgOverlayAspectHint();
+                const sourceMeta = (($('imgOverlayUrlMeta') && $('imgOverlayUrlMeta').textContent) || '').trim();
+                const systemPrompt = [
+                    'You are a senior direct-response art director.',
+                    'Re-arrange ad overlay copy so it fits cleanly and looks premium.',
+                    'Return exactly one JSON object with keys:',
+                    'overlay_type, headline, subheadline, cta, badge, price, signs.',
+                    'overlay_type must be one of: cinematic_banner, luxury_left_panel, flash_sale_sign, split_offer_card, testimonial_quote, feature_callouts.',
+                    'Keep copy concise and readable: headline <= 90 chars, subheadline <= 180, cta <= 28, badge <= 34, price <= 28, signs array up to 6 short strings.',
+                    'Benefits-first rule: translate feature-heavy phrasing into user benefits; do not keep raw specs unless it is price.',
+                    'No markdown. No prose outside JSON.',
+                ].join(' ');
+                const userPrompt = [
+                    'Arrange this Stage 2 overlay for best visual placement and hierarchy.',
+                    'Image orientation: ' + dims.kind + (dims.width ? (' (' + dims.width + 'x' + dims.height + ')') : ''),
+                    'Current fields JSON:',
+                    JSON.stringify(current),
+                    sourceMeta ? ('Source context: ' + sourceMeta) : '',
+                    'Choose the best overlay_type for the copy density and format the lines so they fit cleanly.',
+                ].filter(Boolean).join('\n');
+                const key = imgChatApiKey();
+                const model = imgCurrentModel();
+                const headers = { 'Content-Type': 'application/json' };
+                if (key) headers.Authorization = 'Bearer ' + key;
+                const body = {
+                    messages: [
+                        { role: 'system', content: systemPrompt },
+                        { role: 'user', content: userPrompt },
+                    ],
+                    stream: false,
+                    temperature: 0.25,
+                    max_tokens: 280,
+                    chat_template_kwargs: { enable_thinking: false },
+                };
+                if (model) body.model = model;
+                const r = await fetch('/v1/chat/completions', {
+                    method: 'POST',
+                    headers,
+                    body: JSON.stringify(body),
+                });
+                const d = await r.json();
+                if (!r.ok || d.error) {
+                    throw new Error(d.error || ('Layout generation failed (HTTP ' + r.status + ')'));
+                }
+                const raw = imgExtractAssistantText(d.choices && d.choices[0]).trim();
+                const parsed = imgParseJsonLoose(raw);
+                const arranged = parsed
+                    ? imgOverlayNormalizeArrangement(parsed, current)
+                    : imgOverlayHeuristicArrange(current);
+                imgOverlayApplyArrangement(arranged);
+                if (!silentStatus && status) {
+                    status.textContent = parsed
+                        ? ('Layout optimized by local LLM (' + arranged.overlay_type + ').')
+                        : ('Layout optimized with heuristic fallback (' + arranged.overlay_type + ').');
+                    status.style.color = '#3fb950';
+                }
+                return arranged;
+            } finally {
+                if (btn) btn.disabled = false;
+            }
+        }
+
+        function imgOverlayApplyCopy(copy) {
+            const $ = id => document.getElementById(id);
+            const signs = (copy.signs || []).join(', ');
+            if ($('imgOverlayHeadline')) $('imgOverlayHeadline').value = copy.headline || '';
+            if ($('imgOverlaySub')) $('imgOverlaySub').value = copy.subheadline || '';
+            if ($('imgOverlayCta')) $('imgOverlayCta').value = copy.cta || '';
+            if ($('imgOverlayBadge')) $('imgOverlayBadge').value = copy.badge || '';
+            if ($('imgOverlayPrice')) $('imgOverlayPrice').value = copy.price || '';
+            if ($('imgOverlaySigns')) $('imgOverlaySigns').value = signs;
+            // Keep cloud-native text fields in sync so Nano can render full CTA/sign copy.
+            if ($('imgNanoHeadline')) $('imgNanoHeadline').value = copy.headline || '';
+            if ($('imgNanoSub')) $('imgNanoSub').value = copy.subheadline || '';
+            if ($('imgNanoCta')) $('imgNanoCta').value = copy.cta || '';
+            const nanoSigns = [copy.badge || '', copy.price || '', ...(copy.signs || [])]
+                .map(x => String(x || '').trim())
+                .filter(Boolean)
+                .slice(0, 8)
+                .join(', ');
+            if ($('imgNanoSigns')) $('imgNanoSigns').value = nanoSigns;
+        }
+
+        async function imgOverlayGenerateFromUrl() {
+            const $ = id => document.getElementById(id);
+            const status = $('imgOverlayStatus');
+            const btn = $('imgOverlayGenFromUrl');
+            const sourceUrl = imgCopyText(($('imgOverlayUrl') && $('imgOverlayUrl').value) || '', 900);
+            if (!sourceUrl) {
+                if (status) { status.textContent = 'Enter a product/blog URL first.'; status.style.color = '#f85149'; }
+                return;
+            }
+            if (btn) btn.disabled = true;
+            if (status) { status.textContent = 'Extracting URL details and generating ad lines…'; status.style.color = '#58a6ff'; }
+            try {
+                const details = await imgExtractUrlDetails(sourceUrl);
+                const overlayType = ($('imgOverlayType') && $('imgOverlayType').value) || 'cinematic_banner';
+                const systemPrompt = [
+                    'You are a senior direct-response ad copywriter.',
+                    'Return exactly one JSON object with keys:',
+                    'headline, subheadline, cta, badge, price, signs.',
+                    'Use concise, conversion-focused, benefits-first copy.',
+                    'Every line must emphasize customer outcomes, feelings, or problem solved.',
+                    'Do NOT lead with product specs/features (counts, dimensions, materials, model numbers).',
+                    'If source text includes features (e.g. "100 beads"), translate to the customer benefit instead.',
+                    'signs must be an array of up to 6 short strings.',
+                    'No markdown. No prose outside JSON.',
+                ].join(' ');
+                const userPrompt = [
+                    'Generate editable ad copy lines for an image overlay.',
+                    'Overlay style: ' + overlayType,
+                    'Source URL: ' + (details.final_url || details.url || sourceUrl),
+                    'Page title: ' + (details.title || ''),
+                    'Product name: ' + (details.product_name || ''),
+                    'Brand: ' + (details.brand || ''),
+                    'Price: ' + ((details.price || '') + (details.currency ? (' ' + details.currency) : '')),
+                    'Description: ' + (details.description || ''),
+                    'Page text excerpt: ' + (details.text_excerpt || ''),
+                    'If this is a blog/article, set cta like "Read now". If this is a product page, set cta like "Shop now".',
+                    'Hard rule: avoid raw spec statements and numbers unless in the price field.',
+                ].join('\n');
+                const key = imgChatApiKey();
+                const model = imgCurrentModel();
+                const headers = { 'Content-Type': 'application/json' };
+                if (key) headers.Authorization = 'Bearer ' + key;
+                const body = {
+                    messages: [
+                        { role: 'system', content: systemPrompt },
+                        { role: 'user', content: userPrompt },
+                    ],
+                    stream: false,
+                    temperature: 0.35,
+                    max_tokens: 280,
+                    chat_template_kwargs: { enable_thinking: false },
+                };
+                if (model) body.model = model;
+                const r = await fetch('/v1/chat/completions', {
+                    method: 'POST',
+                    headers,
+                    body: JSON.stringify(body),
+                });
+                const d = await r.json();
+                if (!r.ok || d.error) {
+                    throw new Error(d.error || ('Ad copy generation failed (HTTP ' + r.status + ')'));
+                }
+                const raw = imgExtractAssistantText(d.choices && d.choices[0]).trim();
+                const parsed = imgParseJsonLoose(raw);
+                const copy = imgOverlayNormalizeCopy(parsed, details, sourceUrl);
+                imgOverlayApplyCopy(copy);
+                if ($('imgOverlayUrlMeta')) {
+                    const src = imgCopyText(details.product_name || details.title || details.final_url || sourceUrl, 120);
+                    $('imgOverlayUrlMeta').textContent = 'Lines generated from: ' + src;
+                }
+                if (status) {
+                    status.textContent = parsed
+                        ? 'Ad lines generated. You can edit them before applying overlay.'
+                        : 'Ad lines generated with fallback copy. You can edit before applying overlay.';
+                    status.style.color = '#3fb950';
+                }
+            } catch (e) {
+                if (status) { status.textContent = 'Ad-line generation error: ' + e.message; status.style.color = '#f85149'; }
+            } finally {
+                if (btn) btn.disabled = false;
+            }
+        }
+
+        function imgOverlaySetPreview(src) {
+            const $ = id => document.getElementById(id);
+            const wrap = $('imgOverlayBasePreviewWrap');
+            const img = $('imgOverlayBasePreview');
+            if (!wrap || !img) return;
+            if (src) {
+                img.src = src;
+                wrap.style.display = 'block';
+            } else {
+                img.removeAttribute('src');
+                wrap.style.display = 'none';
+            }
+        }
+
+        function imgOverlayCaptureOriginal(source) {
+            if (imgOverlaySuppressOriginalCapture) return;
+            if (source && source.baseName) {
+                imgOverlayOriginalBase = source.baseName;
+                imgOverlayOriginalUploadDataUrl = '';
+                return;
+            }
+            if (source && source.uploadDataUrl) {
+                imgOverlayOriginalBase = '';
+                imgOverlayOriginalUploadDataUrl = source.uploadDataUrl;
+                return;
+            }
+            if (imgOverlayUploadDataUrl) {
+                imgOverlayOriginalBase = '';
+                imgOverlayOriginalUploadDataUrl = imgOverlayUploadDataUrl;
+            }
+        }
+
+        function imgOverlayResetToOriginal() {
+            const $ = id => document.getElementById(id);
+            if (imgOverlayOriginalBase) {
+                imgOverlaySuppressOriginalCapture = true;
+                if ($('imgOverlayBase')) $('imgOverlayBase').value = imgOverlayOriginalBase;
+                if ($('imgOverlayUpload')) $('imgOverlayUpload').value = '';
+                imgOverlayUploadDataUrl = '';
+                imgOverlayBaseChanged();
+                imgOverlaySuppressOriginalCapture = false;
+            } else if (imgOverlayOriginalUploadDataUrl) {
+                imgOverlaySuppressOriginalCapture = true;
+                if ($('imgOverlayBase')) $('imgOverlayBase').value = '';
+                if ($('imgOverlayUpload')) $('imgOverlayUpload').value = '';
+                imgOverlayUploadDataUrl = imgOverlayOriginalUploadDataUrl;
+                imgOverlayBaseChanged();
+                imgOverlaySuppressOriginalCapture = false;
+            } else {
+                if ($('imgOverlayStatus')) {
+                    $('imgOverlayStatus').textContent = 'No original base captured yet. Pick or upload a base image first.';
+                    $('imgOverlayStatus').style.color = '#d29922';
+                }
+                return;
+            }
+            if ($('imgOverlayResult')) $('imgOverlayResult').innerHTML = '';
+            if ($('imgOverlayStatus')) {
+                $('imgOverlayStatus').textContent = 'Reset to original base image. Try another overlay option.';
+                $('imgOverlayStatus').style.color = '#3fb950';
+            }
+        }
+
+        function imgOverlayBaseChanged() {
+            const $ = id => document.getElementById(id);
+            const name = ($('imgOverlayBase') && $('imgOverlayBase').value) || '';
+            if (name) {
+                if ($('imgOverlayUpload')) $('imgOverlayUpload').value = '';
+                imgOverlayUploadDataUrl = '';
+                imgOverlaySetPreview(IMAGE_URL + '/files/' + encodeURIComponent(name));
+                imgOverlayCaptureOriginal({ baseName: name });
+                return;
+            }
+            if (imgOverlayUploadDataUrl) {
+                imgOverlaySetPreview(imgOverlayUploadDataUrl);
+                imgOverlayCaptureOriginal({ uploadDataUrl: imgOverlayUploadDataUrl });
+            } else {
+                imgOverlaySetPreview('');
+            }
+        }
+
+        async function imgReadFileAsDataUrl(file) {
+            return await new Promise((resolve, reject) => {
+                const fr = new FileReader();
+                fr.onload = () => resolve(String(fr.result || ''));
+                fr.onerror = () => reject(new Error('failed to read image file'));
+                fr.readAsDataURL(file);
+            });
+        }
+
+        async function imgOverlayUploadChanged() {
+            const $ = id => document.getElementById(id);
+            const up = $('imgOverlayUpload') && $('imgOverlayUpload').files && $('imgOverlayUpload').files[0];
+            if (!up) {
+                imgOverlayUploadDataUrl = '';
+                imgOverlayBaseChanged();
+                return;
+            }
+            try {
+                imgOverlayUploadDataUrl = await imgReadFileAsDataUrl(up);
+                if ($('imgOverlayBase')) $('imgOverlayBase').value = '';
+                imgOverlaySetPreview(imgOverlayUploadDataUrl);
+                imgOverlayCaptureOriginal({ uploadDataUrl: imgOverlayUploadDataUrl });
+            } catch (e) {
+                if ($('imgOverlayStatus')) {
+                    $('imgOverlayStatus').textContent = 'Could not preview uploaded base image: ' + e.message;
+                    $('imgOverlayStatus').style.color = '#f85149';
+                }
+            }
+        }
+
+        async function imgRefreshLibrary(preferredName) {
+            const $ = id => document.getElementById(id);
+            const sel = $('imgOverlayBase');
+            if (!sel) return;
+            const prev = preferredName || sel.value || '';
+            try {
+                const r = await fetch(IMAGE_URL + '/library?limit=180');
+                const d = await r.json();
+                const items = Array.isArray(d.items) ? d.items : [];
+                sel.innerHTML = '<option value="">— choose saved image —</option>' +
+                    items.map(it => {
+                        const label = (it.kind === 'overlay' ? '🧩 ' : '🖼 ') + it.filename;
+                        return '<option value="' + it.filename + '">' + label + '</option>';
+                    }).join('');
+                if (prev && items.some(it => it.filename === prev)) {
+                    sel.value = prev;
+                }
+            } catch (e) {
+                if ($('imgOverlayStatus')) {
+                    $('imgOverlayStatus').textContent = 'Could not refresh image library from :8400.';
+                    $('imgOverlayStatus').style.color = '#d29922';
+                }
+            }
+            imgOverlayBaseChanged();
+        }
+
+        async function imgApplyOverlay() {
+            const $ = id => document.getElementById(id);
+            const btn = $('imgOverlayApply');
+            const status = $('imgOverlayStatus');
+            const baseName = ($('imgOverlayBase') && $('imgOverlayBase').value) || '';
+            const up = $('imgOverlayUpload') && $('imgOverlayUpload').files && $('imgOverlayUpload').files[0];
+            const autoLlm = !!($('imgOverlayAutoLlm') && $('imgOverlayAutoLlm').checked);
+            let overlayType = ($('imgOverlayType') && $('imgOverlayType').value) || 'cinematic_banner';
+            let headline = (($('imgOverlayHeadline') && $('imgOverlayHeadline').value) || '').trim();
+            if (!headline) {
+                if (status) { status.textContent = 'Headline is required for overlay.'; status.style.color = '#f85149'; }
+                return;
+            }
+            if (!baseName && !up && !imgOverlayUploadDataUrl) {
+                if (status) { status.textContent = 'Choose a saved base image or upload one.'; status.style.color = '#f85149'; }
+                return;
+            }
+            if (btn) btn.disabled = true;
+            if (status) { status.textContent = autoLlm ? 'Optimizing layout with local LLM…' : 'Applying overlay…'; status.style.color = '#58a6ff'; }
+            try {
+                if (autoLlm) {
+                    try {
+                        await imgOverlayArrangeWithLlm(true);
+                    } catch (e) {
+                        if (status) {
+                            status.textContent = 'LLM layout unavailable (' + e.message + '). Applying with current fields…';
+                            status.style.color = '#d29922';
+                        }
+                    }
+                }
+                overlayType = ($('imgOverlayType') && $('imgOverlayType').value) || overlayType;
+                headline = (($('imgOverlayHeadline') && $('imgOverlayHeadline').value) || '').trim();
+                if (!headline) {
+                    throw new Error('Headline is required for overlay.');
+                }
+                if (status) { status.textContent = 'Applying overlay…'; status.style.color = '#58a6ff'; }
+                if (up) {
+                    imgOverlayUploadDataUrl = await imgReadFileAsDataUrl(up);
+                }
+                const sourceData = up ? imgOverlayUploadDataUrl : (imgOverlayUploadDataUrl || '');
+                const payload = {
+                    source_filename: up ? '' : (baseName || ''),
+                    source_data_url: sourceData,
+                    overlay_type: overlayType,
+                    headline: headline,
+                    subheadline: (($('imgOverlaySub') && $('imgOverlaySub').value) || '').trim(),
+                    cta: (($('imgOverlayCta') && $('imgOverlayCta').value) || '').trim(),
+                    badge: (($('imgOverlayBadge') && $('imgOverlayBadge').value) || '').trim(),
+                    price: (($('imgOverlayPrice') && $('imgOverlayPrice').value) || '').trim(),
+                    signs: (($('imgOverlaySigns') && $('imgOverlaySigns').value) || '').trim(),
+                };
+                const r = await fetch(IMAGE_URL + '/overlay', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload),
+                });
+                const d = await r.json();
+                if (!r.ok || !d.ok || !d.result) {
+                    throw new Error(d.error || ('HTTP ' + r.status));
+                }
+                const res = d.result;
+                const url = IMAGE_URL + res.url;
+                if (status) {
+                    status.textContent = 'Overlay applied — ' + res.width + '×' + res.height + ' (' + res.overlay_type + ').';
+                    status.style.color = '#3fb950';
+                }
+                if ($('imgOverlayResult')) {
+                    $('imgOverlayResult').innerHTML =
+                        '<img src="' + url + '" style="max-width:100%;border-radius:10px;border:1px solid #30363d">' +
+                        '<div style="margin-top:8px;display:flex;gap:8px">' +
+                          '<a href="' + url + '" download="' + res.filename + '" style="background:#21262d;border:1px solid #30363d;border-radius:8px;color:#e6edf3;padding:7px 12px;text-decoration:none;font-size:12px">⬇ Download overlay</a>' +
+                          '<a href="' + url + '" target="_blank" style="background:#21262d;border:1px solid #30363d;border-radius:8px;color:#e6edf3;padding:7px 12px;text-decoration:none;font-size:12px">↗ Open full size</a>' +
+                        '</div>';
+                }
+                imgOverlaySuppressOriginalCapture = true;
+                await imgRefreshLibrary(res.filename);
+                if ($('imgOverlayBase')) $('imgOverlayBase').value = res.filename;
+                imgOverlayBaseChanged();
+                imgOverlaySuppressOriginalCapture = false;
+            } catch (e) {
+                if (status) { status.textContent = 'Overlay error: ' + e.message; status.style.color = '#f85149'; }
+            } finally {
+                imgOverlaySuppressOriginalCapture = false;
+                if (btn) btn.disabled = false;
+            }
+        }
+
+        let imgHiRefStore = [];
+        function imgHiRefKey(f) {
+            return [f && f.name, f && f.size, f && f.lastModified].join('|');
+        }
+        function imgHiRefRender() {
+            const $ = id => document.getElementById(id);
+            const limit = imgCurrentRefLimit();
+            const eng = (($('imgEngine') && $('imgEngine').value) || 'hidream');
+            const kept = imgHiRefStore.slice(0, limit);
+            if ($('imgHiRefLabel')) {
+                $('imgHiRefLabel').textContent = eng === 'nano_banana_2'
+                    ? ('Nano Banana reference image(s) (optional, up to ' + limit + ')')
+                    : ('HiDream reference image(s) (optional, up to ' + limit + ')');
+            }
+            if ($('imgHiRefTip')) {
+                $('imgHiRefTip').textContent = 'Tip: you can pick files multiple times — selections will accumulate up to ' + limit + '.';
+            }
+            if ($('imgHiRefMeta')) {
+                $('imgHiRefMeta').textContent = kept.length
+                    ? (kept.length + ' reference image' + (kept.length > 1 ? 's' : '') + ' selected.')
+                    : 'No references selected (pure text-to-image).';
+            }
+            const list = $('imgHiRefList');
+            if (list) {
+                list.innerHTML = kept.map((f, idx) =>
+                    '<span style="display:inline-flex;align-items:center;gap:6px;background:#161b22;border:1px solid #30363d;border-radius:999px;padding:4px 8px;font-size:11px;color:#c9d1d9">' +
+                      '<span>' + String(f.name || ('ref-' + (idx + 1))).replace(/[&<>"]/g, c => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;' }[c])) + '</span>' +
+                      '<button type="button" data-ref-remove="' + idx + '" style="background:transparent;border:none;color:#8b949e;cursor:pointer;font-size:12px;line-height:1">✕</button>' +
+                    '</span>'
+                ).join('');
+                list.querySelectorAll('button[data-ref-remove]').forEach(btn => {
+                    btn.onclick = () => {
+                        const i = parseInt(btn.getAttribute('data-ref-remove') || '-1', 10);
+                        if (i >= 0) {
+                            imgHiRefStore.splice(i, 1);
+                            imgHiRefRender();
+                        }
+                    };
+                });
+            }
+            if ($('imgHiRefClear')) $('imgHiRefClear').disabled = kept.length === 0;
+        }
+        function imgHiRefChanged() {
+            const $ = id => document.getElementById(id);
+            const inp = $('imgHiRefFiles');
+            const picked = Array.from(((inp && inp.files) || []));
+            const limit = imgCurrentRefLimit();
+            const eng = (($('imgEngine') && $('imgEngine').value) || 'hidream');
+            if (picked.length) {
+                const have = new Set(imgHiRefStore.map(imgHiRefKey));
+                for (const f of picked) {
+                    const k = imgHiRefKey(f);
+                    if (have.has(k)) continue;
+                    if (imgHiRefStore.length >= limit) {
+                        const engineName = eng === 'nano_banana_2' ? 'Nano Banana' : 'HiDream';
+                        $('imgStatus').innerHTML = engineName + ' supports up to ' + limit + ' reference images.';
+                        $('imgStatus').style.color = '#d29922';
+                        break;
+                    }
+                    imgHiRefStore.push(f);
+                    have.add(k);
+                }
+                if (inp) inp.value = '';
+            }
+            imgHiRefRender();
+        }
+        function imgHiRefClear() {
+            const $ = id => document.getElementById(id);
+            imgHiRefStore = [];
+            if ($('imgHiRefFiles')) $('imgHiRefFiles').value = '';
+            imgHiRefRender();
+        }
+
+        function imgCurrentRefLimit() {
+            const eng = (document.getElementById('imgEngine') && document.getElementById('imgEngine').value) || 'hidream';
+            return eng === 'nano_banana_2' ? 14 : 3;
+        }
+
+        function imgBuildNanoTextBlock() {
+            const $ = id => document.getElementById(id);
+            const pick = (primaryId, fallbackId) => {
+                const pv = (($(primaryId) && $(primaryId).value) || '').trim();
+                if (pv) return pv;
+                return (($(fallbackId) && $(fallbackId).value) || '').trim();
+            };
+            const h = imgCopyText(pick('imgOverlayHeadline', 'imgNanoHeadline'), 90);
+            const s = imgCopyText(pick('imgOverlaySub', 'imgNanoSub'), 180);
+            const c = imgCopyText(pick('imgOverlayCta', 'imgNanoCta'), 28);
+            const badge = imgCopyText((($('imgOverlayBadge') && $('imgOverlayBadge').value) || '').trim(), 34);
+            const price = imgCopyText((($('imgOverlayPrice') && $('imgOverlayPrice').value) || '').trim(), 28);
+            const signs = imgCopySigns(pick('imgOverlaySigns', 'imgNanoSigns'));
+            const allSigns = [badge, price, ...signs].filter(Boolean).slice(0, 8);
+            if (!h && !s && !c && allSigns.length === 0) return '';
+            const bits = [];
+            if (h) bits.push('Headline text: "' + h + '".');
+            if (s) bits.push('Subheadline text: "' + s + '".');
+            if (c) bits.push('CTA text: "' + c + '".');
+            if (allSigns.length) bits.push('Additional sign/badge text: ' + allSigns.map(x => '"' + x + '"').join(', ') + '.');
+            return [
+                'Render the following ad copy in-image with highly legible, professional typography. Keep spelling exact, spacing clean, no gibberish text, and place text in clear safe zones with strong contrast.',
+                'Use clear hierarchy: headline most prominent, subheadline secondary, CTA short and button-like.',
+                bits.join(' '),
+            ].join(' ');
+        }
+
+        function imgBuildPrompt(basePrompt, engine, imageType, refCount) {
+            let p = String(basePrompt || '').trim();
+            if (engine === 'nano_banana_2') {
+                const textBlock = imgBuildNanoTextBlock();
+                const refsLine = refCount > 0
+                    ? 'Use provided reference image(s) to preserve product/brand identity, logos, and material/color fidelity.'
+                    : '';
+                if (refsLine && p.indexOf(refsLine) === -1) p += '\n\n' + refsLine;
+                if (textBlock && p.indexOf('Render the following ad copy in-image') === -1) p += '\n\n' + textBlock;
+                return p.trim();
+            }
+            if (engine !== 'hidream') return p;
+            const add = IMG_TYPE_PROMPTS[imageType] || '';
+            const refsLine = refCount > 0
+                ? 'Use the provided reference image(s) as source identity. Preserve product shape, branding marks, logos, and key material/color cues unless explicitly changed.'
+                : 'Prioritize realistic product identity and commercially accurate details.';
+            if (add && p.indexOf(add) === -1) p += '\n\n' + add;
+            if (refsLine && p.indexOf(refsLine) === -1) p += '\n\n' + refsLine;
+            return p.trim();
+        }
+
+        function imgChatApiKey() {
+            return localStorage.getItem('omlx_chat_api_key') || '';
+        }
+
+        function imgCurrentModel() {
+            const sel = document.querySelector('select[x-model="currentModel"]');
+            return (sel && sel.value) ? sel.value : '';
+        }
+
+        function imgExtractAssistantText(choice) {
+            if (!choice || typeof choice !== 'object') return '';
+            const msg = choice.message || {};
+            const c = msg.content;
+            if (typeof c === 'string' && c.trim()) return c.trim();
+            if (Array.isArray(c)) {
+                const text = c
+                    .map(part => {
+                        if (!part) return '';
+                        if (typeof part === 'string') return part;
+                        if (typeof part.text === 'string') return part.text;
+                        if (typeof part.content === 'string') return part.content;
+                        if (typeof part.value === 'string') return part.value;
+                        return '';
+                    })
+                    .join('\n')
+                    .trim();
+                if (text) return text;
+            }
+            if (typeof msg.reasoning_content === 'string' && msg.reasoning_content.trim()) {
+                return msg.reasoning_content.trim();
+            }
+            if (typeof choice.text === 'string' && choice.text.trim()) {
+                return choice.text.trim();
+            }
+            return '';
+        }
+
+        function imgComposeFallbackPrompt(details, params) {
+            const preset = IMG_PROMPT_PRESETS[params.presetKey] || null;
+            const product = details.product_name || details.title || 'the product';
+            const brand = details.brand ? (' by ' + details.brand) : '';
+            const desc = details.description || '';
+            const excerpt = (details.text_excerpt || '').slice(0, 700);
+            const notes = (params.prompt || '').trim();
+            const typeGuide = IMG_TYPE_PROMPTS[params.imageType] || '';
+            const refsGuide = params.refCount > 0
+                ? 'Use the provided reference image(s) to preserve exact product identity, logo placement, and material/color fidelity.'
+                : 'Maintain realistic and commercially accurate product identity.';
+            const textGuide = params.engine === 'nano_banana_2'
+                ? 'Design composition with clean, high-contrast text-safe zones for in-image headline, CTA, and sign copy.'
+                : 'No watermark, no text overlay.';
+            return [
+                'masterpiece, best quality, ultra-detailed photorealistic commercial product marketing image.',
+                'Feature ' + product + brand + '.',
+                desc ? ('Product context: ' + desc) : '',
+                preset ? ('Style baseline: ' + preset.text) : '',
+                typeGuide,
+                refsGuide,
+                notes ? ('Additional direction: ' + notes) : '',
+                excerpt ? ('Page details: ' + excerpt) : '',
+                'Premium lighting, clean composition, ad-ready framing, realistic textures/materials, accurate branding, sharp subject focus.',
+                textGuide,
+            ].filter(Boolean).join(' ');
+        }
+
+        async function imgExtractUrlDetails(url) {
+            const r = await fetch('/admin/api/url/extract', {
+                method: 'POST',
+                credentials: 'same-origin',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ url }),
+            });
+            const d = await r.json();
+            if (!r.ok || d.error) {
+                throw new Error(d.detail || d.error || ('URL extraction failed (HTTP ' + r.status + ')'));
+            }
+            return d;
+        }
+
+        async function imgSynthesizePromptFromUrl(params) {
+            const {
+                url, prompt, engine, imageType, presetKey, refCount, width, height, steps, seed,
+            } = params;
+            const details = await imgExtractUrlDetails(url);
+            const preset = IMG_PROMPT_PRESETS[presetKey] || null;
+            const textRule = engine === 'nano_banana_2'
+                ? '- This run should support native in-image ad copy (headline/subheadline/CTA/signs): compose clear text-safe zones with strong contrast and uncluttered surfaces.'
+                : '- Avoid adding text overlays/watermarks in-image.';
+            const systemPrompt = [
+                'You are an expert commercial creative director and prompt engineer for product image generation.',
+                'Write exactly one final image-generation prompt string for a diffusion model.',
+                'The prompt must be concrete, visual, photorealistic, conversion-focused, and product-accurate.',
+                'Return only the prompt text. No markdown. No explanation. No labels.',
+            ].join(' ');
+            const userPrompt = [
+                'Build a single premium marketing image prompt using the extracted product page details.',
+                '',
+                'Requirements:',
+                '- Preserve product identity, branding cues, shape, and materials from the page details.',
+                '- Use high-end commercial photography language.',
+                '- Mention composition, lighting, camera/framing, realism, and quality.',
+                '- Keep it concise but detailed (about 90-180 words).',
+                textRule,
+                '',
+                'Selected controls:',
+                '- engine: ' + engine,
+                '- marketing_image_type: ' + imageType,
+                '- prompt_preset_key: ' + (presetKey || 'none'),
+                '- prompt_preset_text: ' + (preset ? preset.text : '(none selected)'),
+                '- output_size: ' + width + 'x' + height,
+                '- steps: ' + steps,
+                '- seed: ' + seed,
+                '- reference_images_count: ' + refCount,
+                '- user_notes_prompt: ' + (prompt || '(none)'),
+                '',
+                'Extracted product details:',
+                '- source_url: ' + (details.final_url || details.url || url),
+                '- page_title: ' + (details.title || ''),
+                '- product_name: ' + (details.product_name || ''),
+                '- brand: ' + (details.brand || ''),
+                '- price: ' + ((details.price || '') + (details.currency ? (' ' + details.currency) : '')),
+                '- meta_description: ' + (details.description || ''),
+                '- page_text_excerpt: ' + (details.text_excerpt || ''),
+            ].join('\n');
+
+            const key = imgChatApiKey();
+            const model = imgCurrentModel();
+            const headers = { 'Content-Type': 'application/json' };
+            if (key) headers.Authorization = 'Bearer ' + key;
+            const body = {
+                messages: [
+                    { role: 'system', content: systemPrompt },
+                    { role: 'user', content: userPrompt },
+                ],
+                stream: false,
+                temperature: 0.3,
+                max_tokens: 320,
+                chat_template_kwargs: { enable_thinking: false },
+            };
+            if (model) body.model = model;
+
+            const r = await fetch('/v1/chat/completions', {
+                method: 'POST',
+                headers,
+                body: JSON.stringify(body),
+            });
+            const d = await r.json();
+            if (!r.ok || d.error) {
+                throw new Error(d.error || ('Prompt synthesis failed (HTTP ' + r.status + ')'));
+            }
+            const text = imgExtractAssistantText(d.choices && d.choices[0]).trim();
+            if (text) return { prompt: text, details, fallback: false };
+            return {
+                prompt: imgComposeFallbackPrompt(details, params),
+                details,
+                fallback: true,
+            };
+        }
+
         function vidChainNote() {
             const $ = id => document.getElementById(id);
             const note = $('vidChainNote');
@@ -7168,6 +8923,12 @@
             imgMode = (mode === 'video') ? 'video' : 'image';
             const $ = id => document.getElementById(id);
             const isVid = imgMode === 'video';
+            if ($('imgUrlWrap')) $('imgUrlWrap').style.display = isVid ? 'none' : 'block';
+            if ($('imgOverlayWrap')) $('imgOverlayWrap').style.display = isVid ? 'none' : 'block';
+            if ($('imgPromptPresetWrap')) $('imgPromptPresetWrap').style.display = isVid ? 'none' : 'block';
+            if ($('imgTypeWrap')) $('imgTypeWrap').style.display = isVid ? 'none' : 'block';
+            if ($('imgDimPreview')) $('imgDimPreview').style.display = isVid ? 'none' : 'block';
+            if ($('imgHiRefWrap')) $('imgHiRefWrap').style.display = isVid ? 'none' : $('imgHiRefWrap').style.display;
             if ($('imgImageControls')) $('imgImageControls').style.display = isVid ? 'none' : 'flex';
             if ($('imgVideoControls')) $('imgVideoControls').style.display = isVid ? 'block' : 'none';
             // segmented button styling
@@ -7181,8 +8942,10 @@
             if (isVid) {
                 vidEngineChanged();
             } else {
-                if ($('imgRefLabel')) $('imgRefLabel').innerHTML = 'Reference image (required for Kontext)';
+                if ($('imgRefLabel')) $('imgRefLabel').innerHTML = 'Kontext reference image (required)';
                 imgEngineChanged();
+                imgHiRefChanged();
+                imgUpdateDimsPreview();
             }
             imgPollStats();
         }
@@ -7384,31 +9147,58 @@
 
         function imgEngineChanged() {
             const $ = id => document.getElementById(id);
-            const isKontext = $('imgEngine') && $('imgEngine').value === 'kontext';
+            const engine = ($('imgEngine') && $('imgEngine').value) || 'hidream';
+            const isKontext = engine === 'kontext';
+            const isNano = engine === 'nano_banana_2';
+            const isHiDream = engine === 'hidream';
             if ($('imgRefWrap')) $('imgRefWrap').style.display = isKontext ? 'block' : 'none';
+            if ($('imgHiRefWrap')) $('imgHiRefWrap').style.display = (isHiDream || isNano) ? 'block' : 'none';
             if ($('imgGuidanceWrap')) $('imgGuidanceWrap').style.display = isKontext ? 'block' : 'none';
+            if ($('imgNanoWrap')) $('imgNanoWrap').style.display = isNano ? 'block' : 'none';
+            if ($('imgImageControls')) $('imgImageControls').style.display = isNano ? 'none' : 'flex';
+            if ($('imgDimPreview')) $('imgDimPreview').style.display = isNano ? 'none' : 'block';
             if ($('imgStatus')) {
                 if (isKontext) {
                     $('imgStatus').innerHTML = 'Kontext mode: upload a reference image, then describe the edit while preserving identity/pose.';
                     $('imgStatus').style.color = '#58a6ff';
+                } else if (isNano) {
+                    $('imgStatus').innerHTML = 'Nano Banana 2 mode: fixed 1K resolution with selectable aspect ratio, native text/sign rendering, optional up to 14 references, plus optional Google/Image search grounding.';
+                    $('imgStatus').style.color = '#58a6ff';
                 } else {
-                    imgCheckHealth();
+                    $('imgStatus').innerHTML = 'HiDream mode: choose aspect + size separately, then optional 1-3 references. You can also paste a product URL to auto-build a premium prompt with the local LLM.';
+                    $('imgStatus').style.color = '#58a6ff';
                 }
             }
+            if (isHiDream || isNano) imgHiRefChanged();
+            if (!isNano) imgUpdateDimsPreview();
+            imgOverlayTypeChanged();
+            imgCheckHealth();
         }
 
         async function imgCheckHealth() {
             const s = document.getElementById('imgStatus'); if (!s) return;
+            const $ = id => document.getElementById(id);
+            const engine = ($('imgEngine') && $('imgEngine').value) || 'hidream';
             try {
                 const h = await (await fetch(IMAGE_URL + '/health')).json();
+                if (engine === 'nano_banana_2') {
+                    if (!h.nano_banana_ready) {
+                        s.innerHTML = '⚠ Nano Banana 2 unavailable: REPLICATE_API_TOKEN not found in image service environment.';
+                        s.style.color = '#f85149';
+                    } else {
+                        s.innerHTML = '✓ Nano Banana 2 ready (Replicate). Fixed 1K output; use aspect ratio + prompt quality controls for best sales/marketing creatives.';
+                        s.style.color = '#3fb950';
+                    }
+                    return;
+                }
                 if (!h.weights_ready) {
                     s.innerHTML = '⏳ Model weights are still downloading — you can queue a prompt, but generation will fail until it finishes.';
                     s.style.color = '#d29922';
                 } else if (!h.model_loaded) {
-                    s.innerHTML = '✓ Ready. First image loads HiDream (~30s). M5 GPU render: ~10s at 1024.';
+                    s.innerHTML = '✓ Ready. First image loads HiDream (~30s). Higher sizes take longer (often 1-4 minutes per image).';
                     s.style.color = '#3fb950';
                 } else {
-                    s.innerHTML = '✓ HiDream model loaded and warm.';
+                    s.innerHTML = '✓ HiDream loaded. Aspect+size controls and optional 1-3 references are enabled.';
                     s.style.color = '#3fb950';
                 }
             } catch (e) {
@@ -7420,9 +9210,21 @@
         async function imgGenerate() {
             const $ = id => document.getElementById(id);
             const prompt = ($('imgPrompt').value || '').trim();
-            if (!prompt) { $('imgStatus').innerHTML = 'Enter a prompt first.'; $('imgStatus').style.color = '#f85149'; return; }
+            const productUrl = (($('imgProductUrl') && $('imgProductUrl').value) || '').trim();
+            if (!prompt && !productUrl) {
+                $('imgStatus').innerHTML = 'Enter a prompt or provide a product URL first.';
+                $('imgStatus').style.color = '#f85149';
+                return;
+            }
             const engine = ($('imgEngine') && $('imgEngine').value) || 'hidream';
+            const imageType = ($('imgType') && $('imgType').value) || 'product_hero';
+            const aspect = ($('imgAspect') && $('imgAspect').value) || '9:16';
+            const shortSide = parseInt((($('imgSize') && $('imgSize').value) || '720'), 10) || 720;
+            const snap = !!($('imgSnap') && $('imgSnap').checked);
+            const dims = imgComputeDims(aspect, shortSide);
+            const nanoAspect = (($('imgNanoAspect') && $('imgNanoAspect').value) || '9:16');
             let referenceImage = '';
+            let hiRefs = [];
             if (engine === 'kontext') {
                 const f = $('imgRefFile') && $('imgRefFile').files && $('imgRefFile').files[0];
                 if (!f) { $('imgStatus').innerHTML = 'Kontext requires a reference image.'; $('imgStatus').style.color = '#f85149'; return; }
@@ -7432,24 +9234,74 @@
                     fr.onerror = () => reject(new Error('failed to read reference image'));
                     fr.readAsDataURL(f);
                 });
+            } else {
+                const files = imgHiRefStore.slice(0, imgCurrentRefLimit());
+                hiRefs = await Promise.all(files.map(f => new Promise((resolve, reject) => {
+                    const fr = new FileReader();
+                    fr.onload = () => resolve(String(fr.result || ''));
+                    fr.onerror = () => reject(new Error('failed to read reference image'));
+                    fr.readAsDataURL(f);
+                })));
             }
+            let finalPrompt = imgBuildPrompt(prompt, engine, imageType, hiRefs.length);
             const body = {
                 engine: engine,
-                prompt: prompt,
-                preset: $('imgPreset').value,
+                prompt: finalPrompt,
+                width: dims.width,
+                height: dims.height,
                 steps: parseInt($('imgSteps').value, 10) || 28,
                 seed: parseInt($('imgSeed').value, 10) || 32,
+                image_type: imageType,
+                snap: snap,
             };
             if (engine === 'kontext') {
                 body.reference_image = referenceImage;
                 body.guidance = parseFloat(($('imgGuidance') && $('imgGuidance').value) || '2.8') || 2.8;
+            } else {
+                if (hiRefs.length) body.reference_images = hiRefs;
+                if (engine === 'nano_banana_2') {
+                    body.nano_aspect_ratio = nanoAspect;
+                    body.nano_output_format = (($('imgNanoFormat') && $('imgNanoFormat').value) || 'png');
+                    body.nano_google_search = !!($('imgNanoGoogleSearch') && $('imgNanoGoogleSearch').checked);
+                    body.nano_image_search = !!($('imgNanoImageSearch') && $('imgNanoImageSearch').checked);
+                }
             }
             $('imgGo').disabled = true;
             $('imgResult').innerHTML = '';
             $('imgProgWrap').style.display = 'block';
             $('imgProg').style.width = '0';
-            $('imgStage').textContent = 'Queued…';
+            $('imgStage').textContent = 'Preparing…';
             try {
+                if (productUrl) {
+                    $('imgStage').textContent = 'Extracting product page details…';
+                    const presetKey = ($('imgPromptPreset') && $('imgPromptPreset').value) || '';
+                    const synth = await imgSynthesizePromptFromUrl({
+                        url: productUrl,
+                        prompt: prompt,
+                        engine: engine,
+                        imageType: imageType,
+                        presetKey: presetKey,
+                        refCount: hiRefs.length,
+                        width: engine === 'nano_banana_2' ? '1K' : dims.width,
+                        height: engine === 'nano_banana_2' ? nanoAspect : dims.height,
+                        steps: parseInt($('imgSteps').value, 10) || 28,
+                        seed: parseInt($('imgSeed').value, 10) || 32,
+                    });
+                    finalPrompt = imgBuildPrompt(synth.prompt, engine, imageType, hiRefs.length);
+                    body.prompt = finalPrompt;
+                    if ($('imgPrompt')) $('imgPrompt').value = finalPrompt;
+                    if ($('imgUrlMeta')) {
+                        const sourceTitle = synth.details && (synth.details.product_name || synth.details.title);
+                        $('imgUrlMeta').textContent = sourceTitle
+                            ? ('Using URL context: ' + sourceTitle)
+                            : 'Using URL context to drive prompt synthesis.';
+                    }
+                    $('imgStage').textContent = synth.fallback
+                        ? 'URL extracted. Local LLM returned no final text, using deterministic prompt assembly…'
+                        : 'Prompt synthesized by local LLM. Queuing image generation…';
+                } else {
+                    $('imgStage').textContent = 'Queued…';
+                }
                 const r = await fetch(IMAGE_URL + '/generate', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
                 const d = await r.json();
                 if (!r.ok || d.error) throw new Error(d.error || ('HTTP ' + r.status));
@@ -7473,13 +9325,19 @@
                         $('imgGo').disabled = false;
                         const res = d.result;
                         const url = IMAGE_URL + res.url;
-                        $('imgStage').textContent = 'Done in ' + res.seconds + 's — ' + res.width + '×' + res.height;
+                        const refNote = (res.reference_images && res.reference_images > 0)
+                            ? (' · ' + res.reference_images + ' ref' + (res.reference_images > 1 ? 's' : ''))
+                            : '';
+                        $('imgStage').textContent = 'Done in ' + res.seconds + 's — ' + res.width + '×' + res.height + refNote;
                         $('imgResult').innerHTML =
                             '<img src="' + url + '" style="max-width:100%;border-radius:10px;border:1px solid #30363d">' +
                             '<div style="margin-top:8px;display:flex;gap:8px">' +
                               '<a href="' + url + '" download="' + res.filename + '" style="background:#21262d;border:1px solid #30363d;border-radius:8px;color:#e6edf3;padding:7px 12px;text-decoration:none;font-size:12px">⬇ Download</a>' +
                               '<a href="' + url + '" target="_blank" style="background:#21262d;border:1px solid #30363d;border-radius:8px;color:#e6edf3;padding:7px 12px;text-decoration:none;font-size:12px">↗ Open full size</a>' +
-                            '</div>';
+                            '</div>' + 
+                            (d.prompt ? ('<details style="margin-top:12px;padding-top:8px;border-top:1px solid #30363d"><summary style="font-size:11px;color:#8b949e;cursor:pointer;user-select:none">Show final prompt sent to model</summary><div style="font-size:11px;color:#c9d1d9;margin-top:6px;white-space:pre-wrap;background:#010409;padding:8px;border-radius:6px;border:1px solid #30363d;max-height:200px;overflow-y:auto">' + d.prompt.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;") + '</div></details>') : '');
+                        imgRefreshLibrary(res.filename);
+                        if ($('imgOverlayBase')) $('imgOverlayBase').value = res.filename;
                     } else if (d.status === 'error') {
                         clearInterval(imgPollTimer); imgPollTimer = null;
                         $('imgGo').disabled = false;
@@ -7757,6 +9615,7 @@
     const MEM = (window.OLMLX_MEM_URL || 'http://127.0.0.1:8300').replace(/\/$/, '');
     const LS_RAG = 'omlx_mem_rag_on';
     const LS_COLL = 'omlx_mem_collection';
+    const LS_COLL_BY_PROFILE = 'omlx_mem_collection_by_profile';
     const LS_TOPK = 'omlx_mem_topk';
 
     let online = false;
@@ -7834,13 +9693,62 @@
         }
 
         /* ---------------- RAG: retrieval + injection -------------------- */
+        const PROFILE_CUSTOM = '__custom__';
+        function activeProfileKey() {
+            const raw = String(data.activePromptProfile || '').trim();
+            return raw || PROFILE_CUSTOM;
+        }
+        function readCollectionMap() {
+            try {
+                const raw = localStorage.getItem(LS_COLL_BY_PROFILE);
+                const parsed = raw ? JSON.parse(raw) : {};
+                return parsed && typeof parsed === 'object' ? parsed : {};
+            } catch (e) {
+                return {};
+            }
+        }
+        function writeCollectionMap(map) {
+            localStorage.setItem(LS_COLL_BY_PROFILE, JSON.stringify(map || {}));
+        }
+        function resolveCollectionForActiveProfile() {
+            if (typeof data.getActiveProfileRagCollection === 'function') {
+                return data.getActiveProfileRagCollection() || 'default';
+            }
+            const map = readCollectionMap();
+            return map[activeProfileKey()] || localStorage.getItem(LS_COLL) || 'default';
+        }
+        function persistCollectionForActiveProfile(collection) {
+            const value = String(collection || 'default').trim() || 'default';
+            if (typeof data.setActiveProfileRagCollection === 'function') {
+                data.setActiveProfileRagCollection(value);
+            } else {
+                const map = readCollectionMap();
+                map[activeProfileKey()] = value;
+                writeCollectionMap(map);
+            }
+            localStorage.setItem(LS_COLL, value);
+            return value;
+        }
+        function syncCollectionWithProfile() {
+            RAG.collection = resolveCollectionForActiveProfile();
+            localStorage.setItem(LS_COLL, RAG.collection);
+        }
         const RAG = {
             on: localStorage.getItem(LS_RAG) === '1',
-            collection: localStorage.getItem(LS_COLL) || 'default',
+            collection: resolveCollectionForActiveProfile(),
             topk: parseInt(localStorage.getItem(LS_TOPK) || '4', 10) || 4,
             turnCtx: null,
             lastSources: [],
         };
+        window.addEventListener('omlx-profile-changed', () => {
+            syncCollectionWithProfile();
+        });
+        window.addEventListener('omlx-profile-rag-collection', (evt) => {
+            const c = evt?.detail?.collection;
+            if (!c) return;
+            RAG.collection = String(c);
+            localStorage.setItem(LS_COLL, RAG.collection);
+        });
         function plainText(content) {
             if (typeof content === 'string') return content;
             if (Array.isArray(content)) return content.filter(p => p.type === 'text').map(p => p.text).join('\n');
@@ -7851,6 +9759,7 @@
             const origSend = data.sendMessage.bind(data);
             data.sendMessage = async function (...a) {
                 RAG.turnCtx = null; RAG.lastSources = [];
+                syncCollectionWithProfile();
                 if (RAG.on && online) {
                     const q = (this.inputMessage || '').trim();
                     if (q) {
@@ -7977,7 +9886,17 @@
             const msgs = (chat.messages || []).map(m => ({ id: data.newMessageId(), role: m.role, content: m.content }));
             const newId = 'restored_' + Date.now();
             try {
-                data.chatHistory.unshift({ id: newId, title: (chat.title || 'Restored chat'), model: chat.model || data.currentModel, messages: msgs, systemPrompt: '' });
+                data.chatHistory.unshift({
+                    id: newId,
+                    title: (chat.title || 'Restored chat'),
+                    model: chat.model || data.currentModel,
+                    messages: msgs,
+                    systemPrompt: '',
+                    activeProfile: data.inferHistoryProfileName({
+                        activeProfile: data.activePromptProfile,
+                        systemPrompt: data.systemPrompt,
+                    }),
+                });
                 await data.loadChat(newId);
                 document.getElementById('memLibrary').style.display = 'none';
                 flash('Conversation restored');
@@ -8033,9 +9952,10 @@
             const ragOn = panel.querySelector('#ragOn');
             const ragColl = panel.querySelector('#ragColl');
             const ragK = panel.querySelector('#ragK');
+            syncCollectionWithProfile();
             ragOn.checked = RAG.on; ragColl.value = RAG.collection; ragK.value = RAG.topk;
             ragOn.onchange = () => { RAG.on = ragOn.checked; localStorage.setItem(LS_RAG, RAG.on ? '1' : '0'); updateBadge(); };
-            ragColl.onchange = () => { RAG.collection = ragColl.value.trim() || 'default'; localStorage.setItem(LS_COLL, RAG.collection); };
+            ragColl.onchange = () => { RAG.collection = persistCollectionForActiveProfile(ragColl.value); };
             ragK.onchange = () => { RAG.topk = Math.max(1, Math.min(12, parseInt(ragK.value, 10) || 4)); localStorage.setItem(LS_TOPK, RAG.topk); };
 
             const kText = panel.querySelector('#kText');

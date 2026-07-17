@@ -172,15 +172,8 @@ def generate(prompt: str, width: int = 1024, height: int = 1024,
     photos of a person/product + "this subject sitting in a Paris cafe" for
     consistent characters across scenes).
 
-    WARNING (2026-06-24): edit / multi-ref mode is NON-FUNCTIONAL in the current
-    HiDream-O1 MLX port. The architecture and token/sequence scaffolding
-    (build_edit_text_sample) exist and run without error, but the forward pass
-    produces noise (snap off) or DC-only colour blocks (snap on / 2048) — the
-    model's OWN bundled CLI fails the same way, confirming an upstream porting
-    gap (see model CLAUDE.md: "No edit/multi-ref support yet. Architecture
-    supports it, lab pipeline doesn't"). Kept here so it activates for free if a
-    future port fixes it. For working reference/subject-driven editing today, use
-    mflux (Qwen-Image-Edit / FLUX.1 Kontext). The server/UI do NOT expose this."""
+    This path is used by Image Studio for both instruction edits (1 reference)
+    and subject personalization/composition (2-3 references)."""
     _ensure_path()
     import mlx.core as mx
     from pipeline_helpers import (
