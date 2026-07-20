@@ -7192,6 +7192,14 @@
             imgBtn.innerHTML = '<i data-lucide="image" class="w-4 h-4" style="color:var(--text-tertiary)"></i>';
             imgBtn.onclick = openImageStudio;
 
+            // Song Studio button — ACE-Step1.5 music/song generation (:8600)
+            const songBtn = document.createElement('button');
+            songBtn.type = 'button';
+            songBtn.className = 'omlx-song-studio ' + BTN + ' ' + IDLE.join(' ');
+            songBtn.title = 'Song Studio — generate music and vocals with ACE-Step1.5';
+            songBtn.innerHTML = '<i data-lucide="music" class="w-4 h-4" style="color:var(--text-tertiary)"></i>';
+            songBtn.onclick = openSongStudio;
+
             // Orchestrator button — workflow coordinator (sidecar :8700)
             const orchBtn = document.createElement('button');
             orchBtn.type = 'button';
@@ -7202,15 +7210,17 @@
 
             if (ta) { row.insertBefore(voiceSelect, ta); row.insertBefore(micBtn, ta); row.insertBefore(hfBtn, ta); }
             else { row.appendChild(voiceSelect); row.appendChild(micBtn); row.appendChild(hfBtn); }
-            // Audio/image buttons grouped on the right, next to send: [orchestrator][image][studio][tts][send]
+            // Media buttons grouped on the right: [orchestrator][image][song][studio][tts][send]
             if (sendWrap) {
                 row.insertBefore(orchBtn, sendWrap);
                 row.insertBefore(imgBtn, sendWrap);
+                row.insertBefore(songBtn, sendWrap);
                 row.insertBefore(studioBtn, sendWrap);
                 row.insertBefore(ttsBtn, sendWrap);
             } else {
                 row.appendChild(orchBtn);
                 row.appendChild(imgBtn);
+                row.appendChild(songBtn);
                 row.appendChild(studioBtn);
                 row.appendChild(ttsBtn);
             }
@@ -7283,6 +7293,43 @@
         const IMAGE_URL = (window.OLMLX_IMAGE_URL || 'http://127.0.0.1:8400').replace(/\/$/, '');
         const VIDEO_URL = (window.OLMLX_VIDEO_URL || 'http://127.0.0.1:8500').replace(/\/$/, '');
         const ORCH_URL = (window.OLMLX_ORCH_URL || 'http://127.0.0.1:8700').replace(/\/$/, '');
+        const SONG_URL = (window.OLMLX_SONG_URL || 'http://127.0.0.1:8600').replace(/\/$/, '');
+
+        // ---------- Song Studio overlay (ACE-Step1.5) ----------
+        function openSongStudio() {
+            let ov = document.getElementById('omlx-song-overlay');
+            if (ov) { ov.style.display = 'flex'; return; }
+            ov = document.createElement('div');
+            ov.id = 'omlx-song-overlay';
+            ov.style.cssText = 'position:fixed;inset:0;z-index:9999;background:rgba(0,0,0,.55);' +
+                'display:flex;align-items:center;justify-content:center;backdrop-filter:blur(2px);';
+            ov.addEventListener('click', e => { if (e.target === ov) ov.style.display = 'none'; });
+            const panel = document.createElement('div');
+            panel.style.cssText = 'width:min(980px,95vw);height:min(900px,95vh);background:#0d1117;' +
+                'border:1px solid var(--line,#30363d);border-radius:14px;overflow:hidden;' +
+                'box-shadow:0 20px 60px rgba(0,0,0,.5);display:flex;flex-direction:column;';
+            const bar = document.createElement('div');
+            bar.style.cssText = 'display:flex;align-items:center;justify-content:space-between;' +
+                'padding:8px 12px;background:#161b22;border-bottom:1px solid #30363d;flex-shrink:0;';
+            bar.innerHTML = '<span style="font-size:13px;font-weight:600;color:#e6edf3;display:flex;gap:8px;align-items:center;">' +
+                '<i data-lucide="music" class="w-4 h-4"></i> Song Studio — ACE-Step1.5</span>';
+            const closeBtn = document.createElement('button');
+            closeBtn.innerHTML = '<i data-lucide="x" class="w-4 h-4"></i>';
+            closeBtn.title = 'Close';
+            closeBtn.style.cssText = 'background:transparent;border:none;color:#8b949e;cursor:pointer;padding:4px;border-radius:6px;';
+            closeBtn.onclick = () => { ov.style.display = 'none'; };
+            bar.appendChild(closeBtn);
+            const frame = document.createElement('iframe');
+            frame.src = SONG_URL + '/';
+            frame.style.cssText = 'flex:1;border:none;width:100%;background:#0d1117;';
+            frame.allow = 'autoplay';
+            panel.appendChild(bar); panel.appendChild(frame); ov.appendChild(panel);
+            document.body.appendChild(ov);
+            if (window.lucide && lucide.createIcons) lucide.createIcons();
+            document.addEventListener('keydown', function esc(e) {
+                if (e.key === 'Escape') ov.style.display = 'none';
+            });
+        }
 
         // ---------- Orchestrator overlay (workflow coordinator) ----------
         function openOrchestrator() {
