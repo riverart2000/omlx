@@ -37,6 +37,11 @@ from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs
 
+COMMON_DIR = os.environ.get("OMLX_COMMON_DIR", "/Users/joebains/omlx-common")
+if COMMON_DIR not in sys.path:
+    sys.path.insert(0, COMMON_DIR)
+from model_memory_coordinator import acquire_lease, release_lease
+
 HOST = os.environ.get("VIDEO_HOST", "127.0.0.1")
 PORT = int(os.environ.get("VIDEO_PORT", "8500"))
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -1600,10 +1605,15 @@ def _run_job(jid):
         return
     opts = job["opts"]
     freed = []
+    lease = None
     try:
         # Cloud engines run off-device — no local memory pressure, so keep the
         # chat LLM resident. Local video engines need the memory freed.
         if opts.get("engine") != "replicate_avatar":
+            lease = acquire_lease(
+                "video:" + opts.get("engine", "wan"), jid,
+                waiting=lambda: _set(jid, stage="waiting for another local model job…", progress=1),
+            )
             freed = _free_chat_llm(jid)
 
         if opts.get("engine") == "replicate_avatar":
@@ -1768,6 +1778,7 @@ def _run_job(jid):
                 _restore_chat_llm(jid, freed)
             except Exception:
                 pass
+        release_lease(lease)
 
 
 

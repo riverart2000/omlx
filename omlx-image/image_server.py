@@ -27,11 +27,20 @@ import subprocess
 import threading
 import time
 import uuid
+import sys
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs
 
 import hidream_engine as eng
+
+COMMON_DIR = os.environ.get("OMLX_COMMON_DIR", "/Users/joebains/omlx-common")
+if COMMON_DIR not in sys.path:
+    sys.path.insert(0, COMMON_DIR)
+from model_memory_coordinator import (
+    acquire_lease, available_memory_gb, lease_status, release_lease,
+    reload_omlx_models, unload_omlx_models,
+)
 
 HOST = os.environ.get("IMAGE_HOST", "127.0.0.1")
 PORT = int(os.environ.get("IMAGE_PORT", "8400"))
@@ -50,6 +59,9 @@ KONTEXT_MODEL = os.environ.get(
     "akx/FLUX.1-Kontext-dev-mflux-4bit",
 )
 KONTEXT_BASE_MODEL = os.environ.get("KONTEXT_BASE_MODEL", "dev")
+KONTEXT_LOW_RAM = os.environ.get("KONTEXT_LOW_RAM", "1") not in ("0", "false", "no")
+KONTEXT_CACHE_GB = float(os.environ.get("KONTEXT_MLX_CACHE_GB", "1"))
+IMAGE_MIN_FREE_GB = float(os.environ.get("IMAGE_MIN_FREE_GB", "18"))
 
 
 def _load_env_file(path):
@@ -320,6 +332,9 @@ def _run_kontext(jid, opts):
         "--width", str(opts["width"]),
         "--output", out_path,
     ]
+    if KONTEXT_LOW_RAM:
+        cmd.append("--low-ram")
+    cmd.extend(["--mlx-cache-limit-gb", str(KONTEXT_CACHE_GB)])
     proc = subprocess.run(
         cmd, cwd=BASE_DIR, capture_output=True, text=True, check=False
     )
@@ -712,7 +727,25 @@ def _run_job(jid):
     if not job:
         return
     opts = job["opts"]
+    lease = None
+    freed = []
     try:
+        # Cloud generation consumes no local model memory. Local engines share
+        # one exclusive lease with video/song and use SSD as a cold model cache.
+        if opts["engine"] != "nano_banana_2":
+            lease = acquire_lease(
+                "image:" + opts["engine"], jid,
+                waiting=lambda: _set(jid, stage="waiting for another local model job…", progress=1),
+            )
+            freed = unload_omlx_models(
+                stage=lambda message, progress: _set(jid, stage=message, progress=progress))
+            if opts["engine"] == "kontext":
+                eng.unload()
+            free_gb = available_memory_gb()
+            if free_gb and free_gb < IMAGE_MIN_FREE_GB:
+                raise RuntimeError(
+                    f"only {free_gb:.1f}GB reclaimable memory is available after unloading "
+                    f"other models; {IMAGE_MIN_FREE_GB:.0f}GB is required for a safe image job")
         if opts["engine"] == "kontext":
             _set(jid, stage="kontext generating", progress=8)
             name, w, h, elapsed = _run_kontext(jid, opts)
@@ -774,10 +807,17 @@ def _run_job(jid):
             "seconds": elapsed,
             "created": datetime.now().isoformat(timespec="seconds"),
         }
+        reload_omlx_models(
+            freed, stage=lambda message, progress: _set(jid, stage=message, progress=progress))
+        freed = []
         _set(jid, status="done", stage="done", progress=100, result=result)
     except Exception as e:
         _set(jid, status="error", stage="error",
              error=f"{type(e).__name__}: {e}")
+    finally:
+        if freed:
+            reload_omlx_models(freed)
+        release_lease(lease)
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -825,6 +865,9 @@ class Handler(BaseHTTPRequestHandler):
                 "model_loaded": eng.is_loaded(),
                 "kontext_ready": kontext_ready,
                 "kontext_model": KONTEXT_MODEL,
+                "kontext_low_ram": KONTEXT_LOW_RAM,
+                "kontext_mlx_cache_gb": KONTEXT_CACHE_GB,
+                "model_memory_lease": lease_status(),
                 "nano_banana_ready": bool(NB_TOKEN),
                 "nano_banana_model": NB_MODEL,
                 "queue": len(_work_q),

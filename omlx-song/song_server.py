@@ -26,12 +26,18 @@ import json
 import os
 import re
 import subprocess
+import sys
 import threading
 import time
 import uuid
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs
+
+COMMON_DIR = os.environ.get("OMLX_COMMON_DIR", "/Users/joebains/omlx-common")
+if COMMON_DIR not in sys.path:
+    sys.path.insert(0, COMMON_DIR)
+from model_memory_coordinator import acquire_lease, release_lease
 
 HOST = os.environ.get("SONG_HOST", "127.0.0.1")
 PORT = int(os.environ.get("SONG_PORT", "8600"))
@@ -481,7 +487,12 @@ def _run_job(jid):
         return
     opts = job["opts"]
     freed = []
+    lease = None
     try:
+        lease = acquire_lease(
+            "song:" + opts.get("engine", "ace-step"), jid,
+            waiting=lambda: _set(jid, stage="waiting for another local model job…", progress=1),
+        )
         freed = _free_chat_llm(jid)
         _set(jid, stage="starting", progress=2)
         result = _run_song(jid, opts)
@@ -515,6 +526,7 @@ def _run_job(jid):
         _set(jid, status="error", stage="error", error=str(e))
     finally:
         _restore_chat_llm(jid, freed)
+        release_lease(lease)
         if _get(jid).get("status") not in ("error",):
             _set(jid, progress=100)
 

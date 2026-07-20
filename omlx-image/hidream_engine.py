@@ -11,6 +11,7 @@ from __future__ import annotations
 import os
 import sys
 import time
+import gc
 from pathlib import Path
 
 import numpy as np
@@ -157,6 +158,21 @@ def load():
 
 def is_loaded() -> bool:
     return _CTX is not None
+
+
+def unload() -> bool:
+    """Release the warm HiDream model so another large model can use RAM."""
+    global _CTX
+    if _CTX is None:
+        return False
+    _CTX = None
+    gc.collect()
+    try:
+        import mlx.core as mx
+        mx.clear_cache()
+    except Exception:
+        pass
+    return True
 
 
 def generate(prompt: str, width: int = 1024, height: int = 1024,
