@@ -57,7 +57,7 @@ DIFF_REPO = os.environ.get("SONG_DIFF_REPO", os.path.join(DIFF_BASE, "DiffRhythm
 DIFF_PY = os.environ.get("SONG_DIFF_PY", os.path.join(DIFF_BASE, ".venv", "bin", "python"))
 DIFF_GEN_SCRIPT = os.path.join(BASE_DIR, "gen_song_diffrhythm.py")
 ESPEAK_LIB = os.environ.get("PHONEMIZER_ESPEAK_LIBRARY", "/opt/homebrew/lib/libespeak-ng.dylib")
-MODEL_LABEL = "DiffRhythm v1.2 (local) + ACE-Step fallback"
+MODEL_LABEL = "ACE-Step1.5-MLX (local) + DiffRhythm alternative"
 
 # --- generation defaults / limits -----------------------------------------
 SAMPLE_RATE = 48000
@@ -75,6 +75,39 @@ LM_SIZES = ["0.6B", "4B"]
 DEF_TAKES_INSTR_SHORT = 2
 DEF_TAKES_VOCAL_SHORT = 3
 DEF_TAKES_VOCAL_MED = 2
+
+QUALITY_PRESETS = [
+    {"id": "draft", "label": "Draft — fastest", "steps_instrumental": 12,
+     "steps_vocal": 24, "takes": 1, "lm_size": "0.6B"},
+    {"id": "standard", "label": "Standard — balanced", "steps_instrumental": 16,
+     "steps_vocal": 28, "takes": 1, "lm_size": "0.6B"},
+    {"id": "high", "label": "High — cleaner", "steps_instrumental": 24,
+     "steps_vocal": 36, "takes": 2, "lm_size": "4B"},
+    {"id": "maximum", "label": "Maximum — best of 3", "steps_instrumental": 32,
+     "steps_vocal": 48, "takes": 3, "lm_size": "4B"},
+]
+QUALITY_BY_ID = {q["id"]: q for q in QUALITY_PRESETS}
+DEF_QUALITY = "standard"
+LENGTH_PRESETS = [15, 30, 60, 90, 120, 180, 240]
+
+MOOD_PRESETS = [
+    {"id": "auto", "label": "Auto / describe below", "prompt": ""},
+    {"id": "uplifting", "label": "Uplifting", "prompt": "uplifting, optimistic, bright"},
+    {"id": "emotional", "label": "Emotional", "prompt": "emotional, heartfelt, expressive"},
+    {"id": "dramatic", "label": "Dramatic", "prompt": "dramatic, tense, powerful build"},
+    {"id": "dark", "label": "Dark / moody", "prompt": "dark, moody, atmospheric"},
+    {"id": "calm", "label": "Calm / relaxing", "prompt": "calm, relaxing, gentle"},
+    {"id": "fun", "label": "Fun / playful", "prompt": "fun, playful, energetic"},
+]
+MOOD_BY_ID = {m["id"]: m for m in MOOD_PRESETS}
+
+TEMPO_PRESETS = [
+    {"id": "auto", "label": "Auto tempo", "prompt": ""},
+    {"id": "slow", "label": "Slow", "prompt": "slow tempo"},
+    {"id": "medium", "label": "Medium", "prompt": "medium tempo"},
+    {"id": "fast", "label": "Fast", "prompt": "fast tempo"},
+]
+TEMPO_BY_ID = {t["id"]: t for t in TEMPO_PRESETS}
 
 # Keep both a lossless master and a shareable mp3; the user's rule is "always
 # keep the originals" so nothing here is auto-deleted.
@@ -111,6 +144,18 @@ STYLE_PRESETS = [
     {"id": "corporate", "label": "Corporate / upbeat",
      "prompt": "bright uplifting corporate background, clean guitars, motivational, "
                "positive, light percussion, optimistic"},
+    {"id": "jazz", "label": "Jazz / lounge",
+     "prompt": "sophisticated jazz lounge, warm piano, upright bass, brushed drums, tasteful improvisation"},
+    {"id": "classical", "label": "Classical",
+     "prompt": "expressive classical composition, acoustic concert instruments, dynamic and elegant"},
+    {"id": "rnb", "label": "R&B / soul",
+     "prompt": "modern R&B soul, warm chords, deep groove, smooth polished production"},
+    {"id": "reggae", "label": "Reggae",
+     "prompt": "sunny reggae groove, offbeat guitar, melodic bass, relaxed live drums"},
+    {"id": "country", "label": "Country",
+     "prompt": "modern country, acoustic guitar, warm live band, memorable melodic hook"},
+    {"id": "funk", "label": "Funk / disco",
+     "prompt": "tight funk disco groove, syncopated bass, rhythm guitar, lively danceable drums"},
     {"id": "custom", "label": "Custom (my words only)", "prompt": ""},
 ]
 STYLE_BY_ID = {s["id"]: s for s in STYLE_PRESETS}
@@ -521,6 +566,7 @@ def _run_job(jid):
             "warning": result.get("warning", ""),
             "lm_model_size": result.get("lm_model_size", opts.get("lm_model_size")),
             "num_steps": result.get("num_steps", opts.get("num_steps")),
+            "quality": opts.get("quality", DEF_QUALITY),
         })
     except Exception as e:
         _set(jid, status="error", stage="error", error=str(e))
@@ -576,15 +622,18 @@ SONG_UI = r"""<!DOCTYPE html>
   <p class="sub" id="modelLine">ACE-Step1.5 — local music &amp; song generation (Apache-2.0, safe for your videos)</p>
 
   <div class="card">
-    <label>Style</label>
-    <select id="style"></select>
-    <label>Describe the music <span class="muted">(mood, instruments, tempo — added to the style)</span></label>
-    <input type="text" id="prompt" placeholder="e.g. rainy night, warm piano, slow and dreamy">
-
-    <div class="toggle">
-      <input type="checkbox" id="instrumental">
-      <label for="instrumental" style="margin:0">Instrumental only (no vocals)</label>
+    <div class="row">
+      <div><label>Music type</label><select id="style"></select></div>
+      <div><label>Mood</label><select id="mood"></select></div>
+      <div><label>Tempo</label><select id="tempo"></select></div>
     </div>
+    <div class="row">
+      <div><label>Track type</label><select id="mode"><option value="instrumental">Instrumental</option><option value="vocal">Song with vocals</option></select></div>
+      <div><label>Length</label><select id="duration"></select></div>
+      <div><label>Quality</label><select id="quality"></select></div>
+    </div>
+    <label>Describe the music <span class="muted">(instruments, era, atmosphere, intended use, or arrangement)</span></label>
+    <input type="text" id="prompt" placeholder="e.g. warm piano and strings for an emotional product film">
 
     <div id="lyricsBox">
       <label>Lyrics <span class="muted">(leave blank for instrumental; use section tags)</span></label>
@@ -608,13 +657,13 @@ The catchy part"></textarea>
         <select id="lang"></select>
       </div>
       <div>
-        <label>Duration: <span id="durVal">30</span>s</label>
-        <input type="range" id="duration" min="4" max="240" value="30" step="1" style="width:100%">
+        <label>Engine</label>
+        <select id="engine"><option value="ace_step">ACE-Step1.5 (recommended)</option><option value="diffrhythm">DiffRhythm alternative</option></select>
       </div>
       <div>
-        <label>Quality (steps): <span id="stepVal">auto</span></label>
-        <input type="range" id="steps" min="4" max="60" value="8" step="1" style="width:100%">
-        <div class="hint">More steps = cleaner (slower). Baselines: ~16 instrumental, ~28 vocal.</div>
+        <label>Planner</label>
+        <select id="lm"></select>
+        <div class="hint">High and Maximum quality automatically use the 4B planner.</div>
       </div>
     </div>
 
@@ -626,11 +675,7 @@ The catchy part"></textarea>
           <button class="dice" id="dice" title="Randomize">🎲</button>
         </div>
       </div>
-      <div>
-        <label>Planner</label>
-        <select id="lm"></select>
-        <div class="hint">ACE-only control. DiffRhythm uses the quality slider to drive stronger multi-pass generation.</div>
-      </div>
+      <div><label>Output</label><div class="hint">A lossless FLAC master and shareable MP3 are both kept.</div></div>
     </div>
 
     <div style="margin-top:16px;display:flex;gap:10px;align-items:center">
@@ -663,53 +708,51 @@ function opt(sel,items,valKey,labKey,def){
 async function loadInfo(){
   try{ INFO=await (await fetch(BASE+'/info')).json(); }catch(e){ $('err').textContent='Service not reachable on :8600'; return; }
   opt($('style'),INFO.styles,'id','label',INFO.style_default);
+  opt($('mood'),INFO.moods,'id','label','auto');
+  opt($('tempo'),INFO.tempos,'id','label','auto');
+  opt($('quality'),INFO.quality_presets,'id','label',INFO.quality_default);
+  opt($('duration'),INFO.length_presets.map(s=>({id:String(s),label:s<60?s+' seconds':(s/60)+' minute'+(s>60?'s':'')})),'id','label',String(Math.round(INFO.defaults.duration_seconds)));
   opt($('lang'),INFO.vocal_languages,'id','label',INFO.vocal_language_default);
   opt($('lm'),INFO.lm_sizes.map(s=>({id:s,label:s})),'id','label',INFO.defaults.lm_model_size);
+  $('engine').value=INFO.engine_default;
   $('modelLine').textContent=INFO.model;
-  $('duration').max=INFO.limits.max_seconds; $('duration').min=INFO.limits.min_seconds;
-  $('steps').max=INFO.limits.max_steps; $('steps').min=INFO.limits.min_steps;
-  syncSteps();
+  syncMode(); syncQuality();
 }
 
-function instrumental(){ return $('instrumental').checked || !$('lyrics').value.trim(); }
-function syncSteps(){
-  // If the user hasn't dragged steps, show/apply the sensible default for the mode.
-  if(!$('steps').dataset.touched){
-    const d = instrumental()? (INFO?INFO.defaults.num_steps_instrumental:16) : (INFO?INFO.defaults.num_steps_vocal:28);
-    $('steps').value=d; $('stepVal').textContent=d+' (auto)';
-  } else { $('stepVal').textContent=$('steps').value; }
+function instrumental(){ return $('mode').value==='instrumental'; }
+function syncQuality(){
+  if(!INFO)return;
+  const q=INFO.quality_presets.find(x=>x.id===$('quality').value);
+  if(q&&!$('lm').dataset.touched)$('lm').value=q.lm_size;
 }
-function updLyricsBox(){ $('lyricsBox').style.opacity=$('instrumental').checked?0.4:1; $('lyrics').disabled=$('instrumental').checked; syncSteps(); }
+function syncMode(){ const inst=instrumental(); $('lyricsBox').style.opacity=inst?0.4:1; $('lyrics').disabled=inst; $('lang').disabled=inst; }
 
-$('duration').oninput=()=>$('durVal').textContent=$('duration').value;
-$('steps').oninput=()=>{$('steps').dataset.touched='1';$('stepVal').textContent=$('steps').value;};
+$('quality').onchange=syncQuality;
 $('lm').onchange=()=>{$('lm').dataset.touched='1';};
-$('instrumental').onchange=updLyricsBox;
-$('lyrics').oninput=syncSteps;
+$('mode').onchange=syncMode;
 $('dice').onclick=()=>{$('seed').value=Math.floor(Math.random()*16777215);};
 document.querySelectorAll('.tag').forEach(t=>t.onclick=()=>{
   const ta=$('lyrics'); const ins=(ta.value && !ta.value.endsWith('\n')?'\n':'')+t.dataset.t+'\n';
-  ta.value+=ins; ta.focus(); syncSteps();
+  ta.value+=ins; ta.focus();
 });
 
 async function generate(){
   $('err').textContent=''; $('result').innerHTML='';
-  const lyricText = $('lyrics').value.trim();
-  const wantsInstrumental = $('instrumental').checked && !lyricText;
-  if (lyricText && $('instrumental').checked) {
-    $('instrumental').checked = false;
-    updLyricsBox();
-  }
+  const wantsInstrumental = instrumental();
+  if(!wantsInstrumental&&!$('lyrics').value.trim()){ fail('Add lyrics for a vocal song, or choose Instrumental.'); return; }
   const body={
+    engine:$('engine').value,
     style:$('style').value,
+    mood:$('mood').value,
+    tempo:$('tempo').value,
+    quality:$('quality').value,
     prompt:$('prompt').value.trim(),
     instrumental:wantsInstrumental,
     lyrics:wantsInstrumental?'':$('lyrics').value,
     vocal_language:$('lang').value,
     duration:parseFloat($('duration').value),
-    num_steps:parseInt($('steps').value),
+    lm_model_size:$('lm').value,
   };
-  if ($('lm').dataset.touched) body.lm_model_size=$('lm').value;
   const s=$('seed').value.trim(); if(s!=='')body.seed=parseInt(s);
   $('go').disabled=true; $('statusText').textContent='Submitting…';
   $('progWrap').style.display='block'; $('bar').style.width='2%';
@@ -844,9 +887,14 @@ class Handler(BaseHTTPRequestHandler):
                 "available": _available(),
                 "weights_ready": _diff_ready() or _ace_weights_ready(),
                 "sample_rate": SAMPLE_RATE,
-                "engine_default": "diffrhythm",
+                "engine_default": "ace_step",
                 "styles": STYLE_PRESETS,
                 "style_default": DEF_STYLE,
+                "moods": MOOD_PRESETS,
+                "tempos": TEMPO_PRESETS,
+                "quality_presets": QUALITY_PRESETS,
+                "quality_default": DEF_QUALITY,
+                "length_presets": LENGTH_PRESETS,
                 "vocal_languages": VOCAL_LANGUAGES,
                 "vocal_language_default": DEF_VOCAL_LANG,
                 "lm_sizes": LM_SIZES,
@@ -862,6 +910,7 @@ class Handler(BaseHTTPRequestHandler):
                     "lm_model_size": DEF_LM_SIZE,
                     "style": DEF_STYLE,
                     "vocal_language": DEF_VOCAL_LANG,
+                    "quality": DEF_QUALITY,
                 },
                 "limits": {
                     "min_seconds": MIN_SECONDS, "max_seconds": MAX_SECONDS,
@@ -904,7 +953,7 @@ class Handler(BaseHTTPRequestHandler):
         path = urlparse(self.path).path
         if path == "/generate":
             d = self._read_body()
-            req_engine = str(d.get("engine") or "diffrhythm").lower().replace("-", "_")
+            req_engine = str(d.get("engine") or "ace_step").lower().replace("-", "_")
             if req_engine not in ("diffrhythm", "ace_step", "ace"):
                 req_engine = "diffrhythm"
             if req_engine == "ace":
@@ -922,7 +971,12 @@ class Handler(BaseHTTPRequestHandler):
             style_id = str(d.get("style") or DEF_STYLE)
             style = STYLE_BY_ID.get(style_id, STYLE_BY_ID[DEF_STYLE])
             # Compose the ACE-Step text prompt: style preset + the user's own words.
-            parts = [p for p in (style.get("prompt", ""), user_prompt) if p]
+            mood_id = str(d.get("mood") or "auto")
+            tempo_id = str(d.get("tempo") or "auto")
+            mood = MOOD_BY_ID.get(mood_id, MOOD_BY_ID["auto"])
+            tempo = TEMPO_BY_ID.get(tempo_id, TEMPO_BY_ID["auto"])
+            parts = [p for p in (style.get("prompt", ""), mood.get("prompt", ""),
+                                  tempo.get("prompt", ""), user_prompt) if p]
             prompt = ", ".join(parts).strip()
             if not prompt:
                 return self._json(400, {"error": "Describe the music, or pick a style"})
@@ -947,7 +1001,10 @@ class Handler(BaseHTTPRequestHandler):
                 duration = DEF_SECONDS
             duration = max(MIN_SECONDS, min(MAX_SECONDS, duration))
 
-            default_steps = DEF_STEPS_INSTRUMENTAL if instrumental else DEF_STEPS_VOCAL
+            quality_id = str(d.get("quality") or DEF_QUALITY)
+            quality = QUALITY_BY_ID.get(quality_id, QUALITY_BY_ID[DEF_QUALITY])
+            default_steps = (quality["steps_instrumental"] if instrumental
+                             else quality["steps_vocal"])
             try:
                 num_steps = int(d.get("num_steps") or default_steps)
             except (TypeError, ValueError):
@@ -962,7 +1019,7 @@ class Handler(BaseHTTPRequestHandler):
             if vocal_language not in VOCAL_LANG_IDS:
                 vocal_language = DEF_VOCAL_LANG
 
-            req_lm = str(d.get("lm_model_size") or "").strip()
+            req_lm = str(d.get("lm_model_size") or quality["lm_size"]).strip()
             if req_lm in LM_SIZES:
                 lm_size = req_lm
             else:
@@ -979,7 +1036,7 @@ class Handler(BaseHTTPRequestHandler):
             # Quality-first auto cherry-pick:
             # - vocals: short clips best-of-3, medium best-of-2
             # - instrumentals: short best-of-2
-            req_takes = d.get("takes")
+            req_takes = d.get("takes", quality["takes"])
             try:
                 attempts = int(req_takes)
             except (TypeError, ValueError):
@@ -1017,6 +1074,9 @@ class Handler(BaseHTTPRequestHandler):
                 "prompt": prompt[:1500],
                 "title": (d.get("title") or user_prompt or style.get("label", "song")),
                 "style": style_id,
+                "mood": mood_id,
+                "tempo": tempo_id,
+                "quality": quality_id,
                 "lyrics": lyrics[:6000],
                 "instrumental": instrumental,
                 "duration": duration,
@@ -1041,6 +1101,7 @@ class Handler(BaseHTTPRequestHandler):
                                     "engine": opts["engine"],
                                     "instrumental": instrumental, "seed": seed,
                                     "duration": duration, "num_steps": num_steps,
+                                    "quality": quality_id,
                                     "lm_model_size": lm_size,
                                     "attempts": attempts,
                                     "max_attempts": max_attempts,
