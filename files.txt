@@ -57,6 +57,11 @@
 /Users/joebains/omlx-song/song.sh|omlx-song/song.sh
 /Users/joebains/omlx-song/requirements.txt|omlx-song/requirements.txt
 /Users/joebains/Library/LaunchAgents/com.joebains.omlx-song.plist|launchagents/com.joebains.omlx-song.plist
+# Kindle Book Studio (Grok story + 1K reference-guided art + KDP export, :8800)
+/Users/joebains/omlx-kindle/kindle_server.py|omlx-kindle/kindle_server.py
+/Users/joebains/omlx-kindle/static/index.html|omlx-kindle/static/index.html
+/Users/joebains/omlx-kindle/requirements.txt|omlx-kindle/requirements.txt
+/Users/joebains/Library/LaunchAgents/com.joebains.omlx-kindle.plist|launchagents/com.joebains.omlx-kindle.plist
 # DiffRhythm local runtime customization (quality picker + deterministic/best pick)
 /Users/joebains/omlx-diffrhythm/DiffRhythm/infer/infer.py|omlx-diffrhythm/infer.py
 /Users/joebains/omlx-stack.sh|omlx-stack.sh

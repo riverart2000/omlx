@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.joebains.omlx-kindle</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/joebains/omlx-kindle/.venv/bin/python</string>
+        <string>/Users/joebains/omlx-kindle/kindle_server.py</string>
+    </array>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>KINDLE_PORT</key><string>8800</string>
+        <key>GROK_BOOK_MODEL</key><string>grok-4.3</string>
+        <key>GROK_IMAGE_MODEL</key><string>grok-imagine-image</string>
+    </dict>
+    <key>RunAtLoad</key><true/>
+    <key>KeepAlive</key><true/>
+    <key>StandardOutPath</key><string>/Users/joebains/omlx-kindle/service.log</string>
+    <key>StandardErrorPath</key><string>/Users/joebains/omlx-kindle/service.err</string>
+</dict>
+</plist>

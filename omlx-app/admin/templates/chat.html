@@ -7200,6 +7200,14 @@
             songBtn.innerHTML = '<i data-lucide="music" class="w-4 h-4" style="color:var(--text-tertiary)"></i>';
             songBtn.onclick = openSongStudio;
 
+            // Kindle Book Studio — Grok writing, illustration and KDP packaging (:8800)
+            const bookBtn = document.createElement('button');
+            bookBtn.type = 'button';
+            bookBtn.className = 'omlx-book-studio ' + BTN + ' ' + IDLE.join(' ');
+            bookBtn.title = 'Kindle Book Studio — create and publish illustrated books';
+            bookBtn.innerHTML = '<i data-lucide="book-open" class="w-4 h-4" style="color:var(--text-tertiary)"></i>';
+            bookBtn.onclick = openBookStudio;
+
             // Orchestrator button — workflow coordinator (sidecar :8700)
             const orchBtn = document.createElement('button');
             orchBtn.type = 'button';
@@ -7215,12 +7223,14 @@
                 row.insertBefore(orchBtn, sendWrap);
                 row.insertBefore(imgBtn, sendWrap);
                 row.insertBefore(songBtn, sendWrap);
+                row.insertBefore(bookBtn, sendWrap);
                 row.insertBefore(studioBtn, sendWrap);
                 row.insertBefore(ttsBtn, sendWrap);
             } else {
                 row.appendChild(orchBtn);
                 row.appendChild(imgBtn);
                 row.appendChild(songBtn);
+                row.appendChild(bookBtn);
                 row.appendChild(studioBtn);
                 row.appendChild(ttsBtn);
             }
@@ -7294,6 +7304,42 @@
         const VIDEO_URL = (window.OLMLX_VIDEO_URL || 'http://127.0.0.1:8500').replace(/\/$/, '');
         const ORCH_URL = (window.OLMLX_ORCH_URL || 'http://127.0.0.1:8700').replace(/\/$/, '');
         const SONG_URL = (window.OLMLX_SONG_URL || 'http://127.0.0.1:8600').replace(/\/$/, '');
+        const BOOK_URL = (window.OLMLX_BOOK_URL || 'http://127.0.0.1:8800').replace(/\/$/, '');
+
+        // ---------- Kindle Book Studio overlay ----------
+        function openBookStudio() {
+            let ov = document.getElementById('omlx-book-overlay');
+            if (ov) { ov.style.display = 'flex'; return; }
+            ov = document.createElement('div');
+            ov.id = 'omlx-book-overlay';
+            ov.style.cssText = 'position:fixed;inset:0;z-index:9999;background:rgba(20,13,18,.62);' +
+                'display:flex;align-items:center;justify-content:center;backdrop-filter:blur(3px);';
+            ov.addEventListener('click', e => { if (e.target === ov) ov.style.display = 'none'; });
+            const panel = document.createElement('div');
+            panel.style.cssText = 'width:min(1500px,98vw);height:min(1050px,97vh);background:#fbfaf7;' +
+                'border:1px solid #5d4554;border-radius:14px;overflow:hidden;' +
+                'box-shadow:0 24px 80px rgba(0,0,0,.55);display:flex;flex-direction:column;';
+            const bar = document.createElement('div');
+            bar.style.cssText = 'display:flex;align-items:center;justify-content:space-between;' +
+                'padding:8px 12px;background:#352231;border-bottom:1px solid #694e62;flex-shrink:0;';
+            bar.innerHTML = '<span style="font-size:13px;font-weight:600;color:#fff;display:flex;gap:8px;align-items:center;">' +
+                '<i data-lucide="book-open" class="w-4 h-4"></i> Kindle Book Studio — Grok</span>';
+            const closeBtn = document.createElement('button');
+            closeBtn.innerHTML = '<i data-lucide="x" class="w-4 h-4"></i>';
+            closeBtn.title = 'Close';
+            closeBtn.style.cssText = 'background:transparent;border:none;color:#fff;cursor:pointer;padding:4px;';
+            closeBtn.onclick = () => { ov.style.display = 'none'; };
+            bar.appendChild(closeBtn);
+            const frame = document.createElement('iframe');
+            frame.src = BOOK_URL + '/';
+            frame.style.cssText = 'flex:1;border:none;width:100%;background:#fbfaf7;';
+            panel.appendChild(bar); panel.appendChild(frame); ov.appendChild(panel);
+            document.body.appendChild(ov);
+            if (window.lucide && lucide.createIcons) lucide.createIcons();
+            document.addEventListener('keydown', e => {
+                if (e.key === 'Escape') ov.style.display = 'none';
+            });
+        }
 
         // ---------- Song Studio overlay (ACE-Step1.5) ----------
         function openSongStudio() {

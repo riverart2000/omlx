@@ -23,7 +23,8 @@
       "/Users/joebains/.omlx/models"
     ],
     "model_dir": "/Users/joebains/.omlx/models",
-    "model_fallback": false
+    "model_fallback": false,
+    "hide_helper_models": false
   },
   "memory": {
     "prefill_memory_guard": true,
