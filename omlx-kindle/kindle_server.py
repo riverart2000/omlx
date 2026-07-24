@@ -457,6 +457,9 @@ def generate_image(project_id: str, target: str) -> dict:
         "Maintain exact recurring character identity, clothing and palette. "
         "Professional publishable composition, no text, no letters, no logo, no watermark."
     )
+    ref_notes = [r.get("label") for r in p.get("reference_images", []) if r.get("label")]
+    if ref_notes:
+        common += " Reference image roles: " + "; ".join(ref_notes) + "."
     if target == "cover":
         prompt = common + "\nCOVER ART: " + p["cover"]["image_prompt"]
         filename = "cover.png"
@@ -727,6 +730,9 @@ def export_project(project_id: str) -> dict:
         for image in (project_dir(project_id) / "images").glob("*"):
             if image.is_file():
                 z.write(image, "images/" + image.name)
+        for reference in (project_dir(project_id) / "references").glob("*"):
+            if reference.is_file():
+                z.write(reference, "references/" + reference.name)
     p["stage"] = "exported"
     p["history"].append({"at": now(), "action": "Exported Kindle package"})
     save_project(p)
