@@ -81,7 +81,7 @@ READING_LEVELS = [
     "Ages 2–4", "Ages 4–6", "Ages 6–8", "Ages 8–12",
     "Young adult", "Adult general", "Professional / specialist",
 ]
-PAGE_COUNTS = [12, 16, 20, 24, 28, 32, 40, 48, 64, 96, 128]
+PAGE_COUNTS = [4, 6, 12, 16, 20, 24, 28, 32, 40, 48, 64, 96, 128]
 
 _jobs: dict[str, dict] = {}
 _jobs_lock = threading.Lock()
