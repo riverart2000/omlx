@@ -58,7 +58,7 @@ dialog{border:0;border-radius:18px;box-shadow:0 25px 90px #0005;padding:25px;max
 const $=s=>document.querySelector(s), $$=s=>[...document.querySelectorAll(s)];
 let presets={}, project=null, busy=false;
 const api=async(path,options={})=>{const r=await fetch(path,{headers:{'Content-Type':'application/json'},...options});const d=await r.json();if(!r.ok)throw Error(d.error||'Something went wrong');return d};
-function toast(msg,type=''){const e=$('#status');e.textContent=msg;e.className='status show '+type;clearTimeout(e._t);e._t=setTimeout(()=>e.className='status',5000)}
+function toast(msg,type=''){const e=$('#status');e.textContent=msg;e.className='status show '+type;clearTimeout(e._t);e.onclick=null;e.title='';if(type==='error'){e.textContent=msg+'  ×';e.title='Click to dismiss';e.onclick=()=>e.className='status'}else{e._t=setTimeout(()=>e.className='status',5000)}}
 function options(el,items,value,label){el.innerHTML=items.map(x=>{const v=typeof x==='object'?x[value]:x,l=typeof x==='object'?x[label]:x;return `<option value="${esc(v)}">${esc(l)}</option>`}).join('')}
 function esc(v=''){return String(v).replace(/[&<>"']/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]))}
 function show(name){$$('.view,.step').forEach(x=>x.classList.remove('active'));$('#'+name).classList.add('active');$(`.step[data-view="${name}"]`).classList.add('active');if(name==='art')renderArt();if(name==='publish')renderPublish();scrollTo(0,0)}

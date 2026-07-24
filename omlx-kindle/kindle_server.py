@@ -10,6 +10,7 @@ import mimetypes
 import os
 import re
 import shutil
+import sys
 import threading
 import time
 import urllib.error
@@ -514,7 +515,11 @@ def generate_image(project_id: str, target: str) -> dict:
 def upload_reference(project_id: str, data: dict) -> dict:
     p = load_project(project_id)
     refs = p.setdefault("reference_images", [])
-    if len(refs) >= 3:
+    character_name = str(data.get("character_name") or "").strip()
+    matching = [i for i, ref in enumerate(refs)
+                if str(ref.get("character_name", "")).casefold()
+                == character_name.casefold() and character_name]
+    if not matching and len(refs) >= 3:
         raise ValueError("Grok supports up to three reference images per illustration")
     match = re.fullmatch(r"data:(image/(?:png|jpeg|webp));base64,(.+)",
                          data.get("data", ""), re.S)
@@ -531,12 +536,16 @@ def upload_reference(project_id: str, data: dict) -> dict:
     path.write_bytes(raw)
     file_id = xai_upload_file(path)
     character_index = int(data.get("character_index", -1))
-    character_name = str(data.get("character_name") or "").strip()
     entry = {"name": data.get("name") or filename,
              "label": data.get("label") or f"Identity reference for {character_name}",
              "path": "references/" + filename, "file_id": file_id,
              "character_name": character_name}
-    refs.append(entry)
+    if matching:
+        refs[matching[0]] = entry
+        for duplicate in reversed(matching[1:]):
+            refs.pop(duplicate)
+    else:
+        refs.append(entry)
     characters = p.setdefault("character_bible", [])
     if 0 <= character_index < len(characters):
         characters[character_index]["reference_image"] = entry["path"]
@@ -768,9 +777,19 @@ def run_job(job_id: str, fn, *args):
             _jobs[job_id] = {"status": "done", "stage": "done",
                              "progress": 100, "result": result}
     except Exception as e:
+        raw_error = f"{type(e).__name__}: {e}"
+        if "used all available credits" in raw_error or "monthly spending limit" in raw_error:
+            shown_error = (
+                "xAI could not start this request because the account has no "
+                "available API credits or has reached its monthly spending limit. "
+                "Add credits or raise the spending limit in the xAI Console, then try again."
+            )
+        else:
+            shown_error = raw_error
+        print(f"[{now()}] job {job_id} failed: {raw_error}", file=sys.stderr, flush=True)
         with _jobs_lock:
             _jobs[job_id] = {"status": "error", "stage": "error",
-                             "progress": 100, "error": f"{type(e).__name__}: {e}"}
+                             "progress": 100, "error": shown_error}
 
 
 def start_job(fn, *args) -> str:
