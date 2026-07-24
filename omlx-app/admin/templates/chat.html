@@ -7309,7 +7309,12 @@
         // ---------- Kindle Book Studio overlay ----------
         function openBookStudio() {
             let ov = document.getElementById('omlx-book-overlay');
-            if (ov) { ov.style.display = 'flex'; return; }
+            if (ov) {
+                ov.style.display = 'flex';
+                const existingFrame = ov.querySelector('iframe');
+                if (existingFrame) existingFrame.src = BOOK_URL + '/?refresh=' + Date.now();
+                return;
+            }
             ov = document.createElement('div');
             ov.id = 'omlx-book-overlay';
             ov.style.cssText = 'position:fixed;inset:0;z-index:9999;background:rgba(20,13,18,.62);' +

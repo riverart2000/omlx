@@ -143,6 +143,31 @@ def save_project(project: dict) -> dict:
     return project
 
 
+def preserve_server_assets(current: dict, incoming: dict) -> dict:
+    """Do not let a stale browser tab erase private references or generated art."""
+    incoming["reference_images"] = current.get("reference_images", [])
+    current_cover = current.get("cover") or {}
+    incoming_cover = incoming.setdefault("cover", {})
+    if current_cover.get("image") and not incoming_cover.get("image"):
+        incoming_cover["image"] = current_cover["image"]
+    current_pages = {int(p.get("number", 0)): p for p in current.get("pages", [])}
+    for page in incoming.get("pages", []):
+        old = current_pages.get(int(page.get("number", 0)))
+        if old and old.get("image") and not page.get("image"):
+            page["image"] = old["image"]
+    current_characters = {
+        str(c.get("name", "")).strip().casefold(): c
+        for c in current.get("character_bible", [])
+    }
+    for character in incoming.get("character_bible", []):
+        old = current_characters.get(
+            str(character.get("name", "")).strip().casefold(), {})
+        for key in ("reference_image", "reference_file_id"):
+            if old.get(key) and not character.get(key):
+                character[key] = old[key]
+    return incoming
+
+
 def load_project(project_id: str) -> dict:
     path = project_file(project_id)
     if not path.exists():
@@ -1009,7 +1034,8 @@ class Handler(BaseHTTPRequestHandler):
                 data["id"] = pid
                 data.setdefault("created_at", current.get("created_at", now()))
                 data.setdefault("history", current.get("history", []))
-                return self.json(200, save_project(data))
+                return self.json(200, save_project(
+                    preserve_server_assets(current, data)))
             return self.json(404, {"error": "not found"})
         except Exception as e:
             return self.json(500, {"error": f"{type(e).__name__}: {e}"})
