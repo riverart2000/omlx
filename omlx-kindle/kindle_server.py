@@ -554,7 +554,7 @@ def generate_image(project_id: str, target: str) -> dict:
             prompt += "\nAvoid: " + page["negative_prompt"]
         filename = f"page-{number:03d}.png"
     w, h = trim_size(s)
-    aspect = "1:1" if abs(w - h) < .25 else ("4:5" if h > w else "5:4")
+    aspect = "1:1" if abs(w - h) < .25 else ("3:4" if h > w else "4:3")
     payload = {
         "model": IMAGE_MODEL, "prompt": prompt[:6000],
         "n": 1, "resolution": "1k", "aspect_ratio": aspect,
