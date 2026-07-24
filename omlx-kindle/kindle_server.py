@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import html
 import io
 import json
@@ -113,6 +114,10 @@ def api_key() -> str:
     vals = load_env()
     return (os.environ.get("XAI_API_KEY") or os.environ.get("GROK_API_KEY")
             or vals.get("XAI_API_KEY") or vals.get("GROK_API_KEY") or "").strip()
+
+
+def api_key_tag() -> str:
+    return hashlib.sha256(api_key().encode()).hexdigest()[:12]
 
 
 def project_dir(project_id: str) -> Path:
@@ -559,6 +564,14 @@ def generate_image(project_id: str, target: str) -> dict:
         "model": IMAGE_MODEL, "prompt": prompt[:6000],
         "n": 1, "resolution": "1k", "aspect_ratio": aspect,
     }
+    for ref in p.get("reference_images", []):
+        if ref.get("key_tag") == api_key_tag() and ref.get("file_id"):
+            continue
+        local_ref = project_dir(project_id) / str(ref.get("path") or "")
+        if local_ref.exists():
+            ref["file_id"] = xai_upload_file(local_ref)
+            ref["key_tag"] = api_key_tag()
+    save_project(p)
     refs = [r for r in p.get("reference_images", []) if r.get("file_id")][:3]
     endpoint = "/images/generations"
     if refs:
@@ -610,7 +623,7 @@ def upload_reference(project_id: str, data: dict) -> dict:
     entry = {"name": data.get("name") or filename,
              "label": data.get("label") or f"Identity reference for {character_name}",
              "path": "references/" + filename, "file_id": file_id,
-             "character_name": character_name}
+             "character_name": character_name, "key_tag": api_key_tag()}
     if matching:
         refs[matching[0]] = entry
         for duplicate in reversed(matching[1:]):
