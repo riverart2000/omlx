@@ -316,20 +316,33 @@ lighting, palette, and leave safe negative space for text. Do not put lettering,
 captions, logos, or watermarks inside generated images.
 
 Also create cover direction and KDP metadata. The pages array MUST contain
-exactly {count} objects numbered 1 through {count}."""
+exactly {count} objects numbered 1 through {count}.
+
+Required titling:
+- Supply a compelling book subtitle that complements the main title.
+- Supply a cover subtitle; it may match the book subtitle when appropriate.
+- Every page must have a short, meaningful, unique heading suited to its content.
+- Never leave title, subtitle, cover title, cover subtitle, or page heading blank.
+- Do not use placeholders such as "Page 1", "Untitled", or "Chapter"."""
 
 
 STORY_SHAPE = {
-    "title": "Book title", "subtitle": "Optional subtitle",
+    "title": "Compelling book title",
+    "subtitle": "Required compelling book subtitle; never blank",
     "story_summary": "Full synopsis",
     "character_bible": [{
         "name": "Name", "role": "Role", "appearance": "Exact reusable appearance",
         "personality": "Traits", "continuity_rules": "Never-changing details",
     }],
     "world_bible": "Locations, palette, era, props and continuity",
-    "cover": {"title": "Title", "subtitle": "", "image_prompt": "Detailed cover art prompt"},
+    "cover": {
+        "title": "Required cover title",
+        "subtitle": "Required compelling cover subtitle; never blank",
+        "image_prompt": "Detailed cover art prompt",
+    },
     "pages": [{
-        "number": 1, "heading": "Optional heading", "text": "Final page text",
+        "number": 1, "heading": "Required short unique heading; never blank",
+        "text": "Final page text",
         "dialogue": [], "image_prompt": "Detailed consistent illustration prompt",
         "negative_prompt": "Unwanted elements", "layout_note": "Text and image placement",
     }],
@@ -386,11 +399,65 @@ def normalize_story(project: dict, data: dict) -> dict:
     return project
 
 
+def ensure_grok_titles(data: dict, expected_pages: int) -> dict:
+    pages = data.get("pages") or []
+    cover = data.get("cover") or {}
+    missing = (
+        not str(data.get("subtitle") or "").strip()
+        or not str(cover.get("title") or "").strip()
+        or not str(cover.get("subtitle") or "").strip()
+        or any(not str((pages[i] if i < len(pages) else {}).get("heading") or "").strip()
+               for i in range(expected_pages))
+    )
+    if not missing:
+        return data
+    context = {
+        "title": data.get("title"), "subtitle": data.get("subtitle"),
+        "summary": data.get("story_summary"),
+        "cover": cover,
+        "pages": [{"number": p.get("number"), "text": p.get("text"),
+                   "heading": p.get("heading")} for p in pages],
+    }
+    completed = grok_structured(
+        """Act as a senior publishing copywriter. Complete all required titling
+for this book. Write a compelling book subtitle, a cover title and subtitle,
+and one short, meaningful, unique heading for every page. No field may be
+blank. Do not use generic placeholders such as Page 1, Untitled or Chapter.
+Book context:\n""" + json.dumps(context, ensure_ascii=False),
+        {
+            "subtitle": "Required book subtitle",
+            "cover_title": "Required cover title",
+            "cover_subtitle": "Required cover subtitle",
+            "page_headings": [
+                {"number": i, "heading": "Required unique heading"}
+                for i in range(1, expected_pages + 1)
+            ],
+        })
+    data["subtitle"] = completed.get("subtitle") or data.get("subtitle")
+    cover["title"] = completed.get("cover_title") or cover.get("title") or data.get("title")
+    cover["subtitle"] = completed.get("cover_subtitle") or cover.get("subtitle")
+    data["cover"] = cover
+    headings = completed.get("page_headings") or []
+    by_number = {int(x.get("number", 0)): x.get("heading") for x in headings}
+    for i, page in enumerate(pages, 1):
+        page["heading"] = page.get("heading") or by_number.get(i) or f"Part {i}"
+    return data
+
+
 def generate_story(project_id: str) -> dict:
     p = load_project(project_id)
     revision_snapshot(p, "before-full-generation")
     result = grok_structured(story_instruction(p), STORY_SHAPE, timeout=900)
+    result = ensure_grok_titles(result, int(p["settings"]["page_count"]))
     return save_project(normalize_story(p, result))
+
+
+def populate_titles(project_id: str) -> dict:
+    p = load_project(project_id)
+    revision_snapshot(p, "before-title-population")
+    ensure_grok_titles(p, len(p.get("pages") or []))
+    p["history"].append({"at": now(), "action": "Populated missing titles with Grok"})
+    return save_project(p)
 
 
 def regenerate_page(project_id: str, page_number: int, request: str) -> dict:
@@ -414,7 +481,8 @@ def regenerate_page(project_id: str, page_number: int, request: str) -> dict:
 Preserve continuity and do not rewrite adjacent pages. Book context:
 {json.dumps(context, ensure_ascii=False)}"""
     shape = {
-        "heading": "", "text": "Revised final page text", "dialogue": [],
+        "heading": "Required short meaningful page heading; never blank",
+        "text": "Revised final page text", "dialogue": [],
         "image_prompt": "Revised detailed illustration prompt",
         "negative_prompt": "Unwanted elements", "layout_note": "Placement",
     }
@@ -438,8 +506,11 @@ Title: {p['title']}; subtitle: {p.get('subtitle')}; summary: {p.get('story_summa
 Characters: {json.dumps(p.get('character_bible'), ensure_ascii=False)}
 Visual style: {style_label(p['settings'])}. Art must contain no generated text;
 the application overlays typography separately."""
-    result = grok_structured(instruction, {
-        "title": p["title"], "subtitle": p.get("subtitle", ""),
+    result = grok_structured(instruction + """
+The title and subtitle are both required and must not be blank. The subtitle
+should be concise, commercially appealing, and complement rather than repeat
+the title.""", {
+        "title": p["title"], "subtitle": "Required compelling cover subtitle",
         "image_prompt": "Detailed portrait cover illustration prompt",
     })
     p["cover"].update(result)
@@ -895,6 +966,8 @@ class Handler(BaseHTTPRequestHandler):
                 action = parts[3] if len(parts) > 3 else ""
                 if action == "generate":
                     return self.json(202, {"job_id": start_job(generate_story, pid)})
+                if action == "populate-titles":
+                    return self.json(202, {"job_id": start_job(populate_titles, pid)})
                 if action == "regenerate-cover":
                     return self.json(202, {"job_id": start_job(
                         regenerate_cover, pid, data.get("request", ""))})
