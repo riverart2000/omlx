@@ -344,7 +344,18 @@ def normalize_story(project: dict, data: dict) -> dict:
     project["title"] = str(data.get("title") or project["title"])
     project["subtitle"] = str(data.get("subtitle") or "")
     project["story_summary"] = str(data.get("story_summary") or "")
-    project["character_bible"] = data.get("character_bible") or []
+    generated_characters = data.get("character_bible") or []
+    existing_by_name = {
+        str(c.get("name", "")).strip().casefold(): c
+        for c in project.get("character_bible", [])
+    }
+    for character in generated_characters:
+        existing = existing_by_name.get(
+            str(character.get("name", "")).strip().casefold(), {})
+        for key in ("reference_image", "reference_file_id"):
+            if existing.get(key):
+                character[key] = existing[key]
+    project["character_bible"] = generated_characters
     project["world_bible"] = str(data.get("world_bible") or "")
     project["metadata"] = data.get("metadata") or {}
     cover = data.get("cover") or {}
@@ -519,9 +530,17 @@ def upload_reference(project_id: str, data: dict) -> dict:
     path = folder / filename
     path.write_bytes(raw)
     file_id = xai_upload_file(path)
-    refs.append({"name": data.get("name") or filename,
-                 "label": data.get("label") or "Character or style reference",
-                 "path": "references/" + filename, "file_id": file_id})
+    character_index = int(data.get("character_index", -1))
+    character_name = str(data.get("character_name") or "").strip()
+    entry = {"name": data.get("name") or filename,
+             "label": data.get("label") or f"Identity reference for {character_name}",
+             "path": "references/" + filename, "file_id": file_id,
+             "character_name": character_name}
+    refs.append(entry)
+    characters = p.setdefault("character_bible", [])
+    if 0 <= character_index < len(characters):
+        characters[character_index]["reference_image"] = entry["path"]
+        characters[character_index]["reference_file_id"] = file_id
     save_project(p)
     return p
 
