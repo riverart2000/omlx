@@ -764,7 +764,8 @@ def xhtml_page(title: str, text: str, image_name: str | None,
 <title>{html.escape(title)}</title>{viewport_meta}
 <link rel="stylesheet" href="../styles/book.css" type="text/css"/>
 </head><body class="{css_class}"><main>{image}<section class="copy">
-<h1>{html.escape(title)}</h1>{paras}</section></main></body></html>"""
+<h1>{html.escape(title)}</h1><div class="body-copy">{paras}</div>
+</section></main></body></html>"""
 
 
 def export_epub(p: dict, out: Path) -> None:
@@ -778,16 +779,19 @@ def export_epub(p: dict, out: Path) -> None:
 </container>"""
     if fixed:
         entries["OEBPS/styles/book.css"] = b"""html,body{margin:0;width:100%;height:100%;overflow:hidden}
-body{font-family:serif;color:#111;background:#fff}main{width:100vw;height:100vh;display:grid;
-grid-template-rows:minmax(0,1fr) auto;box-sizing:border-box;overflow:hidden}
-main>img{display:block;width:100%;height:100%;min-height:0;object-fit:cover}
-.copy{padding:18px 5% 22px;background:#fff;box-sizing:border-box}
-h1{text-align:center;font-size:30px;line-height:1.15;margin:0 0 8px}
-p{text-align:center;font-size:23px;line-height:1.3;margin:0}
-.cover main{display:block;position:relative;background:#332334}.cover main>img{position:absolute;
-inset:0;width:100%;height:100%;object-fit:cover}.cover .copy{position:absolute;left:0;right:0;bottom:0;
-padding:80px 6% 38px;color:#fff;background:linear-gradient(transparent,rgba(20,10,18,.88))}
-.cover h1{font-size:46px;text-shadow:0 2px 9px #000}.cover p{font-size:27px;text-shadow:0 2px 7px #000}"""
+body{font-family:serif;color:#111;background:#332334}main{position:relative;width:100vw;height:100vh;
+box-sizing:border-box;overflow:hidden}main>img{position:absolute;inset:0;display:block;width:100%;
+height:100%;object-fit:cover}.copy{position:absolute;inset:0;display:grid;grid-template-rows:auto 1fr;
+box-sizing:border-box}.copy h1{align-self:start;text-align:center;font-size:38px;line-height:1.12;
+margin:28px 5% 0;padding:14px 24px;border-radius:16px;color:#fff;background:rgba(20,12,18,.62);
+text-shadow:0 2px 8px #000}.body-copy{align-self:end;min-height:50%;display:flex;flex-direction:column;
+align-items:center;justify-content:center;padding:32px 7%;box-sizing:border-box;
+background:linear-gradient(transparent 0%,rgba(255,255,255,.74) 24%,rgba(255,255,255,.92) 100%)}
+p{text-align:center;font-size:46px;font-weight:600;line-height:1.18;margin:7px 0;color:#171219;
+text-shadow:0 1px 1px rgba(255,255,255,.8)}.cover .copy h1{font-size:52px;margin-top:42px;
+background:rgba(20,10,18,.68)}.cover .body-copy{min-height:36%;padding-bottom:44px;
+background:linear-gradient(transparent,rgba(20,10,18,.86))}.cover p{font-size:34px;color:#fff;
+text-shadow:0 2px 8px #000}"""
     else:
         entries["OEBPS/styles/book.css"] = b"""body{margin:0;font-family:serif;color:#111;background:#fff}
 main{padding:4%;box-sizing:border-box}img{display:block;width:100%;height:auto;margin:0 auto 1rem}
