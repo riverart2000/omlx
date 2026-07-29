@@ -692,6 +692,7 @@ def download_image(item: dict) -> bytes:
 def generate_image(project_id: str, target: str) -> dict:
     p = load_project(project_id)
     s = p["settings"]
+    variation_id = uuid.uuid4().hex[:10]
     common = (
         f"Original book illustration. Visual style: {style_label(s)}. "
         f"Audience: {s.get('audience')}. Book continuity: {p.get('world_bible')}. "
@@ -704,14 +705,30 @@ def generate_image(project_id: str, target: str) -> dict:
         common += " Reference image roles: " + "; ".join(ref_notes) + "."
     if target == "cover":
         prompt = common + "\nCOVER ART: " + p["cover"]["image_prompt"]
-        filename = "cover.png"
+        had_existing_image = bool(p["cover"].get("image"))
+        filename = f"cover-{variation_id}.png" if had_existing_image else "cover.png"
     else:
         number = int(target)
         page = p["pages"][number - 1]
         prompt = common + f"\nPAGE {number}: " + page["image_prompt"]
         if page.get("negative_prompt"):
             prompt += "\nAvoid: " + page["negative_prompt"]
-        filename = f"page-{number:03d}.png"
+        had_existing_image = bool(page.get("image"))
+        filename = (
+            f"page-{number:03d}-{variation_id}.png"
+            if had_existing_image else f"page-{number:03d}.png"
+        )
+    if had_existing_image:
+        revision_snapshot(
+            p, "before-cover-image-regeneration" if target == "cover"
+            else f"before-page-{number}-image-regeneration")
+        prompt += (
+            f"\nREGENERATION VARIATION {variation_id}: Create a clearly new "
+            "alternative illustration. Keep the established characters and art "
+            "style, but substantially change the composition, poses, camera angle, "
+            "background details and visual storytelling. Do not reproduce the "
+            "previous image."
+        )
     w, h = trim_size(s)
     aspect = "1:1" if abs(w - h) < .25 else ("3:4" if h > w else "4:3")
     payload = {
@@ -746,6 +763,14 @@ def generate_image(project_id: str, target: str) -> dict:
         p["pages"][int(target) - 1]["image"] = rel
         p["pages"][int(target) - 1]["approved"] = False
     p["stage"] = "illustrations"
+    p["history"].append({
+        "at": now(),
+        "action": (
+            f"Regenerated {'cover' if target == 'cover' else f'page {target}'} image"
+            if had_existing_image
+            else f"Generated {'cover' if target == 'cover' else f'page {target}'} image"
+        ),
+    })
     save_project(p)
     return {"project": p, "image": rel}
 
