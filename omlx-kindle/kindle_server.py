@@ -7,6 +7,7 @@ import hashlib
 import html
 import io
 import json
+import math
 import mimetypes
 import os
 import re
@@ -865,9 +866,13 @@ def export_pdf(p: dict, out: Path, include_cover=True, bleed=False,
     doc.setAuthor(p.get("settings", {}).get("author") or "Author")
 
     def wrap(text: str, font_name: str, font_size: float,
-             max_width: float) -> list[str]:
+             max_width: float, preserve_blank=False) -> list[str]:
         lines = []
-        for paragraph in (text or "").splitlines() or [""]:
+        for paragraph in (text or "").split("\n") or [""]:
+            if not paragraph.strip():
+                if preserve_blank:
+                    lines.append("")
+                continue
             words = paragraph.split()
             line = ""
             for word in words:
@@ -951,18 +956,19 @@ def export_pdf(p: dict, out: Path, include_cover=True, bleed=False,
         font_name = bold
         size = 24 if not cover else 20
         max_width = page_w * .84
-        max_height = panel_h * .70
-        lines = wrap(body, font_name, size, max_width)
-        while lines and len(lines) * size * 1.24 > max_height and size > 15:
-            size -= 1
-            lines = wrap(body, font_name, size, max_width)
+        max_height = panel_h * .78
+        lines = wrap(body, font_name, size, max_width, preserve_blank=True)
+        while lines and len(lines) * size * 1.24 > max_height and size > 7:
+            size -= .5
+            lines = wrap(body, font_name, size, max_width, preserve_blank=True)
         line_h = size * 1.24
         total_h = len(lines) * line_h
         y = (panel_h + total_h) / 2 - size
         doc.setFillColor(white if cover else Color(.08, .06, .08))
         doc.setFont(font_name, size)
         for line in lines:
-            doc.drawCentredString(page_w / 2, y, line)
+            if line:
+                doc.drawCentredString(page_w / 2, y, line)
             y -= line_h
 
     def compose(path: Path | None, title: str, body: str,
@@ -1184,20 +1190,45 @@ def export_docx(p: dict, out: Path) -> None:
 
 
 def xhtml_page(title: str, text: str, image_name: str | None,
-               css_class="book-page", viewport: tuple[int, int] | None = None) -> str:
+               css_class="book-page", viewport: tuple[int, int] | None = None,
+               body_size: int | None = None) -> str:
     image = (f'<img src="../images/{html.escape(image_name)}" alt="Illustration"/>'
              if image_name else "")
-    paras = "".join(f"<p>{html.escape(x)}</p>" for x in (text or "").split("\n") if x.strip())
+    paras = "".join(
+        f"<p>{html.escape(line)}</p>" if line.strip()
+        else '<p class="blank">&#160;</p>'
+        for line in (text or "").split("\n")
+    )
     viewport_meta = (
         f'<meta name="viewport" content="width={viewport[0]},height={viewport[1]}"/>'
         if viewport else "")
+    body_style = f' style="--body-size:{body_size}px"' if body_size else ""
     return f"""<?xml version="1.0" encoding="utf-8"?>
 <!DOCTYPE html><html xmlns="http://www.w3.org/1999/xhtml"><head>
 <title>{html.escape(title)}</title>{viewport_meta}
 <link rel="stylesheet" href="../styles/book.css" type="text/css"/>
 </head><body class="{css_class}"><main>{image}<section class="copy">
-<h1>{html.escape(title)}</h1><div class="body-copy">{paras}</div>
+<h1>{html.escape(title)}</h1><div class="body-copy"{body_style}>{paras}</div>
 </section></main></body></html>"""
+
+
+def fixed_epub_body_size(text: str, viewport: tuple[int, int],
+                         cover=False) -> int:
+    max_size = 34 if cover else 46
+    min_size = 14
+    available_width = viewport[0] * .86
+    available_height = viewport[1] * (.30 if cover else .50) - 64
+    logical_lines = (text or "").split("\n")
+    for size in range(max_size, min_size - 1, -1):
+        chars_per_line = max(8, int(available_width / (size * .54)))
+        visual_lines = sum(
+            1 if not line.strip() else
+            max(1, math.ceil(len(line.expandtabs(4)) / chars_per_line))
+            for line in logical_lines
+        )
+        if visual_lines * size * 1.18 <= available_height:
+            return size
+    return min_size
 
 
 def export_epub(p: dict, out: Path) -> None:
@@ -1216,20 +1247,21 @@ box-sizing:border-box;overflow:hidden}main>img{position:absolute;inset:0;display
 height:100%;object-fit:cover}.copy{position:absolute;inset:0;display:grid;grid-template-rows:auto 1fr;
 box-sizing:border-box}.copy h1{align-self:start;text-align:center;font-size:38px;line-height:1.12;
 margin:28px 5% 0;padding:14px 24px;border-radius:16px;color:#fff;background:rgba(20,12,18,.62);
-text-shadow:0 2px 8px #000}.body-copy{align-self:end;min-height:50%;display:flex;flex-direction:column;
+text-shadow:0 2px 8px #000}.body-copy{align-self:end;height:50%;display:flex;flex-direction:column;
 align-items:center;justify-content:center;padding:32px 7%;box-sizing:border-box;
-background:linear-gradient(transparent 0%,rgba(255,255,255,.74) 24%,rgba(255,255,255,.92) 100%)}
-p{text-align:center;font-size:46px;font-weight:600;line-height:1.18;margin:7px 0;color:#171219;
-text-shadow:0 1px 1px rgba(255,255,255,.8)}.cover .copy h1{font-size:52px;margin-top:42px;
-background:rgba(20,10,18,.68)}.cover .body-copy{min-height:36%;padding-bottom:44px;
-background:linear-gradient(transparent,rgba(20,10,18,.86))}.cover p{font-size:34px;color:#fff;
+overflow:hidden;background:linear-gradient(transparent 0%,rgba(255,255,255,.74) 24%,rgba(255,255,255,.92) 100%)}
+p{text-align:center;font-size:var(--body-size,46px);font-weight:600;line-height:1.18;margin:0;color:#171219;
+text-shadow:0 1px 1px rgba(255,255,255,.8)}p.blank{min-height:1.18em}
+.cover .copy h1{font-size:52px;margin-top:42px;
+background:rgba(20,10,18,.68)}.cover .body-copy{height:36%;padding-bottom:44px;
+background:linear-gradient(transparent,rgba(20,10,18,.86))}.cover p{font-size:var(--body-size,34px);color:#fff;
 text-shadow:0 2px 8px #000}"""
     else:
         entries["OEBPS/styles/book.css"] = b"""body{margin:0;font-family:serif;color:#111;background:#fff}
 main{padding:4%;box-sizing:border-box}img{display:block;width:100%;height:auto;margin:0 auto 1rem}
 .copy{max-width:48em;margin:auto}h1{text-align:center;font-size:1.5em}
 p{font-size:1.1em;line-height:1.45;margin:.5em 0}.cover main{padding:0}
-.cover .copy{text-align:center;padding:0 5% 5%}"""
+.blank{min-height:1.45em}.cover .copy{text-align:center;padding:0 5% 5%}"""
     manifest = [
         '<item id="css" href="styles/book.css" media-type="text/css"/>',
         '<item id="nav" href="nav.xhtml" media-type="application/xhtml+xml" properties="nav"/>',
@@ -1265,7 +1297,10 @@ p{font-size:1.1em;line-height:1.45;margin:.5em 0}.cover main{padding:0}
     cover_img = add_image(p["cover"].get("image"))
     entries["OEBPS/text/cover.xhtml"] = xhtml_page(
         p["cover"].get("title") or p["title"],
-        p["cover"].get("subtitle", ""), cover_img, "cover", viewport).encode()
+        p["cover"].get("subtitle", ""), cover_img, "cover", viewport,
+        fixed_epub_body_size(
+            p["cover"].get("subtitle", ""), viewport, cover=True
+        ) if fixed else None).encode()
     cover_image_id = ""
     if cover_img:
         for i, item in enumerate(manifest):
@@ -1285,7 +1320,8 @@ p{font-size:1.1em;line-height:1.45;margin:.5em 0}.cover main{padding:0}
             body += "\n" + "\n".join(map(str, page["dialogue"]))
         entries["OEBPS/text/" + fname] = xhtml_page(
             page.get("heading") or f"Page {page['number']}", body, img,
-            "book-page", viewport).encode()
+            "book-page", viewport,
+            fixed_epub_body_size(body, viewport) if fixed else None).encode()
         manifest.append(f'<item id="{pid}" href="text/{fname}" media-type="application/xhtml+xml"/>')
         spine.append(f'<itemref idref="{pid}"/>')
         nav.append(f'<li><a href="text/{fname}">Page {page["number"]}</a></li>')
