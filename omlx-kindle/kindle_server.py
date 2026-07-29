@@ -970,6 +970,12 @@ class Handler(BaseHTTPRequestHandler):
                     if not target:
                         return self.json(404, {"error": "image not found"})
                     return self.serve_file(target)
+                if len(parts) == 5 and parts[3] == "references":
+                    rel = "references/" + os.path.basename(parts[4])
+                    target = project_dir(pid) / rel
+                    if not target.exists() or not target.is_file():
+                        return self.json(404, {"error": "reference image not found"})
+                    return self.serve_file(target)
             if path.startswith("/api/jobs/"):
                 jid = path.rsplit("/", 1)[-1]
                 with _jobs_lock:
