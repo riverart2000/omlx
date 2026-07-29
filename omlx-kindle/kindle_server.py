@@ -752,27 +752,48 @@ def export_docx(p: dict, out: Path) -> None:
 
 
 def xhtml_page(title: str, text: str, image_name: str | None,
-               css_class="book-page") -> str:
+               css_class="book-page", viewport: tuple[int, int] | None = None) -> str:
     image = (f'<img src="../images/{html.escape(image_name)}" alt="Illustration"/>'
              if image_name else "")
     paras = "".join(f"<p>{html.escape(x)}</p>" for x in (text or "").split("\n") if x.strip())
+    viewport_meta = (
+        f'<meta name="viewport" content="width={viewport[0]},height={viewport[1]}"/>'
+        if viewport else "")
     return f"""<?xml version="1.0" encoding="utf-8"?>
 <!DOCTYPE html><html xmlns="http://www.w3.org/1999/xhtml"><head>
-<title>{html.escape(title)}</title><link rel="stylesheet" href="../styles/book.css" type="text/css"/>
-</head><body class="{css_class}"><main>{image}<h1>{html.escape(title)}</h1>{paras}</main></body></html>"""
+<title>{html.escape(title)}</title>{viewport_meta}
+<link rel="stylesheet" href="../styles/book.css" type="text/css"/>
+</head><body class="{css_class}"><main>{image}<section class="copy">
+<h1>{html.escape(title)}</h1>{paras}</section></main></body></html>"""
 
 
 def export_epub(p: dict, out: Path) -> None:
     fixed = p["settings"].get("layout") == "fixed"
+    w_in, h_in = trim_size(p["settings"])
+    viewport = (int(w_in * 150), int(h_in * 150)) if fixed else None
     entries: dict[str, bytes] = {}
     entries["META-INF/container.xml"] = b"""<?xml version="1.0"?>
 <container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container">
 <rootfiles><rootfile full-path="OEBPS/content.opf" media-type="application/oebps-package+xml"/></rootfiles>
 </container>"""
-    entries["OEBPS/styles/book.css"] = b"""body{margin:0;font-family:serif;color:#111;background:#fff}
-main{padding:5%;box-sizing:border-box}img{display:block;max-width:100%;max-height:72vh;margin:0 auto 1rem}
-h1{text-align:center;font-size:1.5em}p{font-size:1.1em;line-height:1.45;margin:.5em 0}
-.cover main{padding:0}.cover h1,.cover p{text-align:center;padding:0 5%}"""
+    if fixed:
+        entries["OEBPS/styles/book.css"] = b"""html,body{margin:0;width:100%;height:100%;overflow:hidden}
+body{font-family:serif;color:#111;background:#fff}main{width:100vw;height:100vh;display:grid;
+grid-template-rows:minmax(0,1fr) auto;box-sizing:border-box;overflow:hidden}
+main>img{display:block;width:100%;height:100%;min-height:0;object-fit:cover}
+.copy{padding:18px 5% 22px;background:#fff;box-sizing:border-box}
+h1{text-align:center;font-size:30px;line-height:1.15;margin:0 0 8px}
+p{text-align:center;font-size:23px;line-height:1.3;margin:0}
+.cover main{display:block;position:relative;background:#332334}.cover main>img{position:absolute;
+inset:0;width:100%;height:100%;object-fit:cover}.cover .copy{position:absolute;left:0;right:0;bottom:0;
+padding:80px 6% 38px;color:#fff;background:linear-gradient(transparent,rgba(20,10,18,.88))}
+.cover h1{font-size:46px;text-shadow:0 2px 9px #000}.cover p{font-size:27px;text-shadow:0 2px 7px #000}"""
+    else:
+        entries["OEBPS/styles/book.css"] = b"""body{margin:0;font-family:serif;color:#111;background:#fff}
+main{padding:4%;box-sizing:border-box}img{display:block;width:100%;height:auto;margin:0 auto 1rem}
+.copy{max-width:48em;margin:auto}h1{text-align:center;font-size:1.5em}
+p{font-size:1.1em;line-height:1.45;margin:.5em 0}.cover main{padding:0}
+.cover .copy{text-align:center;padding:0 5% 5%}"""
     manifest = [
         '<item id="css" href="styles/book.css" media-type="text/css"/>',
         '<item id="nav" href="nav.xhtml" media-type="application/xhtml+xml" properties="nav"/>',
@@ -808,7 +829,14 @@ h1{text-align:center;font-size:1.5em}p{font-size:1.1em;line-height:1.45;margin:.
     cover_img = add_image(p["cover"].get("image"))
     entries["OEBPS/text/cover.xhtml"] = xhtml_page(
         p["cover"].get("title") or p["title"],
-        p["cover"].get("subtitle", ""), cover_img, "cover").encode()
+        p["cover"].get("subtitle", ""), cover_img, "cover", viewport).encode()
+    cover_image_id = ""
+    if cover_img:
+        for i, item in enumerate(manifest):
+            if f'href="images/{cover_img}"' in item:
+                cover_image_id = re.search(r'id="([^"]+)"', item).group(1)
+                manifest[i] = item.replace("/>", ' properties="cover-image"/>')
+                break
     manifest.append('<item id="cover" href="text/cover.xhtml" media-type="application/xhtml+xml"/>')
     spine.append('<itemref idref="cover"/>')
     nav.append('<li><a href="text/cover.xhtml">Cover</a></li>')
@@ -820,7 +848,8 @@ h1{text-align:center;font-size:1.5em}p{font-size:1.1em;line-height:1.45;margin:.
         if page.get("dialogue"):
             body += "\n" + "\n".join(map(str, page["dialogue"]))
         entries["OEBPS/text/" + fname] = xhtml_page(
-            page.get("heading") or f"Page {page['number']}", body, img).encode()
+            page.get("heading") or f"Page {page['number']}", body, img,
+            "book-page", viewport).encode()
         manifest.append(f'<item id="{pid}" href="text/{fname}" media-type="application/xhtml+xml"/>')
         spine.append(f'<itemref idref="{pid}"/>')
         nav.append(f'<li><a href="text/{fname}">Page {page["number"]}</a></li>')
@@ -829,15 +858,25 @@ h1{text-align:center;font-size:1.5em}p{font-size:1.1em;line-height:1.45;margin:.
 <body><nav epub:type="toc" xmlns:epub="http://www.idpf.org/2007/ops"><h1>Contents</h1><ol>"""
         + "".join(nav) + "</ol></nav></body></html>").encode()
     ident = "urn:uuid:" + uuid.uuid5(uuid.NAMESPACE_URL, p["id"]).hex
-    rendition = ('<meta property="rendition:layout">pre-paginated</meta>'
-                 if fixed else '<meta property="rendition:layout">reflowable</meta>')
+    if fixed:
+        orientation = "landscape" if w_in > h_in else "portrait"
+        rendition = (
+            '<meta property="rendition:layout">pre-paginated</meta>'
+            '<meta property="rendition:spread">none</meta>'
+            f'<meta property="rendition:orientation">{orientation}</meta>'
+        )
+    else:
+        rendition = '<meta property="rendition:layout">reflowable</meta>'
+    legacy_cover = (f'<meta name="cover" content="{cover_image_id}"/>'
+                    if cover_image_id else "")
     entries["OEBPS/content.opf"] = f"""<?xml version="1.0" encoding="utf-8"?>
 <package xmlns="http://www.idpf.org/2007/opf" version="3.0" unique-identifier="bookid">
 <metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
 <dc:identifier id="bookid">{ident}</dc:identifier><dc:title>{html.escape(p["title"])}</dc:title>
 <dc:language>en</dc:language><dc:creator>{html.escape(p["settings"].get("author") or "Author")}</dc:creator>
-<dc:date>{datetime.now().date().isoformat()}</dc:date>{rendition}</metadata>
-<manifest>{''.join(manifest)}</manifest><spine>{''.join(spine)}</spine></package>""".encode()
+<dc:date>{datetime.now().date().isoformat()}</dc:date>{legacy_cover}{rendition}</metadata>
+<manifest>{''.join(manifest)}</manifest><spine page-progression-direction="ltr">{''.join(spine)}</spine>
+</package>""".encode()
     with zipfile.ZipFile(out, "w") as z:
         z.writestr("mimetype", "application/epub+zip", compress_type=zipfile.ZIP_STORED)
         for name, data in entries.items():
