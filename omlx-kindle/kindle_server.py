@@ -235,6 +235,7 @@ def new_project(data: dict) -> dict:
         "layout": data.get("layout", "fixed"),
         "author": data.get("author", ""),
         "primary_marketplace": data.get("primary_marketplace", "Amazon.co.uk"),
+        "print_interior": data.get("print_interior", "premium_colour"),
         "font_style": data.get("font_style", "Friendly storybook"),
         "dedication": data.get("dedication", ""),
         "series_name": data.get("series_name", ""),
@@ -799,60 +800,333 @@ def image_abs(p: dict, rel: str) -> Path | None:
     return path if path.exists() else None
 
 
-def export_pdf(p: dict, out: Path) -> None:
-    from PIL import Image, ImageDraw, ImageFont, ImageOps
+def export_pdf(p: dict, out: Path, include_cover=True, bleed=False,
+               pad_even=False) -> None:
+    from PIL import Image, ImageOps
+    from reportlab.lib.colors import Color, white
+    from reportlab.lib.utils import ImageReader
+    from reportlab.pdfbase import pdfmetrics
+    from reportlab.pdfbase.ttfonts import TTFont
+    from reportlab.pdfgen import canvas
+
     w_in, h_in = trim_size(p["settings"])
-    dpi = 150
-    size = (int(w_in * dpi), int(h_in * dpi))
-    pages = []
+    render_w = w_in + (.125 if bleed else 0)
+    render_h = h_in + (.25 if bleed else 0)
+    page_w, page_h = render_w * 72, render_h * 72
+    regular = "BookArial"
+    bold = "BookArialBold"
+    try:
+        if regular not in pdfmetrics.getRegisteredFontNames():
+            pdfmetrics.registerFont(TTFont(
+                regular, "/System/Library/Fonts/Supplemental/Arial.ttf"))
+        if bold not in pdfmetrics.getRegisteredFontNames():
+            pdfmetrics.registerFont(TTFont(
+                bold, "/System/Library/Fonts/Supplemental/Arial Bold.ttf"))
+    except Exception:
+        regular, bold = "Helvetica", "Helvetica-Bold"
 
-    def font(sz):
-        for path in ("/System/Library/Fonts/Supplemental/Arial.ttf",
-                     "/System/Library/Fonts/SFNS.ttf"):
-            try:
-                return ImageFont.truetype(path, sz)
-            except Exception:
-                pass
-        return ImageFont.load_default()
+    doc = canvas.Canvas(str(out), pagesize=(page_w, page_h),
+                        pageCompression=1, pdfVersion=(1, 7))
+    doc.setTitle(p.get("title") or "Kindle Book")
+    doc.setAuthor(p.get("settings", {}).get("author") or "Author")
 
-    def compose(img_path, title, body):
-        canvas = Image.new("RGB", size, "white")
-        draw = ImageDraw.Draw(canvas)
-        if img_path:
-            with Image.open(img_path) as src:
-                src = ImageOps.exif_transpose(src).convert("RGB")
-                max_img_h = int(size[1] * .70)
-                fitted = ImageOps.fit(src, (size[0], max_img_h))
-                canvas.paste(fitted, (0, 0))
-        y = int(size[1] * .73)
-        if title:
-            draw.text((70, y), title, fill="#111", font=font(34))
-            y += 52
-        words = (body or "").split()
-        lines, line = [], ""
-        for word in words:
-            candidate = (line + " " + word).strip()
-            if draw.textlength(candidate, font=font(25)) > size[0] - 140:
-                lines.append(line); line = word
+    def wrap(text: str, font_name: str, font_size: float,
+             max_width: float) -> list[str]:
+        lines = []
+        for paragraph in (text or "").splitlines() or [""]:
+            words = paragraph.split()
+            line = ""
+            for word in words:
+                candidate = (line + " " + word).strip()
+                if line and pdfmetrics.stringWidth(
+                        candidate, font_name, font_size) > max_width:
+                    lines.append(line)
+                    line = word
+                else:
+                    line = candidate
+            if line:
+                lines.append(line)
+        return lines
+
+    def draw_background(path: Path | None, cover=False) -> None:
+        if not path:
+            doc.setFillColor(Color(.20, .14, .20))
+            doc.rect(0, 0, page_w, page_h, fill=1, stroke=0)
+            return
+        target = (max(1, int(render_w * 300)), max(1, int(render_h * 300)))
+        with Image.open(path) as source:
+            source = ImageOps.exif_transpose(source).convert("RGB")
+            prepared = ImageOps.fit(
+                source, target, method=Image.Resampling.LANCZOS,
+                centering=(.5, .5))
+            panel_h = int(target[1] * (.36 if cover else .50))
+            mask = Image.linear_gradient("L").resize(
+                (target[0], panel_h), Image.Resampling.BICUBIC)
+            if cover:
+                mask = mask.point(lambda value: int(18 + value * .80))
+                overlay = Image.new("RGB", (target[0], panel_h), (18, 8, 15))
             else:
-                line = candidate
-        if line:
-            lines.append(line)
-        for ln in lines[:10]:
-            draw.text((70, y), ln, fill="#222", font=font(25)); y += 36
-        return canvas
+                mask = mask.point(lambda value: int(12 + value * .88))
+                overlay = Image.new("RGB", (target[0], panel_h), "white")
+            prepared.paste(
+                overlay, (0, target[1] - panel_h), mask)
+            buffer = io.BytesIO()
+            prepared.save(buffer, "PNG", compress_level=1)
+        buffer.seek(0)
+        doc.drawImage(
+            ImageReader(buffer), 0, 0, width=page_w, height=page_h,
+            preserveAspectRatio=False, mask="auto")
 
-    pages.append(compose(image_abs(p, p["cover"].get("image")),
-                         p["cover"].get("title") or p["title"],
-                         p["cover"].get("subtitle", "")))
+    def alpha(value: float) -> None:
+        try:
+            doc.setFillAlpha(value)
+        except Exception:
+            pass
+
+    def reset_alpha() -> None:
+        try:
+            doc.setFillAlpha(1)
+        except Exception:
+            pass
+
+    def draw_heading(title: str, cover=False) -> None:
+        size = 30 if cover else 24
+        max_width = page_w * .82
+        lines = wrap(title, bold, size, max_width)
+        while len(lines) > 2 and size > 16:
+            size -= 1
+            lines = wrap(title, bold, size, max_width)
+        line_h = size * 1.18
+        box_h = max(line_h * len(lines) + 22, 50)
+        box_x, box_w = page_w * .06, page_w * .88
+        box_y = page_h - box_h - page_h * .035
+        doc.setFillColor(Color(.08, .04, .07))
+        alpha(.66)
+        doc.roundRect(box_x, box_y, box_w, box_h, 12,
+                      fill=1, stroke=0)
+        reset_alpha()
+        doc.setFillColor(white)
+        doc.setFont(bold, size)
+        y = box_y + box_h - 16 - size
+        for line in lines:
+            doc.drawCentredString(page_w / 2, y, line)
+            y -= line_h
+
+    def draw_body(body: str, cover=False) -> None:
+        panel_h = page_h * (.36 if cover else .50)
+        font_name = bold
+        size = 24 if not cover else 20
+        max_width = page_w * .84
+        max_height = panel_h * .70
+        lines = wrap(body, font_name, size, max_width)
+        while lines and len(lines) * size * 1.24 > max_height and size > 15:
+            size -= 1
+            lines = wrap(body, font_name, size, max_width)
+        line_h = size * 1.24
+        total_h = len(lines) * line_h
+        y = (panel_h + total_h) / 2 - size
+        doc.setFillColor(white if cover else Color(.08, .06, .08))
+        doc.setFont(font_name, size)
+        for line in lines:
+            doc.drawCentredString(page_w / 2, y, line)
+            y -= line_h
+
+    def compose(path: Path | None, title: str, body: str,
+                cover=False) -> None:
+        draw_background(path, cover)
+        draw_heading(title, cover)
+        draw_body(body, cover)
+        doc.showPage()
+
+    if include_cover:
+        compose(image_abs(p, p["cover"].get("image")),
+                p["cover"].get("title") or p["title"],
+                p["cover"].get("subtitle", ""), True)
     for page in p["pages"]:
         body = page.get("text", "")
         if page.get("dialogue"):
             body += "\n" + " ".join(map(str, page["dialogue"]))
-        pages.append(compose(image_abs(p, page.get("image")),
-                             page.get("heading", ""), body))
-    pages[0].save(out, "PDF", save_all=True, append_images=pages[1:],
-                  resolution=dpi, quality=95)
+        compose(image_abs(p, page.get("image")),
+                page.get("heading", ""), body)
+    if pad_even and len(p.get("pages", [])) % 2:
+        doc.showPage()
+    doc.save()
+
+
+def export_print_cover(p: dict, out: Path, page_count: int) -> None:
+    from PIL import Image, ImageEnhance, ImageFilter, ImageOps
+    from reportlab.lib.colors import Color, white
+    from reportlab.lib.utils import ImageReader
+    from reportlab.pdfbase import pdfmetrics
+    from reportlab.pdfbase.ttfonts import TTFont
+    from reportlab.pdfgen import canvas
+
+    w_in, h_in = trim_size(p["settings"])
+    interior = p.get("settings", {}).get("print_interior", "premium_colour")
+    rate = .002347 if interior == "premium_colour" else .002252
+    spine_in = page_count * rate
+    bleed_in = .125
+    full_w_in = bleed_in + w_in + spine_in + w_in + bleed_in
+    full_h_in = bleed_in + h_in + bleed_in
+    full_w, full_h = full_w_in * 72, full_h_in * 72
+    bleed, trim_w, trim_h = bleed_in * 72, w_in * 72, h_in * 72
+    back_left = bleed
+    back_right = back_left + trim_w
+    spine_left = back_right
+    front_left = spine_left + spine_in * 72
+
+    regular, bold = "CoverArial", "CoverArialBold"
+    try:
+        if regular not in pdfmetrics.getRegisteredFontNames():
+            pdfmetrics.registerFont(TTFont(
+                regular, "/System/Library/Fonts/Supplemental/Arial.ttf"))
+        if bold not in pdfmetrics.getRegisteredFontNames():
+            pdfmetrics.registerFont(TTFont(
+                bold, "/System/Library/Fonts/Supplemental/Arial Bold.ttf"))
+    except Exception:
+        regular, bold = "Helvetica", "Helvetica-Bold"
+
+    doc = canvas.Canvas(str(out), pagesize=(full_w, full_h),
+                        pageCompression=1, pdfVersion=(1, 7))
+    doc.setTitle((p.get("title") or "Book") + " - Print Cover")
+    cover_path = image_abs(p, p.get("cover", {}).get("image"))
+    target = (max(1, int(full_w_in * 300)), max(1, int(full_h_in * 300)))
+    background = Image.new("RGB", target, (70, 46, 63))
+    if cover_path:
+        with Image.open(cover_path) as source:
+            source = ImageOps.exif_transpose(source).convert("RGB")
+            panel_size = (max(1, int((w_in + bleed_in) * 300)),
+                          max(1, int(full_h_in * 300)))
+            front = ImageOps.fit(
+                source, panel_size, Image.Resampling.LANCZOS)
+            front_x = int(front_left / 72 * 300)
+            background.paste(front, (front_x, 0))
+            back = ImageOps.fit(
+                source, (int((w_in + bleed_in) * 300), target[1]),
+                Image.Resampling.LANCZOS)
+            back = ImageEnhance.Brightness(
+                back.filter(ImageFilter.GaussianBlur(16))).enhance(.36)
+            background.paste(back, (0, 0))
+    buffer = io.BytesIO()
+    background.save(buffer, "PNG", compress_level=1)
+    buffer.seek(0)
+    doc.drawImage(ImageReader(buffer), 0, 0, full_w, full_h,
+                  preserveAspectRatio=False, mask="auto")
+
+    def wrap(text: str, font: str, size: float,
+             max_width: float) -> list[str]:
+        lines, line = [], ""
+        for word in (text or "").split():
+            candidate = (line + " " + word).strip()
+            if line and pdfmetrics.stringWidth(
+                    candidate, font, size) > max_width:
+                lines.append(line)
+                line = word
+            else:
+                line = candidate
+        if line:
+            lines.append(line)
+        return lines
+
+    def alpha(value: float) -> None:
+        try:
+            doc.setFillAlpha(value)
+        except Exception:
+            pass
+
+    def reset_alpha() -> None:
+        try:
+            doc.setFillAlpha(1)
+        except Exception:
+            pass
+
+    # Front-cover typography.
+    title = p.get("cover", {}).get("title") or p.get("title") or ""
+    subtitle = p.get("cover", {}).get("subtitle") or p.get("subtitle") or ""
+    box_x = front_left + trim_w * .07
+    box_w = trim_w * .86
+    title_size = 28
+    title_lines = wrap(title, bold, title_size, box_w - 24)
+    while len(title_lines) > 3 and title_size > 18:
+        title_size -= 1
+        title_lines = wrap(title, bold, title_size, box_w - 24)
+    title_h = len(title_lines) * title_size * 1.16 + 24
+    title_y = full_h - bleed - title_h - 24
+    doc.setFillColor(Color(.08, .04, .07))
+    alpha(.68)
+    doc.roundRect(box_x, title_y, box_w, title_h, 12, fill=1, stroke=0)
+    reset_alpha()
+    doc.setFillColor(white)
+    doc.setFont(bold, title_size)
+    y = title_y + title_h - title_size - 12
+    for line in title_lines:
+        doc.drawCentredString(front_left + trim_w / 2, y, line)
+        y -= title_size * 1.16
+    if subtitle:
+        sub_size = 16
+        sub_lines = wrap(subtitle, bold, sub_size, box_w - 20)
+        sub_h = len(sub_lines) * sub_size * 1.18 + 20
+        sub_y = bleed + 28
+        doc.setFillColor(Color(.08, .04, .07))
+        alpha(.72)
+        doc.roundRect(box_x, sub_y, box_w, sub_h, 10, fill=1, stroke=0)
+        reset_alpha()
+        doc.setFillColor(white)
+        doc.setFont(bold, sub_size)
+        y = sub_y + sub_h - sub_size - 9
+        for line in sub_lines:
+            doc.drawCentredString(front_left + trim_w / 2, y, line)
+            y -= sub_size * 1.18
+
+    # Back-cover copy and reserved barcode area.
+    safe_x = back_left + 28
+    safe_w = trim_w - 56
+    safe_top = full_h - bleed - 34
+    doc.setFillColor(white)
+    doc.setFont(bold, 21)
+    doc.drawCentredString(back_left + trim_w / 2, safe_top,
+                          p.get("title") or "")
+    description = str(p.get("metadata", {}).get("description") or
+                      p.get("story_summary") or "")
+    body_size = 13
+    body_lines = wrap(description, regular, body_size, safe_w)
+    max_lines = max(1, int((trim_h - 190) / (body_size * 1.35)))
+    while len(body_lines) > max_lines and body_size > 9:
+        body_size -= .5
+        body_lines = wrap(description, regular, body_size, safe_w)
+        max_lines = max(1, int((trim_h - 190) / (body_size * 1.35)))
+    doc.setFont(regular, body_size)
+    y = safe_top - 42
+    for line in body_lines[:max_lines]:
+        doc.drawString(safe_x, y, line)
+        y -= body_size * 1.35
+    author = p.get("settings", {}).get("author") or ""
+    if author:
+        doc.setFont(bold, 13)
+        doc.drawString(safe_x, bleed + 118, "By " + author)
+    barcode_w, barcode_h = 2 * 72, 1.2 * 72
+    barcode_x = back_right - barcode_w - 18
+    barcode_y = bleed + 18
+    doc.setFillColor(white)
+    doc.roundRect(barcode_x, barcode_y, barcode_w, barcode_h,
+                  4, fill=1, stroke=0)
+    doc.setFillColor(Color(.38, .38, .38))
+    doc.setFont(regular, 8)
+    doc.drawCentredString(
+        barcode_x + barcode_w / 2, barcode_y + barcode_h / 2,
+        "Reserved for Amazon barcode")
+
+    if page_count >= 79 and spine_in * 72 >= 18:
+        doc.saveState()
+        doc.translate(spine_left + spine_in * 36, full_h / 2)
+        doc.rotate(90)
+        spine_title = (p.get("title") or "")[:80]
+        size = min(12, max(7, spine_in * 72 * .45))
+        doc.setFillColor(white)
+        doc.setFont(bold, size)
+        doc.drawCentredString(0, -size / 3, spine_title)
+        doc.restoreState()
+    doc.save()
 
 
 def export_docx(p: dict, out: Path) -> None:
@@ -1016,19 +1290,50 @@ def export_project(project_id: str) -> dict:
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
     base = EXPORT_DIR / f"{slug(p['title'])}-{stamp}"
     epub = base.with_suffix(".epub")
-    pdf = base.with_suffix(".pdf")
+    proof_pdf = base.parent / (base.name + "-review.pdf")
+    manuscript_pdf = base.parent / (base.name + "-manuscript.pdf")
+    cover_pdf = base.parent / (base.name + "-book-cover.pdf")
     docx = base.with_suffix(".docx")
     metadata = base.with_suffix(".metadata.json")
     bundle = base.with_suffix(".zip")
     export_epub(p, epub)
-    export_pdf(p, pdf)
+    export_pdf(p, proof_pdf)
+    story_pages = len(p.get("pages") or [])
+    print_page_count = story_pages + (story_pages % 2)
+    print_eligible = print_page_count >= 24
+    if print_eligible:
+        export_pdf(p, manuscript_pdf, include_cover=False,
+                   bleed=True, pad_even=True)
+        export_print_cover(p, cover_pdf, print_page_count)
     export_docx(p, docx)
+    w_in, h_in = trim_size(p["settings"])
+    interior = p.get("settings", {}).get("print_interior", "premium_colour")
+    spine_rate = .002347 if interior == "premium_colour" else .002252
+    print_setup = {
+        "binding": "Paperback",
+        "trim_size": f"{w_in:g} × {h_in:g} inches",
+        "interior": ("Premium colour" if interior == "premium_colour"
+                     else "Standard colour"),
+        "paper": "White",
+        "bleed": "Yes",
+        "page_count": print_page_count,
+        "minimum_page_count": 24,
+        "print_eligible": print_eligible,
+        "spine_width_inches": round(print_page_count * spine_rate, 4),
+        "warning": ("" if print_eligible else
+                    "Amazon KDP paperback requires at least 24 interior pages. "
+                    "Choose a longer book before submitting print files."),
+    }
     metadata.write_text(json.dumps({
         "title": p["title"], "subtitle": p.get("subtitle"),
-        "author": p["settings"].get("author"), **(p.get("metadata") or {}),
+        "author": p["settings"].get("author"),
+        "print_setup": print_setup, **(p.get("metadata") or {}),
     }, ensure_ascii=False, indent=2))
     with zipfile.ZipFile(bundle, "w", zipfile.ZIP_DEFLATED) as z:
-        for path in (epub, pdf, docx, metadata):
+        package_paths = [epub, proof_pdf, docx, metadata]
+        if print_eligible:
+            package_paths.extend([manuscript_pdf, cover_pdf])
+        for path in package_paths:
             z.write(path, path.name)
         z.write(project_file(project_id), "project.json")
         for image in (project_dir(project_id) / "images").glob("*"):
@@ -1040,8 +1345,13 @@ def export_project(project_id: str) -> dict:
     p["stage"] = "exported"
     p["history"].append({"at": now(), "action": "Exported Kindle package"})
     save_project(p)
-    return {"epub": str(epub), "pdf": str(pdf), "docx": str(docx),
-            "metadata": str(metadata), "bundle": str(bundle)}
+    return {
+        "epub": str(epub), "pdf": str(proof_pdf),
+        "manuscript_pdf": str(manuscript_pdf) if print_eligible else "",
+        "cover_pdf": str(cover_pdf) if print_eligible else "",
+        "print_setup": print_setup, "docx": str(docx),
+        "metadata": str(metadata), "bundle": str(bundle),
+    }
 
 
 def run_job(job_id: str, fn, *args):
