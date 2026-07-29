@@ -84,6 +84,88 @@ READING_LEVELS = [
     "Young adult", "Adult general", "Professional / specialist",
 ]
 PAGE_COUNTS = [4, 6, 12, 16, 20, 24, 28, 32, 40, 48, 64, 96, 128]
+SERIES_NAME = "The 28-Day Inner Transformation Series"
+SERIES_BOOKS = [
+    {
+        "id": "introspection", "title": "28 Days of Introspection",
+        "aliases": ["Daily Introspection"],
+        "focus": "deeper self-awareness through reflection, gratitude, intentions and honest daily review",
+        "weekly_arc": ["observe yourself", "understand your patterns", "make conscious changes", "integrate and continue"],
+        "palette": "warm ivory, sunrise gold, charcoal and soft sage",
+    },
+    {
+        "id": "gratitude", "title": "28 Days of Gratitude",
+        "focus": "building a sustainable gratitude practice that notices ordinary, relational and personal gifts",
+        "weekly_arc": ["notice everyday gifts", "appreciate people and support", "find learning in difficulty", "live and express gratitude"],
+        "palette": "honey gold, blush, warm cream and gentle green",
+    },
+    {
+        "id": "self-confidence", "title": "28 Days of Self-Confidence",
+        "focus": "recognising strengths, quieting self-doubt and taking increasingly courageous action",
+        "weekly_arc": ["recognise existing strengths", "challenge limiting stories", "practise visible courage", "embody steady confidence"],
+        "palette": "deep blue, amber, warm white and confident coral",
+    },
+    {
+        "id": "calm", "title": "28 Days of Calm",
+        "focus": "creating practical moments of calm, steadiness and restoration in ordinary daily life",
+        "weekly_arc": ["settle the body", "quiet mental noise", "respond calmly to pressure", "build a sustainable calm rhythm"],
+        "palette": "mist blue, sea glass, pale sand and soft lavender",
+    },
+    {
+        "id": "self-love", "title": "28 Days of Self-Love",
+        "focus": "developing kinder self-talk, healthy boundaries, self-respect and compassionate daily care",
+        "weekly_arc": ["meet yourself kindly", "accept the whole self", "protect your needs", "live from self-respect"],
+        "palette": "rose, plum, warm cream and muted gold",
+    },
+    {
+        "id": "emotional-resilience", "title": "28 Days of Emotional Resilience",
+        "focus": "understanding emotions, recovering from setbacks and responding with flexibility and self-compassion",
+        "weekly_arc": ["name and allow emotions", "discover coping strengths", "reframe setbacks", "create a personal resilience plan"],
+        "palette": "storm blue, fresh green, copper and clear sky",
+    },
+    {
+        "id": "purpose-clarity", "title": "28 Days of Purpose and Clarity",
+        "focus": "clarifying values, priorities, meaningful direction and the next practical steps",
+        "weekly_arc": ["clear the noise", "identify values and strengths", "shape a meaningful vision", "commit to aligned action"],
+        "palette": "indigo, parchment, sunlit yellow and forest green",
+    },
+    {
+        "id": "better-habits", "title": "28 Days of Better Habits",
+        "focus": "designing realistic routines through small actions, useful cues, reflection and compassionate consistency",
+        "weekly_arc": ["understand current patterns", "design tiny changes", "strengthen consistency", "make the habits sustainable"],
+        "palette": "fresh teal, tangerine, clean white and graphite",
+    },
+    {
+        "id": "focus-productivity", "title": "28 Days of Focus and Productivity",
+        "focus": "choosing meaningful priorities, reducing distraction and completing important work without burnout",
+        "weekly_arc": ["discover attention patterns", "simplify priorities", "practise deep focus", "build a balanced productivity system"],
+        "palette": "navy, electric blue, citrus and cool white",
+    },
+    {
+        "id": "mindful-living", "title": "28 Days of Mindful Living",
+        "focus": "bringing non-judgemental awareness into the senses, routines, relationships and choices",
+        "weekly_arc": ["arrive in the senses", "bring presence to routines", "relate with awareness", "carry mindfulness forward"],
+        "palette": "moss, stone, water blue and natural linen",
+    },
+    {
+        "id": "creativity", "title": "28 Days of Creativity",
+        "focus": "reawakening curiosity, overcoming creative inhibition and establishing a playful creative practice",
+        "weekly_arc": ["notice and collect inspiration", "play without judgement", "develop original ideas", "complete and share something"],
+        "palette": "magenta, turquoise, sunshine yellow and ink",
+    },
+    {
+        "id": "positive-thinking", "title": "28 Days of Positive Thinking",
+        "focus": "building realistic optimism by noticing helpful possibilities without denying difficult feelings",
+        "weekly_arc": ["notice thought patterns", "find balanced alternatives", "practise possibility and appreciation", "make optimism actionable"],
+        "palette": "sunflower, sky blue, fresh white and warm orange",
+    },
+    {
+        "id": "personal-growth", "title": "28 Days of Personal Growth",
+        "focus": "reviewing identity, values, courage, relationships and goals to create an integrated growth plan",
+        "weekly_arc": ["take an honest inventory", "stretch beyond old limits", "strengthen relationships and choices", "design the next chapter"],
+        "palette": "emerald, midnight blue, warm gold and ivory",
+    },
+]
 
 _jobs: dict[str, dict] = {}
 _jobs_lock = threading.Lock()
@@ -248,6 +330,7 @@ def new_project(data: dict) -> dict:
         "subtitle": "", "prompt": data.get("prompt", ""),
         "stage": "setup", "created_at": now(), "updated_at": now(),
         "settings": settings, "story_summary": "",
+        "series_template": data.get("series_template") or {},
         "character_bible": data.get("character_bible") or [],
         "world_bible": "", "cover": {"title": "", "subtitle": "", "image_prompt": "",
                                      "image": "", "approved": False},
@@ -342,6 +425,30 @@ def story_instruction(p: dict) -> str:
     s = p["settings"]
     kind = dict(BOOK_TYPES).get(s["book_type"], s["book_type"])
     count = int(s["page_count"])
+    series = p.get("series_template") or {}
+    series_rules = ""
+    if series:
+        weekly_arc = series.get("weekly_arc") or []
+        series_rules = f"""
+SERIES PRODUCTION BIBLE - follow this exactly:
+- This is book {s.get('book_number') or '1'} in "{s.get('series_name') or SERIES_NAME}".
+- Keep the main title exactly "{p.get('title')}"; do not rename it.
+- This book's unique focus is: {series.get('focus')}.
+- Its four weekly phases are: {'; '.join(weekly_arc)}.
+- Create exactly 28 daily workbook pages, one complete day per page.
+- Give every day 4 to 8 concise, useful exercises combining reflection,
+  gratitude, intention, a practical action, journaling and an end-of-day review
+  when relevant to the focus.
+- In each page's text, place exactly two empty lines between exercises so the
+  printed workbook provides intentional writing space. Preserve those blank lines.
+- Progress gently across the four phases without repeating prompts, sentences or
+  exercises from another day or another title in the series.
+- Keep the shared series structure and polished adult tone, while making all
+  content, headings, examples, metadata and illustrations original to this topic.
+- This is a reflective wellbeing workbook, not diagnosis, treatment or a promise
+  of medical results.
+- Use this book's identifying visual palette: {series.get('palette')}.
+"""
     return f"""You are an expert commercially published Kindle author, developmental
 editor, book designer, and art director. Create a complete original {kind}.
 
@@ -360,6 +467,7 @@ Dedication or personal foreword: {s.get('dedication')}
 Series: {s.get('series_name')} {s.get('book_number')}
 Personalisation and character notes: {s.get('personalisation')}
 Characters supplied by the creator: {json.dumps(p.get('character_bible'), ensure_ascii=False)}
+{series_rules}
 
 Build a coherent beginning, development, climax/payoff, and satisfying ending.
 For children, keep age-appropriate vocabulary and page text length. For comics,
@@ -476,7 +584,8 @@ def normalize_story(project: dict, data: dict) -> dict:
         for page in project.get("pages", [])
         if int(page.get("number", 0)) > 0
     }
-    project["title"] = str(data.get("title") or project["title"])
+    if not (project.get("series_template") or {}).get("lock_title"):
+        project["title"] = str(data.get("title") or project["title"])
     project["subtitle"] = str(data.get("subtitle") or "")
     project["story_summary"] = str(data.get("story_summary") or "")
     generated_characters = data.get("character_bible") or []
@@ -889,7 +998,8 @@ def export_pdf(p: dict, out: Path, include_cover=True, bleed=False,
 
     def draw_background(path: Path | None, cover=False) -> None:
         if not path:
-            doc.setFillColor(Color(.20, .14, .20))
+            doc.setFillColor(
+                Color(.20, .14, .20) if cover else Color(.97, .96, .94))
             doc.rect(0, 0, page_w, page_h, fill=1, stroke=0)
             return
         target = (max(1, int(render_w * 300)), max(1, int(render_h * 300)))
@@ -1502,6 +1612,7 @@ class Handler(BaseHTTPRequestHandler):
                     "image_styles": [{"id": x, "label": y} for x, y in IMAGE_STYLES],
                     "trims": [{"id": x[0], "label": x[1]} for x in TRIMS],
                     "reading_levels": READING_LEVELS, "page_counts": PAGE_COUNTS,
+                    "series_name": SERIES_NAME, "series_books": SERIES_BOOKS,
                     "text_model": TEXT_MODEL, "image_model": IMAGE_MODEL,
                 })
             if path == "/api/projects":
