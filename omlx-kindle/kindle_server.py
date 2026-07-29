@@ -234,6 +234,7 @@ def new_project(data: dict) -> dict:
         "trim": data.get("trim", "8x10"),
         "layout": data.get("layout", "fixed"),
         "author": data.get("author", ""),
+        "primary_marketplace": data.get("primary_marketplace", "Amazon.co.uk"),
         "font_style": data.get("font_style", "Friendly storybook"),
         "dedication": data.get("dedication", ""),
         "series_name": data.get("series_name", ""),
@@ -352,6 +353,7 @@ Exact story/content pages: {count}
 Visual direction: {style_label(s)}
 Layout: {s.get('layout')}
 Author: {s.get('author')}
+Primary Amazon marketplace: {s.get('primary_marketplace', 'Amazon.co.uk')}
 Dedication or personal foreword: {s.get('dedication')}
 Series: {s.get('series_name')} {s.get('book_number')}
 Personalisation and character notes: {s.get('personalisation')}
@@ -369,12 +371,53 @@ captions, logos, or watermarks inside generated images.
 Also create cover direction and KDP metadata. The pages array MUST contain
 exactly {count} objects numbered 1 through {count}.
 
+Create a complete Amazon KDP listing worksheet. The description must accurately
+sell this specific book without reviews, unverifiable claims, keyword stuffing,
+URLs, prices, or promotional language, and must not exceed 4,000 characters.
+Return exactly seven useful multi-word customer search phrases and exactly three
+highly relevant Amazon category-path suggestions. Include the reading age and
+responsible recommendations for marketplace, rights, territories, DRM, KDP
+Select, royalty and price. Because Grok creates the book text and illustrations,
+the AI disclosure must say that both text and images are AI-generated.
+
 Required titling:
 - Supply a compelling book subtitle that complements the main title.
 - Supply a cover subtitle; it may match the book subtitle when appropriate.
 - Every page must have a short, meaningful, unique heading suited to its content.
 - Never leave title, subtitle, cover title, cover subtitle, or page heading blank.
 - Do not use placeholders such as "Page 1", "Untitled", or "Chapter"."""
+
+
+KDP_METADATA_SHAPE = {
+    "description": "Compelling accurate Amazon description, maximum 4,000 characters",
+    "keywords": [
+        "Exactly 7 distinct multi-word customer search phrases"
+    ],
+    "categories": [
+        "Exactly 3 relevant Amazon category paths for the selected marketplace"
+    ],
+    "age_range": "Reader-facing target age range",
+    "reading_age_min": "Minimum age as a number",
+    "reading_age_max": "Maximum age as a number",
+    "grade_range": "Suggested grade range, or Not applicable",
+    "primary_marketplace": "Recommended Amazon marketplace, e.g. Amazon.co.uk",
+    "sexually_explicit": "Yes or No",
+    "publishing_rights": "I own the copyright and hold the necessary publishing rights",
+    "territories": "All territories (worldwide rights), if original content",
+    "ai_generated_content": "Yes — AI-generated text and images; no AI translation",
+    "drm_recommendation": "Apply DRM or DRM-free, with a short reason",
+    "kdp_select_recommendation": "Enroll or do not enroll, with a short reason",
+    "royalty_recommendation": "35% or 70%, with a short reason",
+    "list_price": "Suggested numeric list price",
+    "currency": "GBP, USD, EUR, etc.",
+    "price_rationale": "Short editable pricing rationale",
+    "contributors": "Other contributors or None",
+    "publisher": "Publisher/imprint name or Independently published",
+    "edition_number": "Edition number or 1",
+    "release_timing": "Publish now or suggested release approach",
+    "copyright_text": "Copyright page copy",
+    "author_bio": "Editable author biography",
+}
 
 
 STORY_SHAPE = {
@@ -397,12 +440,32 @@ STORY_SHAPE = {
         "dialogue": [], "image_prompt": "Detailed consistent illustration prompt",
         "negative_prompt": "Unwanted elements", "layout_note": "Text and image placement",
     }],
-    "metadata": {
-        "description": "KDP product description", "keywords": ["7 phrases"],
-        "categories": ["Suggested categories"], "age_range": "Target ages",
-        "copyright_text": "Copyright page copy", "author_bio": "Editable biography",
-    },
+    "metadata": KDP_METADATA_SHAPE,
 }
+
+
+def normalize_metadata(metadata: dict, project: dict) -> dict:
+    out = dict(metadata or {})
+    out["description"] = str(out.get("description") or "")[:4000]
+    out["keywords"] = [str(x).strip() for x in out.get("keywords", [])
+                       if str(x).strip()][:7]
+    out["categories"] = [str(x).strip() for x in out.get("categories", [])
+                         if str(x).strip()][:3]
+    out["primary_marketplace"] = (
+        project.get("settings", {}).get("primary_marketplace") or "Amazon.co.uk")
+    out.setdefault("sexually_explicit", "No")
+    out.setdefault(
+        "publishing_rights",
+        "I own the copyright and hold the necessary publishing rights")
+    out.setdefault("territories", "All territories (worldwide rights)")
+    out.setdefault(
+        "ai_generated_content",
+        "Yes — AI-generated text and images; no AI translation")
+    out.setdefault("publisher", "Independently published")
+    out.setdefault("edition_number", "1")
+    out.setdefault("contributors", "None")
+    out.setdefault("release_timing", "Publish now")
+    return out
 
 
 def normalize_story(project: dict, data: dict) -> dict:
@@ -424,7 +487,7 @@ def normalize_story(project: dict, data: dict) -> dict:
                 character[key] = existing[key]
     project["character_bible"] = generated_characters
     project["world_bible"] = str(data.get("world_bible") or "")
-    project["metadata"] = data.get("metadata") or {}
+    project["metadata"] = normalize_metadata(data.get("metadata") or {}, project)
     cover = data.get("cover") or {}
     project["cover"].update({
         "title": cover.get("title") or project["title"],
@@ -510,6 +573,39 @@ def populate_titles(project_id: str) -> dict:
     revision_snapshot(p, "before-title-population")
     ensure_grok_titles(p, len(p.get("pages") or []))
     p["history"].append({"at": now(), "action": "Populated missing titles with Grok"})
+    return save_project(p)
+
+
+def generate_metadata(project_id: str) -> dict:
+    p = load_project(project_id)
+    revision_snapshot(p, "before-kdp-listing")
+    context = {
+        "title": p.get("title"), "subtitle": p.get("subtitle"),
+        "author": p.get("settings", {}).get("author"),
+        "language": p.get("settings", {}).get("language"),
+        "book_type": p.get("settings", {}).get("book_type"),
+        "genre": p.get("settings", {}).get("genre"),
+        "audience": p.get("settings", {}).get("audience"),
+        "series_name": p.get("settings", {}).get("series_name"),
+        "book_number": p.get("settings", {}).get("book_number"),
+        "primary_marketplace": p.get("settings", {}).get(
+            "primary_marketplace", "Amazon.co.uk"),
+        "summary": p.get("story_summary"),
+        "characters": p.get("character_bible"),
+        "page_text": [page.get("text") for page in p.get("pages", [])],
+    }
+    instruction = """Act as an ethical Amazon KDP metadata specialist. Create a
+complete, accurate, conversion-focused listing worksheet for this exact book.
+The description must be plain text, appealing to the intended buyer, contain
+no reviews, unverifiable claims, prices, URLs, keyword stuffing or misleading
+language, and be no more than 4,000 characters. Supply exactly seven distinct
+multi-word search phrases and exactly three highly relevant Amazon category
+path suggestions. Do not invent content that is not in the book. Recommend the
+remaining KDP choices responsibly. Mark both text and images as AI-generated,
+with no AI translation. Book context:\n""" + json.dumps(context, ensure_ascii=False)
+    p["metadata"] = normalize_metadata(
+        grok_structured(instruction, KDP_METADATA_SHAPE), p)
+    p["history"].append({"at": now(), "action": "Generated Amazon KDP listing with Grok"})
     return save_project(p)
 
 
@@ -1083,6 +1179,8 @@ class Handler(BaseHTTPRequestHandler):
                     return self.json(202, {"job_id": start_job(generate_story, pid)})
                 if action == "populate-titles":
                     return self.json(202, {"job_id": start_job(populate_titles, pid)})
+                if action == "generate-metadata":
+                    return self.json(202, {"job_id": start_job(generate_metadata, pid)})
                 if action == "regenerate-cover":
                     return self.json(202, {"job_id": start_job(
                         regenerate_cover, pid, data.get("request", ""))})
