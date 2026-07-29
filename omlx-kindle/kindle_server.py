@@ -172,7 +172,28 @@ def load_project(project_id: str) -> dict:
     path = project_file(project_id)
     if not path.exists():
         raise FileNotFoundError(project_id)
-    return json.loads(path.read_text())
+    project = json.loads(path.read_text())
+    references = project.get("reference_images") or []
+    characters = project.setdefault("character_bible", [])
+    by_name = {
+        str(c.get("name", "")).strip().casefold(): c for c in characters
+    }
+    for slot, reference in enumerate(references[:3]):
+        reference["slot"] = slot
+        name = str(reference.get("character_name") or f"Character {slot + 1}").strip()
+        character = by_name.get(name.casefold())
+        if character is None and len(characters) < 3:
+            character = {
+                "name": name, "role": "", "appearance": "", "personality": "",
+                "continuity_rules": "",
+            }
+            characters.append(character)
+            by_name[name.casefold()] = character
+        if character is not None:
+            character["reference_image"] = reference.get("path", "")
+            character["reference_file_id"] = reference.get("file_id", "")
+            character["reference_slot"] = slot
+    return project
 
 
 def revision_snapshot(project: dict, label: str) -> None:
@@ -393,10 +414,12 @@ def normalize_story(project: dict, data: dict) -> dict:
         str(c.get("name", "")).strip().casefold(): c
         for c in project.get("character_bible", [])
     }
-    for character in generated_characters:
+    existing_characters = project.get("character_bible", [])
+    for index, character in enumerate(generated_characters):
         existing = existing_by_name.get(
-            str(character.get("name", "")).strip().casefold(), {})
-        for key in ("reference_image", "reference_file_id"):
+            str(character.get("name", "")).strip().casefold(),
+            existing_characters[index] if index < len(existing_characters) else {})
+        for key in ("reference_image", "reference_file_id", "reference_slot"):
             if existing.get(key):
                 character[key] = existing[key]
     project["character_bible"] = generated_characters
@@ -625,9 +648,13 @@ def upload_reference(project_id: str, data: dict) -> dict:
     p = load_project(project_id)
     refs = p.setdefault("reference_images", [])
     character_name = str(data.get("character_name") or "").strip()
-    matching = [i for i, ref in enumerate(refs)
-                if str(ref.get("character_name", "")).casefold()
-                == character_name.casefold() and character_name]
+    character_index = int(data.get("character_index", -1))
+    matching = [
+        i for i, ref in enumerate(refs)
+        if ref.get("slot") == character_index
+        or (str(ref.get("character_name", "")).casefold()
+            == character_name.casefold() and character_name)
+    ]
     if not matching and len(refs) >= 3:
         raise ValueError("Grok supports up to three reference images per illustration")
     match = re.fullmatch(r"data:(image/(?:png|jpeg|webp));base64,(.+)",
@@ -644,11 +671,11 @@ def upload_reference(project_id: str, data: dict) -> dict:
     path = folder / filename
     path.write_bytes(raw)
     file_id = xai_upload_file(path)
-    character_index = int(data.get("character_index", -1))
     entry = {"name": data.get("name") or filename,
              "label": data.get("label") or f"Identity reference for {character_name}",
              "path": "references/" + filename, "file_id": file_id,
-             "character_name": character_name, "key_tag": api_key_tag()}
+             "character_name": character_name, "key_tag": api_key_tag(),
+             "slot": character_index}
     if matching:
         refs[matching[0]] = entry
         for duplicate in reversed(matching[1:]):
@@ -659,6 +686,7 @@ def upload_reference(project_id: str, data: dict) -> dict:
     if 0 <= character_index < len(characters):
         characters[character_index]["reference_image"] = entry["path"]
         characters[character_index]["reference_file_id"] = file_id
+        characters[character_index]["reference_slot"] = character_index
     save_project(p)
     return p
 
