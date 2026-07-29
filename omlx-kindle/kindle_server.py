@@ -470,6 +470,11 @@ def normalize_metadata(metadata: dict, project: dict) -> dict:
 
 
 def normalize_story(project: dict, data: dict) -> dict:
+    existing_pages = {
+        int(page.get("number", 0)): page
+        for page in project.get("pages", [])
+        if int(page.get("number", 0)) > 0
+    }
     project["title"] = str(data.get("title") or project["title"])
     project["subtitle"] = str(data.get("subtitle") or "")
     project["story_summary"] = str(data.get("story_summary") or "")
@@ -500,6 +505,8 @@ def normalize_story(project: dict, data: dict) -> dict:
     source = data.get("pages") or []
     for i in range(expected):
         raw = source[i] if i < len(source) else {}
+        existing = existing_pages.get(i + 1, {})
+        existing_image = str(existing.get("image") or "")
         pages.append({
             "number": i + 1, "heading": str(raw.get("heading") or ""),
             "text": str(raw.get("text") or ""),
@@ -508,7 +515,9 @@ def normalize_story(project: dict, data: dict) -> dict:
             "negative_prompt": str(raw.get("negative_prompt") or
                                    "text, letters, logo, watermark, distorted anatomy"),
             "layout_note": str(raw.get("layout_note") or ""),
-            "image": "", "approved": False, "text_approved": False,
+            "image": existing_image,
+            "approved": bool(existing.get("approved")) if existing_image else False,
+            "text_approved": False,
         })
     project["pages"] = pages
     project["stage"] = "story"
