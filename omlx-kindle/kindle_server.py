@@ -45,22 +45,22 @@ IMAGE_ENGINES = [
     {
         "id": "grok", "label": "Grok Imagine · xAI cloud",
         "model": IMAGE_MODEL,
-        "description": "Cloud generation with up to three character references.",
+        "description": "Cloud generation; requested scene signage and readable text are allowed.",
     },
     {
         "id": "hidream", "label": "HiDream O1 · local MLX",
         "model": "HiDream-O1-Image-Dev",
-        "description": "Runs locally and uses the SSD-backed memory safeguards.",
+        "description": "Runs locally with SSD safeguards; signs and generated lettering are avoided.",
     },
     {
         "id": "flux", "label": "FLUX.1 Kontext · local MLX",
         "model": "FLUX.1-Kontext-dev-mflux-4bit",
-        "description": "Reference-led local generation; a starter reference is made automatically if needed.",
+        "description": "Reference-led local generation; signs and generated lettering are avoided.",
     },
     {
         "id": "nano_banana_2", "label": "Nano Banana 2 · Replicate",
         "model": "google/nano-banana-2",
-        "description": "Replicate cloud generation with strong character consistency.",
+        "description": "Replicate cloud generation; requested scene signage and readable text are allowed.",
     },
 ]
 IMAGE_ENGINE_IDS = {x["id"] for x in IMAGE_ENGINES}
@@ -551,8 +551,8 @@ provide concise narration/dialogue and panel-aware image direction. For
 non-fiction, build a useful factual progression and flag anything requiring
 fact checking. Maintain exact character visual continuity. Image prompts must
 describe the full scene, recurring character appearance, composition, camera,
-lighting, palette, and leave safe negative space for text. Do not put lettering,
-captions, logos, or watermarks inside generated images.
+lighting, palette, and leave safe negative space for overlaid book copy.
+{image_text_policy(s.get('image_engine', 'grok'))}
 
 Also create cover direction and KDP metadata. The pages array MUST contain
 exactly {count} objects numbered 1 through {count}.
@@ -689,6 +689,11 @@ def normalize_story(project: dict, data: dict) -> dict:
     pages = []
     expected = int(project["settings"]["page_count"])
     source = data.get("pages") or []
+    local_art = project["settings"].get("image_engine") in ("hidream", "flux")
+    default_negative = (
+        "text, letters, signage, captions, labels, logo, watermark, distorted anatomy"
+        if local_art else "unrequested writing, logo, watermark, distorted anatomy"
+    )
     for i in range(expected):
         raw = source[i] if i < len(source) else {}
         existing = existing_pages.get(i + 1, {})
@@ -699,7 +704,7 @@ def normalize_story(project: dict, data: dict) -> dict:
             "dialogue": raw.get("dialogue") or [],
             "image_prompt": str(raw.get("image_prompt") or ""),
             "negative_prompt": str(raw.get("negative_prompt") or
-                                   "text, letters, logo, watermark, distorted anatomy"),
+                                   default_negative),
             "layout_note": str(raw.get("layout_note") or ""),
             "image": existing_image,
             "approved": bool(existing.get("approved")) if existing_image else False,
@@ -849,8 +854,8 @@ def regenerate_cover(project_id: str, request: str) -> dict:
 prompt for this book. User request: {request or 'Make it commercially compelling.'}
 Title: {p['title']}; subtitle: {p.get('subtitle')}; summary: {p.get('story_summary')}
 Characters: {json.dumps(p.get('character_bible'), ensure_ascii=False)}
-Visual style: {style_label(p['settings'])}. Art must contain no generated text;
-the application overlays typography separately."""
+Visual style: {style_label(p['settings'])}.
+{image_text_policy(p['settings'].get('image_engine', 'grok'))}"""
     result = grok_structured(instruction + """
 The title and subtitle are both required and must not be blank. The subtitle
 should be concise, commercially appealing, and complement rather than repeat
@@ -1056,16 +1061,36 @@ def run_local_image(engine: str, prompt: str, settings: dict,
     raise RuntimeError("The local image job timed out after 20 minutes")
 
 
+def image_text_policy(engine: str) -> str:
+    if engine in ("hidream", "flux"):
+        return (
+            "STRICT LOCAL-MODEL TEXT RULE: Do not show signage, captions, labels, "
+            "book or poster writing, letters, numbers, logos, watermarks, or any "
+            "other visible text. Replace sign or label areas with plain, unmarked "
+            "surfaces. The studio will add all required typography separately."
+        )
+    return (
+        "CLOUD-MODEL TEXT RULE: Readable signage, labels, or words within the scene "
+        "are allowed when the page description requests them. Render requested "
+        "wording accurately and legibly, but do not invent unnecessary writing, "
+        "logos, or watermarks. Do not render the book title, subtitle, page heading, "
+        "or body copy because the studio overlays those separately."
+    )
+
+
 def generate_image(project_id: str, target: str) -> dict:
     p = load_project(project_id)
     s = p["settings"]
+    engine = s.get("image_engine", "grok")
+    if engine not in IMAGE_ENGINE_IDS:
+        engine = "grok"
     variation_id = uuid.uuid4().hex[:10]
     common = (
         f"Original book illustration. Visual style: {style_label(s)}. "
         f"Audience: {s.get('audience')}. Book continuity: {p.get('world_bible')}. "
         f"Character bible: {json.dumps(p.get('character_bible'), ensure_ascii=False)}. "
         "Maintain exact recurring character identity, clothing and palette. "
-        "Professional publishable composition, no text, no letters, no logo, no watermark."
+        "Professional publishable composition. " + image_text_policy(engine)
     )
     ref_notes = [r.get("label") for r in p.get("reference_images", []) if r.get("label")]
     if ref_notes:
@@ -1107,9 +1132,6 @@ def generate_image(project_id: str, target: str) -> dict:
             "background details and visual storytelling. Do not reproduce the "
             "previous image."
         )
-    engine = s.get("image_engine", "grok")
-    if engine not in IMAGE_ENGINE_IDS:
-        engine = "grok"
     duplicate_retry = False
     if engine == "grok":
         w, h = trim_size(s)
