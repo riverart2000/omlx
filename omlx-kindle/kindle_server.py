@@ -936,10 +936,15 @@ def local_reference_images(project: dict, target: str, engine: str) -> list[str]
         if page.get("image"):
             existing.append(folder / page["image"])
 
-    ordered = ([current] if current and engine == "flux" else []) + attached
-    if current and engine != "flux" and not attached:
-        ordered.append(current)
-    ordered.extend(existing)
+    if engine == "flux":
+        # Kontext is an edit/reference model, so prefer the image being revised,
+        # then a character reference, then another existing book image.
+        ordered = ([current] if current else []) + attached + existing
+    else:
+        # HiDream and Nano Banana can generate directly from text. Feeding a
+        # previous page back as an implicit reference makes subsequent pages
+        # repeat its composition; only explicit character references carry over.
+        ordered = attached
     unique = []
     for path in ordered:
         if path and path.exists() and path.is_file() and path not in unique:
@@ -967,6 +972,52 @@ def local_image_geometry(settings: dict) -> tuple[int, int, str, str]:
     if aspect == "3:2":
         return 2496, 1664, "3:2", "3:2"
     return 2304, 1792, "", "4:3"
+
+
+def near_duplicate_project_image(project: dict, raw: bytes) -> str:
+    """Return the matching image path when HiDream repeats a composition."""
+    from PIL import Image
+
+    def fingerprints(source) -> tuple[list[bool], list[bool]]:
+        with Image.open(source) as image:
+            grey = image.convert("L")
+            average_image = grey.resize((16, 16), Image.Resampling.LANCZOS)
+            average_pixels = list(average_image.getdata())
+            average = sum(average_pixels) / len(average_pixels)
+            average_hash = [value >= average for value in average_pixels]
+            difference_image = grey.resize((17, 16), Image.Resampling.LANCZOS)
+            difference_pixels = list(difference_image.getdata())
+            difference_hash = [
+                difference_pixels[row * 17 + col]
+                > difference_pixels[row * 17 + col + 1]
+                for row in range(16) for col in range(16)
+            ]
+            return average_hash, difference_hash
+
+    try:
+        new_average, new_difference = fingerprints(io.BytesIO(raw))
+    except Exception:
+        return ""
+    rels = []
+    cover_image = (project.get("cover") or {}).get("image")
+    if cover_image:
+        rels.append(cover_image)
+    rels.extend(page.get("image") for page in project.get("pages") or []
+                if page.get("image"))
+    for rel in dict.fromkeys(rels):
+        path = project_dir(project["id"]) / rel
+        if not path.exists() or not path.is_file():
+            continue
+        try:
+            old_average, old_difference = fingerprints(path)
+        except Exception:
+            continue
+        average_distance = sum(a != b for a, b in zip(new_average, old_average))
+        difference_distance = sum(
+            a != b for a, b in zip(new_difference, old_difference))
+        if average_distance <= 64 and difference_distance <= 72:
+            return rel
+    return ""
 
 
 def run_local_image(engine: str, prompt: str, settings: dict,
@@ -1020,13 +1071,24 @@ def generate_image(project_id: str, target: str) -> dict:
     if ref_notes:
         common += " Reference image roles: " + "; ".join(ref_notes) + "."
     if target == "cover":
-        prompt = common + "\nCOVER ART: " + p["cover"]["image_prompt"]
+        prompt = (
+            "COVER ART — follow this scene description first and exactly: "
+            + p["cover"]["image_prompt"]
+            + "\nCreate a distinctive front-cover composition, not an interior-page scene.\n"
+            + common
+        )
         had_existing_image = bool(p["cover"].get("image"))
         filename = f"cover-{variation_id}.png" if had_existing_image else "cover.png"
     else:
         number = int(target)
         page = p["pages"][number - 1]
-        prompt = common + f"\nPAGE {number}: " + page["image_prompt"]
+        prompt = (
+            f"INTERIOR PAGE {number} — follow this scene description first and exactly: "
+            + page["image_prompt"]
+            + "\nCreate a composition unique to this page; do not repeat the cover "
+              "or another page's scene.\n"
+            + common
+        )
         if page.get("negative_prompt"):
             prompt += "\nAvoid: " + page["negative_prompt"]
         had_existing_image = bool(page.get("image"))
@@ -1048,6 +1110,7 @@ def generate_image(project_id: str, target: str) -> dict:
     engine = s.get("image_engine", "grok")
     if engine not in IMAGE_ENGINE_IDS:
         engine = "grok"
+    duplicate_retry = False
     if engine == "grok":
         w, h = trim_size(s)
         aspect = "1:1" if abs(w - h) < .25 else ("3:4" if h > w else "4:3")
@@ -1081,6 +1144,16 @@ def generate_image(project_id: str, target: str) -> dict:
             starter = run_local_image("hidream", prompt, s, [])
             references = ["data:image/png;base64," + base64.b64encode(starter).decode()]
         raw = run_local_image(engine, prompt, s, references)
+        duplicate = near_duplicate_project_image(p, raw) if engine == "hidream" else ""
+        if duplicate:
+            duplicate_retry = True
+            retry_prompt = (
+                "IMPORTANT: Produce a radically different composition from every "
+                "existing book image. Change the scene layout, focal objects, camera "
+                "position and visual storytelling while following the requested page.\n"
+                + prompt
+            )
+            raw = run_local_image(engine, retry_prompt, s, references)
     path = project_dir(project_id) / "images" / filename
     path.write_bytes(raw)
     rel = "images/" + filename
@@ -1097,7 +1170,8 @@ def generate_image(project_id: str, target: str) -> dict:
             f"Regenerated {'cover' if target == 'cover' else f'page {target}'} image"
             if had_existing_image
             else f"Generated {'cover' if target == 'cover' else f'page {target}'} image"
-        ) + f" with {next(x['label'] for x in IMAGE_ENGINES if x['id'] == engine)}",
+        ) + f" with {next(x['label'] for x in IMAGE_ENGINES if x['id'] == engine)}"
+        + ("; automatically retried a near-duplicate" if duplicate_retry else ""),
     })
     save_project(p)
     return {"project": p, "image": rel, "image_engine": engine}
