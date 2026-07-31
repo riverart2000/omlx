@@ -36,8 +36,35 @@ EXPORT_DIR = Path(os.environ.get(
 TEXT_MODEL = os.environ.get("GROK_BOOK_MODEL", "grok-4.3")
 IMAGE_MODEL = os.environ.get("GROK_IMAGE_MODEL", "grok-imagine-image")
 XAI_BASE = os.environ.get("XAI_BASE_URL", "https://api.x.ai/v1").rstrip("/")
+LOCAL_IMAGE_BASE = os.environ.get(
+    "OMLX_IMAGE_BASE_URL", "http://127.0.0.1:8400").rstrip("/")
 LIBRARY_DIR.mkdir(parents=True, exist_ok=True)
 EXPORT_DIR.mkdir(parents=True, exist_ok=True)
+
+IMAGE_ENGINES = [
+    {
+        "id": "grok", "label": "Grok Imagine · xAI cloud",
+        "model": IMAGE_MODEL,
+        "description": "Cloud generation with up to three character references.",
+    },
+    {
+        "id": "hidream", "label": "HiDream O1 · local MLX",
+        "model": "HiDream-O1-Image-Dev",
+        "description": "Runs locally and uses the SSD-backed memory safeguards.",
+    },
+    {
+        "id": "flux", "label": "FLUX.1 Kontext · local MLX",
+        "model": "FLUX.1-Kontext-dev-mflux-4bit",
+        "description": "Reference-led local generation; a starter reference is made automatically if needed.",
+    },
+    {
+        "id": "nano_banana_2", "label": "Nano Banana 2 · Replicate",
+        "model": "google/nano-banana-2",
+        "description": "Replicate cloud generation with strong character consistency.",
+    },
+]
+IMAGE_ENGINE_IDS = {x["id"] for x in IMAGE_ENGINES}
+_project_create_lock = threading.Lock()
 
 BOOK_TYPES = [
     ("picture_book", "Children’s picture book"),
@@ -303,7 +330,44 @@ def list_projects() -> list[dict]:
     return sorted(out, key=lambda x: x["updated_at"], reverse=True)
 
 
+def _recent_duplicate_project(data: dict, window_seconds: int = 45) -> dict | None:
+    """Return a just-created matching project when a UI action was submitted twice."""
+    if not data.get("prevent_duplicate"):
+        return None
+    title = str(data.get("title") or "Untitled Book").strip().casefold()
+    series_name = str(data.get("series_name") or "").strip().casefold()
+    book_number = str(data.get("book_number") or "").strip()
+    template_id = str((data.get("series_template") or {}).get("id") or "")
+    cutoff = time.time() - window_seconds
+    for path in LIBRARY_DIR.glob("*/project.json"):
+        try:
+            if path.stat().st_mtime < cutoff:
+                continue
+            candidate = json.loads(path.read_text())
+            settings = candidate.get("settings") or {}
+            candidate_template = candidate.get("series_template") or {}
+            if (
+                str(candidate.get("title") or "").strip().casefold() == title
+                and str(settings.get("series_name") or "").strip().casefold() == series_name
+                and str(settings.get("book_number") or "").strip() == book_number
+                and str(candidate_template.get("id") or "") == template_id
+            ):
+                return load_project(candidate["id"])
+        except Exception:
+            continue
+    return None
+
+
 def new_project(data: dict) -> dict:
+    # The lock makes the duplicate check and project creation one atomic action.
+    with _project_create_lock:
+        duplicate = _recent_duplicate_project(data)
+        if duplicate:
+            return duplicate
+        return _new_project(data)
+
+
+def _new_project(data: dict) -> dict:
     pid = "book_" + uuid.uuid4().hex[:12]
     settings = {
         "book_type": data.get("book_type", "picture_book"),
@@ -313,6 +377,10 @@ def new_project(data: dict) -> dict:
         "tone": data.get("tone", "Warm, engaging and imaginative"),
         "page_count": int(data.get("page_count", 24)),
         "image_style": data.get("image_style", "cinematic_3d"),
+        "image_engine": (
+            data.get("image_engine", "grok")
+            if data.get("image_engine", "grok") in IMAGE_ENGINE_IDS else "grok"
+        ),
         "custom_style": data.get("custom_style", ""),
         "trim": data.get("trim", "8x10"),
         "layout": data.get("layout", "fixed"),
@@ -347,12 +415,20 @@ def xai_json(url: str, payload: dict, timeout=300) -> dict:
         url, data=json.dumps(payload).encode(), method="POST",
         headers={"Authorization": "Bearer " + key, "Content-Type": "application/json",
                  "User-Agent": "oMLX-Kindle-Studio/1.0"})
-    try:
-        with urllib.request.urlopen(req, timeout=timeout) as response:
-            return json.loads(response.read() or b"{}")
-    except urllib.error.HTTPError as e:
-        detail = e.read().decode("utf-8", "replace")[:1000]
-        raise RuntimeError(f"xAI API {e.code}: {detail}") from e
+    for attempt in range(3):
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as response:
+                return json.loads(response.read() or b"{}")
+        except urllib.error.HTTPError as e:
+            detail = e.read().decode("utf-8", "replace")[:1000]
+            if e.code not in (408, 425, 429, 500, 502, 503, 504) or attempt == 2:
+                raise RuntimeError(f"xAI API {e.code}: {detail}") from e
+        except (urllib.error.URLError, TimeoutError, ConnectionError, OSError) as e:
+            if attempt == 2:
+                raise RuntimeError(
+                    "The xAI image connection failed after three attempts: " + str(e)) from e
+        time.sleep(2 ** attempt)
+    raise RuntimeError("The xAI request could not be completed")
 
 
 def xai_upload_file(path: Path) -> str:
@@ -795,8 +871,138 @@ def download_image(item: dict) -> bytes:
     if not url:
         raise RuntimeError("xAI image response contained no URL or image data")
     req = urllib.request.Request(url, headers={"User-Agent": "oMLX-Kindle-Studio/1.0"})
-    with urllib.request.urlopen(req, timeout=180) as response:
-        return response.read()
+    for attempt in range(3):
+        try:
+            with urllib.request.urlopen(req, timeout=180) as response:
+                return response.read()
+        except urllib.error.HTTPError as e:
+            if e.code not in (408, 425, 429, 500, 502, 503, 504) or attempt == 2:
+                raise RuntimeError(f"Image download failed with HTTP {e.code}") from e
+        except (urllib.error.URLError, TimeoutError, ConnectionError, OSError) as e:
+            if attempt == 2:
+                raise RuntimeError(
+                    "The generated image download failed after three attempts: " + str(e)) from e
+        time.sleep(2 ** attempt)
+    raise RuntimeError("The generated image could not be downloaded")
+
+
+def local_image_json(path: str, payload: dict | None = None, timeout=90) -> dict:
+    url = LOCAL_IMAGE_BASE + path
+    data = json.dumps(payload).encode() if payload is not None else None
+    req = urllib.request.Request(
+        url, data=data, method="POST" if payload is not None else "GET",
+        headers={"Content-Type": "application/json",
+                 "User-Agent": "oMLX-Kindle-Studio/1.0"})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as response:
+            return json.loads(response.read() or b"{}")
+    except urllib.error.HTTPError as e:
+        detail = e.read().decode("utf-8", "replace")[:1000]
+        raise RuntimeError(f"Local image service {e.code}: {detail}") from e
+    except (urllib.error.URLError, TimeoutError, ConnectionError, OSError) as e:
+        raise RuntimeError(
+            "The local image service is not available. Open oMLX and try again. " + str(e)) from e
+
+
+def image_data_url(path: Path) -> str:
+    mime = mimetypes.guess_type(path.name)[0] or "image/png"
+    return f"data:{mime};base64," + base64.b64encode(path.read_bytes()).decode()
+
+
+def local_reference_images(project: dict, target: str, engine: str) -> list[str]:
+    """Collect character and existing-art references without exposing local paths."""
+    folder = project_dir(project["id"])
+    attached = []
+    for ref in (project.get("reference_images") or [])[:3]:
+        path = folder / str(ref.get("path") or "")
+        if path.exists() and path.is_file():
+            attached.append(path)
+
+    current = None
+    if target == "cover":
+        rel = (project.get("cover") or {}).get("image")
+    else:
+        rel = project["pages"][int(target) - 1].get("image")
+    if rel:
+        candidate = folder / rel
+        if candidate.exists() and candidate.is_file():
+            current = candidate
+
+    existing = []
+    cover_rel = (project.get("cover") or {}).get("image")
+    if cover_rel:
+        existing.append(folder / cover_rel)
+    for page in project.get("pages") or []:
+        if page.get("image"):
+            existing.append(folder / page["image"])
+
+    ordered = ([current] if current and engine == "flux" else []) + attached
+    if current and engine != "flux" and not attached:
+        ordered.append(current)
+    ordered.extend(existing)
+    unique = []
+    for path in ordered:
+        if path and path.exists() and path.is_file() and path not in unique:
+            unique.append(path)
+    limit = 1 if engine == "flux" else 3
+    return [image_data_url(path) for path in unique[:limit]]
+
+
+def local_image_geometry(settings: dict) -> tuple[int, int, str, str]:
+    w_in, h_in = trim_size(settings)
+    ratio = w_in / h_in
+    candidates = {
+        "1:1": 1.0, "2:3": 2 / 3, "3:4": 3 / 4, "4:5": 4 / 5,
+        "3:2": 3 / 2, "4:3": 4 / 3,
+    }
+    aspect = min(candidates, key=lambda key: abs(candidates[key] - ratio))
+    if aspect == "1:1":
+        return 2048, 2048, "1:1", "1:1"
+    if aspect == "4:5":
+        return 1792, 2304, "4:5", "4:5"
+    if aspect == "2:3":
+        return 1664, 2496, "", "2:3"
+    if aspect == "3:4":
+        return 1792, 2304, "", "3:4"
+    if aspect == "3:2":
+        return 2496, 1664, "3:2", "3:2"
+    return 2304, 1792, "", "4:3"
+
+
+def run_local_image(engine: str, prompt: str, settings: dict,
+                    references: list[str]) -> bytes:
+    service_engine = "kontext" if engine == "flux" else engine
+    width, height, preset, aspect = local_image_geometry(settings)
+    payload = {
+        "engine": service_engine, "prompt": prompt[:2000],
+        "width": width, "height": height, "steps": 28,
+        "seed": int(uuid.uuid4().hex[:8], 16),
+        "reference_images": references,
+        "nano_aspect_ratio": aspect, "nano_output_format": "png",
+    }
+    if preset:
+        payload["preset"] = preset
+    if service_engine == "kontext":
+        payload["reference_image"] = references[0] if references else ""
+    response = local_image_json("/generate", payload, timeout=120)
+    job_id = response.get("job_id")
+    if not job_id:
+        raise RuntimeError("The local image service did not start the image job")
+    deadline = time.time() + 1200
+    while time.time() < deadline:
+        status = local_image_json(
+            "/status?" + urllib.parse.urlencode({"id": job_id}), timeout=60)
+        if status.get("status") == "done":
+            result = status.get("result") or {}
+            image_url = result.get("url")
+            if not image_url:
+                raise RuntimeError("The local image job finished without an image")
+            return download_image({"url": urllib.parse.urljoin(
+                LOCAL_IMAGE_BASE + "/", image_url.lstrip("/"))})
+        if status.get("status") == "error" or status.get("error"):
+            raise RuntimeError(status.get("error") or "The local image job failed")
+        time.sleep(2)
+    raise RuntimeError("The local image job timed out after 20 minutes")
 
 
 def generate_image(project_id: str, target: str) -> dict:
@@ -839,30 +1045,42 @@ def generate_image(project_id: str, target: str) -> dict:
             "background details and visual storytelling. Do not reproduce the "
             "previous image."
         )
-    w, h = trim_size(s)
-    aspect = "1:1" if abs(w - h) < .25 else ("3:4" if h > w else "4:3")
-    payload = {
-        "model": IMAGE_MODEL, "prompt": prompt[:6000],
-        "n": 1, "resolution": "1k", "aspect_ratio": aspect,
-    }
-    for ref in p.get("reference_images", []):
-        if ref.get("key_tag") == api_key_tag() and ref.get("file_id"):
-            continue
-        local_ref = project_dir(project_id) / str(ref.get("path") or "")
-        if local_ref.exists():
-            ref["file_id"] = xai_upload_file(local_ref)
-            ref["key_tag"] = api_key_tag()
-    save_project(p)
-    refs = [r for r in p.get("reference_images", []) if r.get("file_id")][:3]
-    endpoint = "/images/generations"
-    if refs:
-        endpoint = "/images/edits"
-        payload["images"] = [{"file_id": r["file_id"]} for r in refs]
-    data = xai_json(XAI_BASE + endpoint, payload, timeout=600)
-    items = data.get("data") or []
-    if not items:
-        raise RuntimeError("xAI returned no generated image")
-    raw = download_image(items[0])
+    engine = s.get("image_engine", "grok")
+    if engine not in IMAGE_ENGINE_IDS:
+        engine = "grok"
+    if engine == "grok":
+        w, h = trim_size(s)
+        aspect = "1:1" if abs(w - h) < .25 else ("3:4" if h > w else "4:3")
+        payload = {
+            "model": IMAGE_MODEL, "prompt": prompt[:6000],
+            "n": 1, "resolution": "1k", "aspect_ratio": aspect,
+        }
+        for ref in p.get("reference_images", []):
+            if ref.get("key_tag") == api_key_tag() and ref.get("file_id"):
+                continue
+            local_ref = project_dir(project_id) / str(ref.get("path") or "")
+            if local_ref.exists():
+                ref["file_id"] = xai_upload_file(local_ref)
+                ref["key_tag"] = api_key_tag()
+        save_project(p)
+        refs = [r for r in p.get("reference_images", []) if r.get("file_id")][:3]
+        endpoint = "/images/generations"
+        if refs:
+            endpoint = "/images/edits"
+            payload["images"] = [{"file_id": r["file_id"]} for r in refs]
+        data = xai_json(XAI_BASE + endpoint, payload, timeout=600)
+        items = data.get("data") or []
+        if not items:
+            raise RuntimeError("xAI returned no generated image")
+        raw = download_image(items[0])
+    else:
+        references = local_reference_images(p, target, engine)
+        if engine == "flux" and not references:
+            # Kontext is reference-led. Make a private HiDream starter, then let
+            # FLUX produce the selected final image from that reference.
+            starter = run_local_image("hidream", prompt, s, [])
+            references = ["data:image/png;base64," + base64.b64encode(starter).decode()]
+        raw = run_local_image(engine, prompt, s, references)
     path = project_dir(project_id) / "images" / filename
     path.write_bytes(raw)
     rel = "images/" + filename
@@ -879,10 +1097,10 @@ def generate_image(project_id: str, target: str) -> dict:
             f"Regenerated {'cover' if target == 'cover' else f'page {target}'} image"
             if had_existing_image
             else f"Generated {'cover' if target == 'cover' else f'page {target}'} image"
-        ),
+        ) + f" with {next(x['label'] for x in IMAGE_ENGINES if x['id'] == engine)}",
     })
     save_project(p)
-    return {"project": p, "image": rel}
+    return {"project": p, "image": rel, "image_engine": engine}
 
 
 def upload_reference(project_id: str, data: dict) -> dict:
@@ -911,11 +1129,20 @@ def upload_reference(project_id: str, data: dict) -> dict:
     filename = f"reference-{len(refs) + 1}-{slug(data.get('name', 'image'))}{ext}"
     path = folder / filename
     path.write_bytes(raw)
-    file_id = xai_upload_file(path)
+    # Keep the local reference even if xAI is temporarily unavailable. Grok
+    # uploads it lazily when that engine is actually selected.
+    file_id = ""
+    key_tag = ""
+    if api_key():
+        try:
+            file_id = xai_upload_file(path)
+            key_tag = api_key_tag()
+        except Exception:
+            pass
     entry = {"name": data.get("name") or filename,
              "label": data.get("label") or f"Identity reference for {character_name}",
              "path": "references/" + filename, "file_id": file_id,
-             "character_name": character_name, "key_tag": api_key_tag(),
+             "character_name": character_name, "key_tag": key_tag,
              "slot": character_index}
     if matching:
         refs[matching[0]] = entry
@@ -1614,6 +1841,7 @@ class Handler(BaseHTTPRequestHandler):
                     "reading_levels": READING_LEVELS, "page_counts": PAGE_COUNTS,
                     "series_name": SERIES_NAME, "series_books": SERIES_BOOKS,
                     "text_model": TEXT_MODEL, "image_model": IMAGE_MODEL,
+                    "image_engines": IMAGE_ENGINES,
                 })
             if path == "/api/projects":
                 return self.json(200, {"projects": list_projects()})
