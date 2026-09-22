@@ -13,8 +13,8 @@
     <dict>
         <key>IMAGE_PORT</key>
         <string>8400</string>
-        <key>HIDREAM_MODEL</key>
-        <string>/Users/joebains/.omlx/models/mlx-community/HiDream-O1-Image-Dev-mlx-bf16</string>
+        <key>FLUX2_LOCAL_MAX_TOKENS</key>
+        <string>1024</string>
     </dict>
     <key>RunAtLoad</key>
     <true/>

@@ -1,0 +1,157 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Video Polish · oMLX</title>
+  <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+  <div class="app-shell">
+    <header class="topbar">
+      <div class="brand">
+        <span class="brand-mark">VP</span>
+        <div><strong>Video Polish</strong><span>Local post-production for oMLX</span></div>
+      </div>
+      <div class="top-actions">
+        <span class="health" id="health"><i></i>Connecting</span>
+        <button class="button ghost" id="clearProject" type="button">New project</button>
+      </div>
+    </header>
+
+    <main class="workspace">
+      <aside class="library panel">
+        <div class="panel-heading">
+          <div><span class="eyebrow">Timeline</span><h2>Source clips</h2></div>
+          <span class="count" id="clipCount">0</span>
+        </div>
+        <label class="drop-zone" id="dropZone">
+          <input id="fileInput" type="file" accept="video/*,.mkv,.mts,.m2ts" multiple hidden>
+          <span class="drop-icon">＋</span>
+          <strong>Add videos</strong>
+          <span>Drop one or more clips here</span>
+        </label>
+        <div class="upload-progress hidden" id="uploadProgress">
+          <div><span id="uploadName">Uploading…</span><span id="uploadPercent">0%</span></div>
+          <progress id="uploadBar" max="100" value="0"></progress>
+        </div>
+        <div class="clip-list" id="clipList"></div>
+        <p class="library-hint">Drag clips to change the stitch order. Select one to trim it.</p>
+      </aside>
+
+      <section class="viewer-column">
+        <div class="viewer panel">
+          <div class="viewer-placeholder" id="viewerPlaceholder">
+            <div class="placeholder-orb">▶</div>
+            <h1>Bring your footage to life</h1>
+            <p>Import clips, balance light and colour, clean speech, remove false starts and export one finished video.</p>
+            <button class="button primary" id="heroImport" type="button">Choose videos</button>
+          </div>
+          <video id="preview" class="preview hidden" controls playsinline></video>
+          <div class="clip-tools hidden" id="clipTools">
+            <div class="selected-title"><span id="selectedName"></span><span id="selectedMeta"></span></div>
+            <div class="trim-grid">
+              <label>Start <span class="time-unit">seconds</span><input id="trimStart" type="number" min="0" step="0.05" value="0"></label>
+              <div class="trim-line"><i></i><span>KEEP</span><i></i></div>
+              <label>End <span class="time-unit">seconds</span><input id="trimEnd" type="number" min="0" step="0.05" value="0"></label>
+            </div>
+          </div>
+        </div>
+
+        <section class="review panel" id="reviewPanel">
+          <div class="panel-heading review-heading">
+            <div><span class="eyebrow">Smart edit</span><h2>Speech cut review</h2></div>
+            <button class="button secondary" id="analyseBtn" type="button" disabled>Analyse speech</button>
+          </div>
+          <div class="empty-review" id="emptyReview">
+            Analyse the clips to find “um”, “ah”, repeated attempts and abandoned phrases. Every suggested cut remains reviewable.
+          </div>
+          <div class="suggestion-list hidden" id="suggestionList"></div>
+        </section>
+      </section>
+
+      <aside class="inspector panel">
+        <div class="tabs" role="tablist">
+          <button class="tab active" data-tab="video" type="button">Video</button>
+          <button class="tab" data-tab="audio" type="button">Audio</button>
+          <button class="tab" data-tab="edit" type="button">Edit</button>
+          <button class="tab" data-tab="export" type="button">Export</button>
+        </div>
+
+        <div class="tab-panel active" data-panel="video">
+          <div class="section-title"><div><span class="eyebrow">Picture</span><h3>Light &amp; colour</h3></div><button class="text-button" id="resetVideo" type="button">Reset</button></div>
+          <label class="toggle-row"><span><strong>Auto balance</strong><small>Gently correct black, white and colour levels</small></span><input id="autoBalance" type="checkbox" checked><i></i></label>
+          <div class="sliders">
+            <label class="slider-row"><span>Light <output for="light">+15</output></span><input id="light" type="range" min="-100" max="100" value="15"></label>
+            <label class="slider-row"><span>Exposure <output for="exposure">0.0</output></span><input id="exposure" type="range" min="-2" max="2" step="0.1" value="0"></label>
+            <label class="slider-row"><span>Contrast <output for="contrast">+8</output></span><input id="contrast" type="range" min="-100" max="100" value="8"></label>
+            <label class="slider-row"><span>Highlights <output for="highlights">0</output></span><input id="highlights" type="range" min="-100" max="100" value="0"></label>
+            <label class="slider-row"><span>Shadows <output for="shadows">+8</output></span><input id="shadows" type="range" min="-100" max="100" value="8"></label>
+            <label class="slider-row"><span>Saturation <output for="saturation">+8</output></span><input id="saturation" type="range" min="-100" max="100" value="8"></label>
+            <label class="slider-row"><span>Warmth <output for="warmth">0</output></span><input id="warmth" type="range" min="-100" max="100" value="0"></label>
+          </div>
+        </div>
+
+        <div class="tab-panel" data-panel="audio">
+          <div class="section-title"><div><span class="eyebrow">Dialogue</span><h3>Voice enhancement</h3></div><button class="text-button" id="resetAudio" type="button">Reset</button></div>
+          <div class="model-note"><span>MLX</span><p><strong>DeepFilterNet voice isolation</strong><br>Runs privately on this Mac.</p></div>
+          <div class="sliders">
+            <label class="slider-row"><span>Voice isolation <output for="voiceIsolation">70</output></span><input id="voiceIsolation" type="range" min="0" max="100" value="70"></label>
+            <label class="slider-row"><span>Noise removal <output for="noiseRemoval">45</output></span><input id="noiseRemoval" type="range" min="0" max="100" value="45"></label>
+            <label class="slider-row"><span>Dialogue enhance <output for="dialogueEnhance">40</output></span><input id="dialogueEnhance" type="range" min="0" max="100" value="40"></label>
+            <label class="slider-row"><span>Compression <output for="compression">35</output></span><input id="compression" type="range" min="0" max="100" value="35"></label>
+          </div>
+          <div class="divider"></div>
+          <label class="toggle-row"><span><strong>Correct loudness</strong><small>Two-pass programme measurement</small></span><input id="normalizeAudio" type="checkbox" checked><i></i></label>
+          <label class="select-row"><span>Target</span><select id="targetLufs"><option value="-14">Online / YouTube · −14 LUFS</option><option value="-16" selected>Natural dialogue · −16 LUFS</option><option value="-23">Broadcast · −23 LUFS</option></select></label>
+        </div>
+
+        <div class="tab-panel" data-panel="edit">
+          <div class="section-title"><div><span class="eyebrow">Assembly</span><h3>Speech &amp; transitions</h3></div></div>
+          <label class="toggle-row"><span><strong>Remove filler words</strong><small>Um, uh, ah, erm and close variants</small></span><input id="removeFillers" type="checkbox" checked><i></i></label>
+          <label class="toggle-row"><span><strong>Find false starts</strong><small>Repeated and abandoned attempts</small></span><input id="removeFalseStarts" type="checkbox" checked><i></i></label>
+          <label class="toggle-row"><span><strong>Local LLM review</strong><small>Uses oMLX to make conservative edit decisions</small></span><input id="useLlm" type="checkbox" checked><i></i></label>
+          <label class="select-row"><span>Cut padding</span><select id="cutPadding"><option value="25">Tight · 25 ms</option><option value="55" selected>Natural · 55 ms</option><option value="100">Relaxed · 100 ms</option></select></label>
+          <div class="divider"></div>
+          <label class="select-row"><span>Between clips</span><select id="transitionStyle"><option value="none">Cut</option><option value="fade" selected>Cross dissolve</option><option value="dissolve">Film dissolve</option><option value="wipeleft">Wipe left</option><option value="smoothleft">Smooth slide</option></select></label>
+          <label class="slider-row"><span>Transition <output for="transitionDuration">0.35 s</output></span><input id="transitionDuration" type="range" min="0.1" max="2" step="0.05" value="0.35"></label>
+        </div>
+
+        <div class="tab-panel" data-panel="export">
+          <div class="section-title"><div><span class="eyebrow">Delivery</span><h3>Export settings</h3></div></div>
+          <label class="field-row"><span>File name</span><input id="outputName" type="text" placeholder="First clip polished"></label>
+          <label class="select-row"><span>Resolution</span><select id="resolution"><option value="source" selected>Match first clip</option><option value="2160">4K</option><option value="1080">1080p</option><option value="720">720p</option></select></label>
+          <label class="select-row"><span>Codec</span><select id="codec"><option value="h264" selected>H.264 · Compatible</option><option value="hevc">HEVC · Smaller</option></select></label>
+          <label class="select-row"><span>Quality</span><select id="quality"><option value="high" selected>High</option><option value="balanced">Balanced</option><option value="compact">Compact</option></select></label>
+          <div class="export-note"><strong>Saved locally</strong><span id="outputDirectory">Movies/oMLX Video Polish</span><small>Nothing is uploaded to the cloud.</small></div>
+        </div>
+      </aside>
+    </main>
+
+    <footer class="render-bar">
+      <div class="job-status">
+        <div class="status-copy"><strong id="jobStage">Ready to polish</strong><span id="jobMessage">Add one or more video clips to begin.</span></div>
+        <progress id="jobProgress" max="100" value="0"></progress>
+      </div>
+      <button class="button render-button" id="renderBtn" type="button" disabled><span>✦</span> Polish &amp; export</button>
+    </footer>
+  </div>
+
+  <div class="result-modal hidden" id="resultModal" role="dialog" aria-modal="true" aria-labelledby="resultTitle">
+    <div class="result-card">
+      <button class="modal-close" id="closeResult" type="button" aria-label="Close">×</button>
+      <span class="success-mark">✓</span>
+      <h2 id="resultTitle">Your video is ready</h2>
+      <p id="resultSummary"></p>
+      <video id="resultVideo" controls playsinline></video>
+      <div class="result-actions">
+        <a class="button primary" id="downloadResult" download>Download copy</a>
+        <button class="button secondary" id="revealResult" type="button">Show in Finder</button>
+      </div>
+      <small id="resultPath"></small>
+    </div>
+  </div>
+
+  <script src="/static/app.js" defer></script>
+</body>
+</html>

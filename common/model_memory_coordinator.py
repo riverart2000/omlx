@@ -9,6 +9,7 @@ from __future__ import annotations
 import fcntl
 import json
 import os
+import re
 import subprocess
 import time
 import urllib.parse
@@ -63,9 +64,21 @@ def release_lease(fd) -> None:
 def lease_status() -> dict:
     try:
         with open(LOCK_PATH) as f:
-            return json.load(f)
+            status = json.load(f)
     except Exception:
         return {}
+    pid = int(status.get("pid") or 0)
+    if pid:
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            # A hard stop releases the OS flock automatically, but can leave
+            # the old descriptive JSON behind. Do not present that dead job as
+            # active to the UI.
+            return {}
+        except PermissionError:
+            pass
+    return status
 
 
 def available_memory_gb() -> float:
@@ -88,6 +101,37 @@ def available_memory_gb() -> float:
             "Pages free", "Pages inactive", "Pages speculative",
             "Pages purgeable"))
         return pages * page / 1e9
+    except Exception:
+        return 0.0
+
+
+def pressure_available_memory_gb() -> float:
+    """Memory macOS says is available after accounting for compression.
+
+    ``vm_stat`` alone is deliberately conservative, but on unified-memory Macs
+    it can substantially under-count memory that the kernel can recover from
+    the compressor.  ``memory_pressure -Q`` is the OS-level pressure signal and
+    reports that additional headroom as a percentage of physical memory.
+    """
+    try:
+        raw = subprocess.check_output(
+            ["memory_pressure", "-Q"], text=True, timeout=4)
+        match = re.search(r"memory free percentage:\s*(\d+)%", raw,
+                          flags=re.IGNORECASE)
+        if not match:
+            return 0.0
+        pct = max(0.0, min(100.0, float(match.group(1))))
+        try:
+            total = int(subprocess.check_output(
+                ["sysctl", "-n", "hw.memsize"], text=True,
+                timeout=3, stderr=subprocess.DEVNULL).strip())
+        except Exception:
+            total_match = re.search(r"system has\s+(\d+)", raw,
+                                    flags=re.IGNORECASE)
+            if not total_match:
+                return 0.0
+            total = int(total_match.group(1))
+        return total / 1e9 * pct / 100.0
     except Exception:
         return 0.0
 

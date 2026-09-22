@@ -16,7 +16,9 @@
     "sse_keepalive_mode": "chunk",
     "auto_start_on_launch": true,
     "burst_decode_mode": "balanced",
-    "preserve_mid_system_cache": true
+    "preserve_mid_system_cache": true,
+    "distributed_inference_enabled": false,
+    "max_audio_upload_size": "100MB"
   },
   "model": {
     "model_dirs": [
@@ -28,8 +30,8 @@
   },
   "memory": {
     "prefill_memory_guard": true,
-    "memory_guard_tier": "balanced",
-    "memory_guard_custom_ceiling_gb": 0.0,
+    "memory_guard_tier": "custom",
+    "memory_guard_custom_ceiling_gb": 48.0,
     "soft_threshold": 0.85,
     "hard_threshold": 0.95,
     "prefill_safe_zone_ratio": 0.8,
@@ -38,14 +40,22 @@
   "scheduler": {
     "max_concurrent_requests": 8,
     "embedding_batch_size": 32,
-    "chunked_prefill": false
+    "chunked_prefill": false,
+    "prefill_priority": "context",
+    "decode_fairness": true
   },
   "cache": {
     "enabled": true,
     "hot_cache_only": false,
+    "gdn_ssd_split_enabled": true,
+    "gdn_snapshot_storage": "auto",
+    "gdn_ssd_pending_max_size": "512MB",
+    "gdn_sidecar_precision": "fp32",
     "ssd_cache_dir": "/Users/joebains/.omlx/cache",
     "ssd_cache_max_size": "185GB",
     "hot_cache_max_size": "0",
+    "hot_cache_write_through": false,
+    "ane_compile_cache": false,
     "initial_cache_blocks": 256
   },
   "auth": {
@@ -55,7 +65,8 @@
     "sub_keys": []
   },
   "mcp": {
-    "config_path": "/Users/joebains/.config/omlx/mcp.json"
+    "config_path": "/Users/joebains/.config/omlx/mcp.json",
+    "expose_tools": false
   },
   "huggingface": {
     "endpoint": "",
@@ -84,8 +95,6 @@
     "retention_days": 7
   },
   "claude_code": {
-    "context_scaling_enabled": false,
-    "target_context_size": 200000,
     "mode": "cloud",
     "opus_model": null,
     "sonnet_model": null,
@@ -103,7 +112,15 @@
     "markitdown_expose_model": false,
     "markitdown_max_file_size_mb": 50,
     "markitdown_max_files_per_request": 5,
-    "markitdown_pdf_processing_engine": "markitdown"
+    "markitdown_pdf_processing_engine": "markitdown",
+    "web_search_provider": "ddgs",
+    "web_search_brave_api_key": "",
+    "web_search_searxng_url": "",
+    "web_search_ddgs_backends": "",
+    "web_search_max_results": 3,
+    "web_search_content_mode": "snippet",
+    "web_search_content_truncate": true,
+    "web_search_content_max_chars": 20000
   },
   "ui": {
     "language": "en"

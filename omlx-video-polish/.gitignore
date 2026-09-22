@@ -1,0 +1,12 @@
+__pycache__/
+*.pyc
+*.log
+*.err
+.video-polish.pid
+data/uploads/*
+data/jobs/*
+data/work/*
+!data/uploads/.gitkeep
+!data/jobs/.gitkeep
+!data/work/.gitkeep
+

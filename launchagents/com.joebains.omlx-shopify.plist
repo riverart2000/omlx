@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.joebains.omlx-shopify</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/opt/homebrew/bin/python3</string>
+    <string>/Users/joebains/omlx-shopify/shopify_catalog_server.py</string>
+  </array>
+  <key>WorkingDirectory</key>
+  <string>/Users/joebains/omlx-shopify</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>OMLX_SHOPIFY_HOST</key><string>127.0.0.1</string>
+    <key>OMLX_SHOPIFY_PORT</key><string>8900</string>
+    <key>OMLX_SHOPIFY_ENV_FILE</key><string>/Users/joebains/shopify-ai-blog-system/.env</string>
+    <key>SHOPIFY_API_VERSION</key><string>2026-07</string>
+  </dict>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>ProcessType</key><string>Background</string>
+  <key>StandardOutPath</key><string>/Users/joebains/omlx-shopify/service.log</string>
+  <key>StandardErrorPath</key><string>/Users/joebains/omlx-shopify/service.err</string>
+  <key>ThrottleInterval</key><integer>5</integer>
+</dict>
+</plist>

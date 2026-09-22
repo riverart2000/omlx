@@ -15,6 +15,9 @@
 /Users/joebains/.config/omlx/mcp.json|config/config-omlx/mcp.json
 # oMLX Image Studio (HiDream-O1 microservice, port 8400)
 /Users/joebains/omlx-common/model_memory_coordinator.py|common/model_memory_coordinator.py
+/Users/joebains/omlx-common/model_registry.py|common/model_registry.py
+/Users/joebains/omlx-common/model_update_checker.py|common/model_update_checker.py
+/Users/joebains/Library/LaunchAgents/com.joebains.omlx-model-update-check.plist|launchagents/com.joebains.omlx-model-update-check.plist
 /Users/joebains/omlx-image/hidream_engine.py|omlx-image/hidream_engine.py
 /Users/joebains/omlx-image/image_server.py|omlx-image/image_server.py
 /Users/joebains/omlx-image/image.sh|omlx-image/image.sh
@@ -27,6 +30,28 @@
 /Users/joebains/omlx-video/video.sh|omlx-video/video.sh
 /Users/joebains/omlx-video/requirements.txt|omlx-video/requirements.txt
 /Users/joebains/Library/LaunchAgents/com.joebains.omlx-video.plist|launchagents/com.joebains.omlx-video.plist
+# oMLX Video Polish (local post-production editor, :8950 sidecar)
+/Users/joebains/omlx-video-polish/server.py|omlx-video-polish/server.py
+/Users/joebains/omlx-video-polish/video-polish.sh|omlx-video-polish/video-polish.sh
+/Users/joebains/omlx-video-polish/README.md|omlx-video-polish/README.md
+/Users/joebains/omlx-video-polish/.gitignore|omlx-video-polish/.gitignore
+/Users/joebains/omlx-video-polish/backend/__init__.py|omlx-video-polish/backend/__init__.py
+/Users/joebains/omlx-video-polish/backend/config.py|omlx-video-polish/backend/config.py
+/Users/joebains/omlx-video-polish/backend/models.py|omlx-video-polish/backend/models.py
+/Users/joebains/omlx-video-polish/backend/jobs.py|omlx-video-polish/backend/jobs.py
+/Users/joebains/omlx-video-polish/backend/storage.py|omlx-video-polish/backend/storage.py
+/Users/joebains/omlx-video-polish/backend/media.py|omlx-video-polish/backend/media.py
+/Users/joebains/omlx-video-polish/backend/audio.py|omlx-video-polish/backend/audio.py
+/Users/joebains/omlx-video-polish/backend/deepfilter_worker.py|omlx-video-polish/backend/deepfilter_worker.py
+/Users/joebains/omlx-video-polish/backend/llm_editor.py|omlx-video-polish/backend/llm_editor.py
+/Users/joebains/omlx-video-polish/backend/speech.py|omlx-video-polish/backend/speech.py
+/Users/joebains/omlx-video-polish/backend/analysis_pipeline.py|omlx-video-polish/backend/analysis_pipeline.py
+/Users/joebains/omlx-video-polish/backend/render_pipeline.py|omlx-video-polish/backend/render_pipeline.py
+/Users/joebains/omlx-video-polish/static/index.html|omlx-video-polish/static/index.html
+/Users/joebains/omlx-video-polish/static/styles.css|omlx-video-polish/static/styles.css
+/Users/joebains/omlx-video-polish/static/app.js|omlx-video-polish/static/app.js
+/Users/joebains/omlx-video-polish/tests/test_core.py|omlx-video-polish/tests/test_core.py
+/Users/joebains/Library/LaunchAgents/com.joebains.omlx-video-polish.plist|launchagents/com.joebains.omlx-video-polish.plist
 # oMLX Orchestrator (workflow coordinator microservice, port 8700)
 /Users/joebains/omlx-orchestrator/orchestrator_server.py|omlx-orchestrator/orchestrator_server.py
 /Users/joebains/omlx-orchestrator/orchestrator.sh|omlx-orchestrator/orchestrator.sh
@@ -60,8 +85,13 @@
 # Kindle Book Studio (Grok story + 1K reference-guided art + KDP export, :8800)
 /Users/joebains/omlx-kindle/kindle_server.py|omlx-kindle/kindle_server.py
 /Users/joebains/omlx-kindle/static/index.html|omlx-kindle/static/index.html
+/Users/joebains/omlx-kindle/blender_storybook_renderer.py|omlx-kindle/blender_storybook_renderer.py
 /Users/joebains/omlx-kindle/requirements.txt|omlx-kindle/requirements.txt
 /Users/joebains/Library/LaunchAgents/com.joebains.omlx-kindle.plist|launchagents/com.joebains.omlx-kindle.plist
+# Shopify Catalogue (read-only Admin GraphQL mirror + SQLite, :8900)
+/Users/joebains/omlx-shopify/shopify_catalog_server.py|omlx-shopify/shopify_catalog_server.py
+/Users/joebains/omlx-shopify/static/index.html|omlx-shopify/static/index.html
+/Users/joebains/Library/LaunchAgents/com.joebains.omlx-shopify.plist|launchagents/com.joebains.omlx-shopify.plist
 # DiffRhythm local runtime customization (quality picker + deterministic/best pick)
 /Users/joebains/omlx-diffrhythm/DiffRhythm/infer/infer.py|omlx-diffrhythm/infer.py
 /Users/joebains/omlx-stack.sh|omlx-stack.sh

@@ -32,6 +32,7 @@ import json
 import os
 import re
 import subprocess
+import sys
 import threading
 import time
 import traceback
@@ -39,6 +40,14 @@ import urllib.parse
 import urllib.request
 import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+COMMON_DIR = os.environ.get("OMLX_COMMON_DIR", "/Users/joebains/omlx-common")
+if COMMON_DIR not in sys.path:
+    sys.path.insert(0, COMMON_DIR)
+from model_registry import get_model, public_models
+
+IMAGE_MODELS = public_models("image", consumer="orchestrator")
+IMAGE_MODEL_IDS = [model["id"] for model in IMAGE_MODELS]
 
 # ---------------------------------------------------------------------------
 # Config
@@ -54,6 +63,11 @@ TTS_URL = os.environ.get("TTS_URL", "http://127.0.0.1:8200")
 MEMORY_URL = os.environ.get("MEMORY_URL", "http://127.0.0.1:8300")
 IMAGE_URL = os.environ.get("IMAGE_URL", "http://127.0.0.1:8400")
 VIDEO_URL = os.environ.get("VIDEO_URL", "http://127.0.0.1:8500")
+OMLX_URL = os.environ.get("OMLX_URL", "http://127.0.0.1:8000")
+QWEN_ANIMATION_MODEL = os.environ.get(
+    "QWEN_ANIMATION_MODEL",
+    "porschefreak--Huihui-Qwen3.6-35B-A3B-Claude-4.7-Opus-abliterated-mlx-6Bit",
+)
 FLOWAGENT_URL = os.environ.get("FLOWAGENT_URL", "http://127.0.0.1:3000")
 FLOWAGENT_SH = os.environ.get("FLOWAGENT_SH", "/Users/joebains/FlowAgent/flowagent.sh")
 # Only these socials are supervised here; the rest are handled elsewhere.
@@ -113,16 +127,16 @@ def _unload_model():
     gc.collect()
 
 
-def _generate(messages, tools):
+def _generate(messages, tools, max_tokens=None, temperature=0.6):
     from mlx_lm import generate
     from mlx_lm.sample_utils import make_sampler
     model, tok = _load_model()
     prompt = tok.apply_chat_template(
         messages, tools=tools, add_generation_prompt=True
     )
-    sampler = make_sampler(temp=0.6, top_p=0.95)
+    sampler = make_sampler(temp=temperature, top_p=0.95)
     text = generate(
-        model, tok, prompt=prompt, max_tokens=MAX_TOKENS,
+        model, tok, prompt=prompt, max_tokens=max_tokens or MAX_TOKENS,
         sampler=sampler, verbose=False,
     )
     return text
@@ -151,6 +165,399 @@ def _get_json(url, timeout=30):
 
 def _post_json(url, payload, timeout=120):
     return _http_json("POST", url, payload, timeout)
+
+
+_CAMERA_MOVES = {
+    "push_in", "pull_out", "pan_left", "pan_right", "tilt_up",
+    "tilt_down", "arc_left", "arc_right", "bounce_soft", "hold",
+}
+_CAPTION_MOTIONS = {"rise", "glide_left", "glide_right", "pop_soft"}
+_SHOT_TRANSITIONS = {"dissolve", "fade", "smoothleft", "circleopen", "fadeblack"}
+_SOUND_KINDS = {"ambience", "foley", "impact", "nature", "comedy", "transition"}
+
+
+def _number(value, default, low, high):
+    try:
+        return max(low, min(high, float(value)))
+    except (TypeError, ValueError):
+        return default
+
+
+def _qwen_animation_plan(payload):
+    """Use the local Qwen3.6 model as a constrained Blender shot director."""
+    raw_scenes = payload.get("scenes") or []
+    if not isinstance(raw_scenes, list) or not raw_scenes:
+        raise ValueError("animation-plan requires scenes")
+    scenes = []
+    for row in raw_scenes[:140]:
+        if not isinstance(row, dict) or not str(row.get("id") or "").strip():
+            continue
+        scenes.append({
+            "id": str(row["id"])[:80],
+            "heading": str(row.get("heading") or "")[:300],
+            "text": str(row.get("text") or "")[:3000],
+            "image_prompt": str(row.get("image_prompt") or "")[:2500],
+            "seconds": _number(row.get("seconds"), 10, 1, 180),
+        })
+    if not scenes:
+        raise ValueError("animation-plan did not contain valid scenes")
+    # Keep long books reliable: one enormous JSON answer is more likely to be
+    # truncated or malformed.  Qwen stays resident across these small batches
+    # and is released once the complete plan has been assembled.
+    if len(scenes) > 6:
+        combined = []
+        release_model = bool(payload.get("release_model", True))
+        try:
+            for start in range(0, len(scenes), 6):
+                batch_payload = dict(payload)
+                batch_payload["scenes"] = scenes[start:start + 6]
+                batch_payload["release_model"] = False
+                combined.extend(_qwen_animation_plan(
+                    batch_payload)["scenes"])
+        finally:
+            if release_model:
+                try:
+                    _post_json(
+                        f"{OMLX_URL}/v1/models/{urllib.parse.quote(QWEN_ANIMATION_MODEL, safe='')}/unload",
+                        {}, timeout=120)
+                except Exception:
+                    pass
+        return {"model": QWEN_ANIMATION_MODEL, "scenes": combined}
+    context = {
+        "title": str(payload.get("title") or "")[:300],
+        "audience": str(payload.get("audience") or "")[:120],
+        "tone": str(payload.get("tone") or "")[:300],
+        "energy": str(payload.get("energy") or "balanced")[:40],
+        "aspect": str(payload.get("aspect") or "16:9")[:20],
+        "scenes": scenes,
+    }
+    prompt = """Act as the animation director for a premium, lively children's
+storybook film made from full-screen flat illustrations. Design purposeful
+camera choreography for every supplied scene. Avoid repeating the same move on
+adjacent scenes. Match each story action and emotion. Keep important subjects
+inside safe crop limits and captions readable. Treat every visible character's
+head and face as protected: the main head should normally remain visible in
+every beat. Prefer starting wide enough to establish the complete subject,
+then push toward a face or pan gently from one named character's face to
+another. Never direct a lingering body-only crop unless the story explicitly
+requires a close-up of an object, hands or feet. Use 2 to 4 camera beats per
+scene; 'at' is a fraction from 0.0 to 0.92 of that scene. focus_x/focus_y are
+normalised image positions and should describe the likely head or face position
+from the supplied composition. zoom must be 1.02 to 1.12 when a person or
+character is present, or at most 1.16 for scenery. rotation is degrees from
+-1.2 to 1.2. The first beat must start at 0.0. Prefer energetic changes for
+action, gentle holds for emotion, and reveal/pull-out moves for discoveries.
+
+Return exactly one JSON object with this shape and no extra keys or prose:
+{"scenes":[{"id":"exact input id","pace":"gentle|balanced|lively",
+"caption_motion":"rise|glide_left|glide_right|pop_soft",
+"transition":"dissolve|fade|smoothleft|circleopen|fadeblack",
+"beats":[{"at":0.0,"move":"push_in|pull_out|pan_left|pan_right|tilt_up|tilt_down|arc_left|arc_right|bounce_soft|hold","focus_x":0.5,"focus_y":0.5,"zoom":1.04,"rotation":0.0}],
+"reason":"brief scene-specific direction"}]}
+
+Book context:
+""" + json.dumps(context, ensure_ascii=False)
+    request = {
+        "model": QWEN_ANIMATION_MODEL,
+        "messages": [
+            {"role": "system", "content": (
+                "Return valid JSON only. You direct using the allowed values; "
+                "never emit Python, bpy calls, shell commands, or file paths.")},
+            {"role": "user", "content": prompt},
+        ],
+        "temperature": .62,
+        "max_tokens": min(10000, max(1400, len(scenes) * 330)),
+        "response_format": {"type": "json_object"},
+    }
+    release_model = bool(payload.get("release_model", True))
+    generation_error = ""
+    try:
+        # The director is a much larger oMLX model.  Do not keep this
+        # service's general-purpose model resident beside it.
+        _unload_model()
+        try:
+            response = _post_json(
+                f"{OMLX_URL}/v1/chat/completions", request, timeout=900)
+            content = (((response.get("choices") or [{}])[0].get("message") or {})
+                       .get("content"))
+            generated = (content if isinstance(content, dict)
+                         else json.loads(str(content or "")))
+        except Exception as exc:
+            # Direction is an enhancement, not a reason to lose an otherwise
+            # completed narrated video. The normaliser below supplies gentle
+            # deterministic moves for this batch while later batches continue.
+            generation_error = str(exc)[:400]
+            generated = {"scenes": []}
+    finally:
+        if release_model:
+            try:
+                _post_json(
+                    f"{OMLX_URL}/v1/models/{urllib.parse.quote(QWEN_ANIMATION_MODEL, safe='')}/unload",
+                    {}, timeout=120)
+            except Exception:
+                pass
+    rows = generated.get("scenes") if isinstance(generated, dict) else None
+    if not isinstance(rows, list):
+        generation_error = generation_error or "Qwen omitted the scenes list"
+        rows = []
+    by_id = {str(row.get("id") or ""): row for row in rows if isinstance(row, dict)}
+    result = []
+    fallback_moves = ("push_in", "pan_right", "pull_out", "pan_left")
+    for scene_index, scene in enumerate(scenes):
+        # Preserve every usable part of Qwen's direction. A missing row or one
+        # short beat should not discard the complete soundtrack or abort a
+        # long video render; fill only the missing camera direction with a
+        # conservative storybook move.
+        row = by_id.get(scene["id"]) or {}
+        beats = []
+        for beat in (row.get("beats") or [])[:4]:
+            if not isinstance(beat, dict):
+                continue
+            move = str(beat.get("move") or "hold")
+            beats.append({
+                "at": _number(beat.get("at"), 0, 0, .92),
+                "move": move if move in _CAMERA_MOVES else "hold",
+                "focus_x": _number(beat.get("focus_x"), .5, .16, .84),
+                "focus_y": _number(beat.get("focus_y"), .5, .16, .84),
+                "zoom": _number(beat.get("zoom"), 1.05, 1.02, 1.16),
+                "rotation": _number(beat.get("rotation"), 0, -1.2, 1.2),
+            })
+        used_fallback = len(beats) < 2
+        if not beats:
+            beats.append({
+                "at": 0.0, "move": "hold", "focus_x": .5,
+                "focus_y": .5, "zoom": 1.03, "rotation": 0.0,
+            })
+        if len(beats) == 1:
+            first = beats[0]
+            fallback_move = fallback_moves[scene_index % len(fallback_moves)]
+            if fallback_move == first.get("move"):
+                fallback_move = "pull_out" if fallback_move == "push_in" else "push_in"
+            beats.append({
+                "at": .68, "move": fallback_move,
+                "focus_x": _number(first.get("focus_x"), .5, .16, .84),
+                "focus_y": _number(first.get("focus_y"), .5, .16, .84),
+                "zoom": max(1.04, min(1.12,
+                    _number(first.get("zoom"), 1.04, 1.02, 1.16) + .035)),
+                "rotation": 0.0,
+            })
+        beats.sort(key=lambda item: item["at"])
+        beats[0]["at"] = 0.0
+        caption_motion = str(row.get("caption_motion") or "rise")
+        transition = str(row.get("transition") or "dissolve")
+        pace = str(row.get("pace") or "balanced")
+        result.append({
+            "id": scene["id"],
+            "pace": pace if pace in {"gentle", "balanced", "lively"} else "balanced",
+            "caption_motion": (caption_motion if caption_motion in _CAPTION_MOTIONS
+                               else "rise"),
+            "transition": transition if transition in _SHOT_TRANSITIONS else "dissolve",
+            "beats": beats,
+            "reason": str(row.get("reason") or (
+                "A restrained fallback camera move completed incomplete Qwen direction"
+                + (f" ({generation_error})" if generation_error else "")
+                if used_fallback else ""))[:500],
+        })
+    return {"model": QWEN_ANIMATION_MODEL, "scenes": result}
+
+
+def _qwen_sound_plan(payload):
+    """Use local Qwen as a restrained children's-story sound designer."""
+    raw_scenes = payload.get("scenes") or []
+    if not isinstance(raw_scenes, list) or not raw_scenes:
+        raise ValueError("sound-plan requires scenes")
+    scenes = []
+    for row in raw_scenes[:140]:
+        if not isinstance(row, dict) or not str(row.get("id") or "").strip():
+            continue
+        scenes.append({
+            "id": str(row["id"])[:80],
+            "heading": str(row.get("heading") or "")[:300],
+            "text": str(row.get("text") or "")[:3500],
+            "image_prompt": str(row.get("image_prompt") or "")[:2200],
+            "seconds": _number(row.get("seconds"), 10, 1, 180),
+        })
+    if not scenes:
+        raise ValueError("sound-plan did not contain valid scenes")
+    # This particular Qwen release is excellent at an individual sound brief
+    # but sometimes returns only the first row from a multi-scene JSON request.
+    # Keep it resident and direct one short scene at a time for completeness.
+    if len(scenes) > 1:
+        combined = []
+        warnings = []
+        release_model = bool(payload.get("release_model", True))
+        try:
+            for scene in scenes:
+                batch_payload = dict(payload)
+                batch_payload["scenes"] = [scene]
+                batch_payload["release_model"] = False
+                try:
+                    combined.extend(_qwen_sound_plan(batch_payload)["scenes"])
+                except Exception as first_exc:
+                    # A long book should not lose every completed sound cue
+                    # because one model response was malformed. Give that page
+                    # one lower-temperature retry, then preserve it as a quiet
+                    # scene that the editor can fill manually if needed.
+                    batch_payload["_sound_retry"] = True
+                    try:
+                        combined.extend(_qwen_sound_plan(batch_payload)["scenes"])
+                    except Exception as retry_exc:
+                        combined.append({
+                            "id": scene["id"], "heading": scene["heading"],
+                            "seconds": round(scene["seconds"], 2), "cues": [],
+                        })
+                        warnings.append({
+                            "scene_id": scene["id"],
+                            "message": (f"Qwen returned an unusable sound plan twice; "
+                                        f"the scene was left quiet: {retry_exc}"),
+                            "first_error": str(first_exc)[:300],
+                        })
+        finally:
+            if release_model:
+                try:
+                    _post_json(
+                        f"{OMLX_URL}/v1/models/{urllib.parse.quote(QWEN_ANIMATION_MODEL, safe='')}/unload",
+                        {}, timeout=120)
+                except Exception:
+                    pass
+        return {"model": QWEN_ANIMATION_MODEL, "scenes": combined,
+                "warnings": warnings}
+    intensity = str(payload.get("intensity") or "balanced")
+    if intensity not in {"none", "gentle", "balanced", "lively", "cinematic"}:
+        intensity = "balanced"
+    context = {
+        "title": str(payload.get("title") or "")[:300],
+        "audience": str(payload.get("audience") or "")[:120],
+        "tone": str(payload.get("tone") or "")[:300],
+        "intensity": intensity,
+        "scenes": scenes,
+    }
+    prompt = """Act as the supervising sound editor for a professionally produced
+children's story video. Plan a restrained, clear, child-friendly soundtrack
+that supports the final narration instead of competing with it. Use only sounds
+that are literally justified by the page words or visible action. Do not invent
+off-screen events. Normally choose 0-1 cue for gentle or balanced, and no more
+than 2 for lively or cinematic. The cover needs at most one very subtle cue.
+Quiet scenes should have no cue. Prefer silence over a weak decorative sound,
+and prefer one meaningful action sound over several layers.
+Every non-cover scene containing an explicit audible physical event—footsteps,
+knocking, bouncing, impact, doors, water, wind, animals, machinery, breaking,
+rustling, applause or a similar concrete action—must receive a matching event
+cue unless intensity is none. Do not replace that literal event with generic
+ambience. Do not amplify silent or nearly silent micro-actions such as a blink,
+a smile, a tiny paw touching one speck of snow, or a small hand movement into
+unnatural foley. Reproduce every input scene id once and in the original order.
+
+Each prompt is sent to a sound-effects-only generator. Describe one isolated,
+clean, gentle sound or ambience in concrete acoustic terms. Every prompt must
+say child-friendly, non-startling, soft onset, no sudden loud peak and natural
+real-world scale. Never request narration, dialogue, spoken words, singing,
+melody, a musical score or copyrighted media.
+Use loop=true only for steady ambience. 'at' is the fraction 0.0-0.96 through
+the spoken scene when the sound begins. Keep event effects brief; ambience may
+last longer. Volume should normally be 0.10-0.18 and never exceed 0.28, so
+speech remains dominant. The trigger quotes a
+short phrase or describes the exact story moment used for timing.
+
+Return exactly one JSON object and no prose:
+{"scenes":[{"id":"exact input id","cues":[{"kind":"ambience|foley|impact|nature|comedy|transition","prompt":"sound-only generation prompt","trigger":"exact story moment","at":0.25,"duration":2.0,"volume":0.22,"pan":0.0,"loop":false,"reason":"brief reason"}]}]}
+
+Book context:
+""" + json.dumps(context, ensure_ascii=False)
+    request = {
+        "model": QWEN_ANIMATION_MODEL,
+        "messages": [
+            {"role": "system", "content": (
+                "Return valid JSON only. Create safe sound-design data; never "
+                "emit code, shell commands, file paths or URLs.")},
+            {"role": "user", "content": prompt},
+        ],
+        "temperature": .22 if payload.get("_sound_retry") else .45,
+        "max_tokens": min(9000, max(1000, len(scenes) * 270)),
+        "response_format": {"type": "json_object"},
+    }
+    release_model = bool(payload.get("release_model", True))
+    try:
+        _unload_model()
+        response = _post_json(
+            f"{OMLX_URL}/v1/chat/completions", request, timeout=900)
+        content = (((response.get("choices") or [{}])[0].get("message") or {})
+                   .get("content"))
+        generated = content if isinstance(content, dict) else json.loads(str(content or ""))
+    finally:
+        if release_model:
+            try:
+                _post_json(
+                    f"{OMLX_URL}/v1/models/{urllib.parse.quote(QWEN_ANIMATION_MODEL, safe='')}/unload",
+                    {}, timeout=120)
+            except Exception:
+                pass
+    rows = generated.get("scenes") if isinstance(generated, dict) else None
+    if not isinstance(rows, list) and isinstance(generated, dict):
+        # Qwen occasionally follows the cue schema but drops the outer
+        # {"scenes": [...]} wrapper for a single scene. Accept the common
+        # equivalent shapes instead of discarding an otherwise usable plan.
+        candidate = generated.get("scene")
+        if isinstance(candidate, dict):
+            rows = [candidate]
+        elif isinstance(generated.get("cues"), list):
+            rows = [{"id": scenes[0]["id"], "cues": generated["cues"]}]
+        else:
+            for key in ("sound_plan", "plan", "result"):
+                nested = generated.get(key)
+                if not isinstance(nested, dict):
+                    continue
+                if isinstance(nested.get("scenes"), list):
+                    rows = nested["scenes"]
+                    break
+                if isinstance(nested.get("cues"), list):
+                    rows = [{"id": scenes[0]["id"],
+                             "cues": nested["cues"]}]
+                    break
+    if not isinstance(rows, list):
+        raise RuntimeError("Qwen sound director did not return a usable scene plan")
+    by_id = {str(row.get("id") or ""): row for row in rows if isinstance(row, dict)}
+    normalise_id = lambda value: re.sub(
+        r"[^a-z0-9]+", "-", str(value or "").lower()).strip("-")
+    by_normalised_id = {
+        normalise_id(row_id): row for row_id, row in by_id.items()
+        if normalise_id(row_id)
+    }
+    max_cues = {"none": 0, "gentle": 1, "balanced": 1,
+                "lively": 2, "cinematic": 2}[intensity]
+    result = []
+    for scene in scenes:
+        # Omitting a scene is a valid editorial choice here: quiet pages often
+        # sound more professional with narration alone. Restore the row so the
+        # saved plan still mirrors every book scene in order.
+        row = (by_id.get(scene["id"])
+               or by_normalised_id.get(normalise_id(scene["id"]))
+               or {"cues": []})
+        cues = []
+        for index, cue in enumerate((row.get("cues") or [])[:max_cues]):
+            if not isinstance(cue, dict):
+                continue
+            sound_prompt = " ".join(str(cue.get("prompt") or "").split())[:450]
+            if not sound_prompt:
+                continue
+            kind = str(cue.get("kind") or "foley").lower()
+            cues.append({
+                "id": f"{scene['id']}-cue-{index + 1}",
+                "kind": kind if kind in _SOUND_KINDS else "foley",
+                "prompt": sound_prompt,
+                "trigger": " ".join(str(cue.get("trigger") or "").split())[:180],
+                "at": round(_number(cue.get("at"), .2, 0, .96), 3),
+                "duration": round(_number(cue.get("duration"), 2, .4, 30), 2),
+                "volume": round(_number(cue.get("volume"), .16, .04, .28), 3),
+                "pan": round(_number(cue.get("pan"), 0, -1, 1), 2),
+                "loop": bool(cue.get("loop")), "enabled": True,
+                "reason": str(cue.get("reason") or "")[:500],
+            })
+        result.append({
+            "id": scene["id"], "heading": scene["heading"],
+            "seconds": round(scene["seconds"], 2), "cues": cues,
+        })
+    return {"model": QWEN_ANIMATION_MODEL, "scenes": result}
 
 
 def _fetch_bytes(url, timeout=120):
@@ -257,7 +664,11 @@ def tool_generate_image(args, step_cb):
     prompt = str(args.get("prompt", "")).strip()
     if not prompt:
         raise ValueError("generate_image requires 'prompt'")
-    payload = {"prompt": prompt[:2000]}
+    requested_engine = str(args.get("engine") or "hidream").strip().lower()
+    registry_model = get_model(requested_engine)
+    if not registry_model or "orchestrator" not in registry_model.get("consumers", []):
+        raise ValueError("unknown or disabled image model: " + requested_engine)
+    payload = {"prompt": prompt[:6000], "engine": registry_model["id"]}
     if args.get("aspect"):
         payload["preset"] = str(args["aspect"])
     for k in ("width", "height", "steps", "seed", "guidance"):
@@ -270,7 +681,9 @@ def tool_generate_image(args, step_cb):
         refs.append(str(args.get("reference_images")))
     if args.get("reference_image"):
         refs.append(str(args.get("reference_image")))
-    refs = refs[:3]
+    max_refs = int((registry_model.get("capabilities") or {}).get(
+        "max_reference_images", 0))
+    refs = refs[:max_refs]
     if refs:
         resolved = []
         for r in refs:
@@ -278,7 +691,7 @@ def tool_generate_image(args, step_cb):
             if b64:
                 resolved.append(b64)
         if resolved:
-            payload["reference_images"] = resolved[:3]
+            payload["reference_images"] = resolved[:max_refs]
     if "steps" not in payload:
         payload["steps"] = 28
     if UNLOAD_BEFORE_MEDIA:
@@ -298,6 +711,7 @@ def tool_generate_image(args, step_cb):
         "width": result.get("width"),
         "height": result.get("height"),
         "seed": result.get("seed"),
+        "engine": result.get("engine") or registry_model["id"],
     }
 
 
@@ -593,15 +1007,16 @@ TOOLS = [
     }},
     {"type": "function", "function": {
         "name": "generate_image",
-        "description": "Generate a still image with HiDream. Returns image_file + url. Use for thumbnails, portraits (for avatar video), product shots, or the reference frame for image-to-video. Supports 1-3 reference images for identity/style consistency.",
+        "description": "Generate a still image with any enabled model from the shared oMLX image registry. Returns image_file + url. Use for thumbnails, portraits, product shots, book art, or a video reference frame.",
         "parameters": {"type": "object", "properties": {
             "prompt": {"type": "string"},
+            "engine": {"type": "string", "enum": IMAGE_MODEL_IDS, "default": "hidream"},
             "aspect": {"type": "string", "enum": ["1:1", "9:16", "16:9", "4:5", "3:2"], "default": "9:16"},
             "steps": {"type": "integer", "default": 28},
             "seed": {"type": "integer"},
             "reference_image": {"type": "string", "description": "single reference image (data URL, image filename, /files path, or URL)"},
             "reference_images": {"type": "array", "items": {"type": "string"},
-                                 "description": "up to 3 reference images (data URLs, image filenames, /files paths, or URLs)"},
+                                 "description": "reference images (the selected registry model's limit is enforced)"},
         }, "required": ["prompt"]},
     }},
     {"type": "function", "function": {
@@ -753,8 +1168,10 @@ WORKFLOWS = [
         "fields": [
             {"name": "product", "label": "Subject / product", "type": "textarea", "required": True,
              "placeholder": "a matte-black wireless headphone on a marble surface"},
-            {"name": "reference_images", "label": "Reference images (optional, up to 3)", "type": "images",
-             "help": "Attach product/brand images. The workflow will pass them to HiDream so outputs stay consistent."},
+            {"name": "reference_images", "label": "Reference images (optional)", "type": "images",
+             "help": "Attach product/brand images. The selected shared model's reference limit is applied automatically."},
+            {"name": "image_engine", "label": "Image model", "type": "select",
+             "source": "image_models"},
             {"name": "style", "label": "Style", "type": "select",
              "options": ["photorealistic studio", "lifestyle", "minimalist", "vibrant marketing", "cinematic"],
              "default": "photorealistic studio"},
@@ -933,6 +1350,9 @@ def _build_goal(wid, inp):
         aspect = _g(inp, "aspect") or "1:1"
         count = max(1, min(4, int(float(_g(inp, "count", 3)))))
         refs = _g(inp, "reference_images", [])
+        image_engine = str(_g(inp, "image_engine") or "hidream").strip().lower()
+        if image_engine not in IMAGE_MODEL_IDS:
+            image_engine = "hidream"
         ref_count = len(refs) if isinstance(refs, list) else 0
         ref_note = ("Reference images are attached (" + str(ref_count) + "). "
                     "Treat them as the source-of-truth for product identity/branding consistency."
@@ -941,7 +1361,8 @@ def _build_goal(wid, inp):
             f"GOAL: Generate {count} distinct {style} marketing images of: {product}.\n"
             + (ref_note + "\n" if ref_note else "")
             +
-            f"Call generate_image {count} separate times, each with aspect=\"{aspect}\", a DIFFERENT seed, "
+            f"Call generate_image {count} separate times with engine=\"{image_engine}\", "
+            f"aspect=\"{aspect}\", a DIFFERENT seed, "
             f"and a slightly varied prompt/angle/lighting so the images differ. "
             f"Finish with a summary listing every image URL."
         )
@@ -1050,6 +1471,11 @@ def _options():
         "video_engines_scene": {
             "options": scene_opts,
             "default": "longcat" if "longcat" in scene_opts else scene_opts[0],
+        },
+        "image_models": {
+            "options": [model["id"] for model in IMAGE_MODELS],
+            "labels": {model["id"]: model["label"] for model in IMAGE_MODELS},
+            "default": "hidream" if "hidream" in IMAGE_MODEL_IDS else IMAGE_MODEL_IDS[0],
         },
         "aspects": ["9:16", "16:9", "1:1", "4:5", "3:2"],
     }
@@ -1261,6 +1687,183 @@ def _short(obj, n=400):
 
 
 # ---------------------------------------------------------------------------
+# Compact chat gateway: orchestrator -> selected tools -> Qwen
+# ---------------------------------------------------------------------------
+_CHAT_ACTION_HINTS = (
+    "search", "find", "look up", "browse", "fetch", "open", "read", "list",
+    "show", "check", "inspect", "create", "write", "edit", "update", "change",
+    "delete", "remove", "send", "sync", "upload", "download", "shopify",
+    "order", "product", "inventory", "file", "folder", "drive", "gmail",
+    "email", "calendar", "sheet", "document", "web", "latest", "current",
+)
+_CHAT_STOPWORDS = {
+    "about", "after", "again", "also", "and", "are", "can", "could", "does",
+    "for", "from", "have", "how", "into", "just", "more", "need", "only",
+    "please", "that", "the", "their", "then", "there", "they", "this", "use",
+    "using", "want", "what", "when", "where", "which", "with", "would", "you",
+}
+_CHAT_SERVER_TERMS = {
+    "shopify": ("shopify", "product", "products", "order", "orders", "inventory",
+                "collection", "collections", "customer", "discount", "store", "tag"),
+    "brave-search": ("search", "web", "latest", "current", "news", "research",
+                     "online", "internet", "source", "sources"),
+    "fetch": ("fetch", "url", "website", "page", "link", "article"),
+    "filesystem": ("file", "folder", "directory", "code", "project", "python",
+                   "json", "config", "log", "local", "disk"),
+    "google-workspace": ("google", "gmail", "email", "calendar", "drive", "sheet",
+                         "sheets", "doc", "docs", "document", "workspace"),
+}
+
+
+def _chat_text(message):
+    content = message.get("content", "") if isinstance(message, dict) else ""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts = []
+        for item in content:
+            if isinstance(item, str):
+                parts.append(item)
+            elif isinstance(item, dict) and item.get("type") in ("text", "input_text"):
+                parts.append(str(item.get("text") or ""))
+        return "\n".join(parts)
+    return str(content or "")
+
+
+def _compact_chat_messages(messages, max_messages=14, max_chars=26000):
+    """Keep the durable system instruction plus the recent working exchange."""
+    rows = [m for m in (messages or []) if isinstance(m, dict) and m.get("role")]
+    if not rows:
+        return []
+    systems = [m for m in rows if m.get("role") == "system"]
+    conversation = [m for m in rows if m.get("role") != "system"][-max_messages:]
+    result = []
+    if systems:
+        system_text = "\n\n".join(_chat_text(m) for m in systems if _chat_text(m))[-6000:]
+        if system_text:
+            result.append({"role": "system", "content": system_text})
+    budget = max_chars - sum(len(_chat_text(m)) for m in result)
+    kept = []
+    for message in reversed(conversation):
+        text_len = len(_chat_text(message))
+        if kept and text_len > budget:
+            break
+        kept.append(message)
+        budget -= min(text_len, budget)
+        if budget <= 0:
+            break
+    result.extend(reversed(kept))
+    return result
+
+
+def _latest_chat_query(messages):
+    for message in reversed(messages or []):
+        if isinstance(message, dict) and message.get("role") == "user":
+            return _chat_text(message).strip()
+    return ""
+
+
+def _tool_score(tool, query, tokens):
+    name = str(tool.get("name") or "").lower()
+    desc = str(tool.get("description") or "").lower()
+    server = str(tool.get("server") or "").lower()
+    haystack = f"{name} {desc} {server}".replace("_", " ").replace("-", " ")
+    score = sum(3 for token in tokens if token in haystack)
+    for server_name, terms in _CHAT_SERVER_TERMS.items():
+        if server == server_name and any(term in query for term in terms):
+            score += 12
+    if name in query:
+        score += 20
+    return score
+
+
+def _model_tool_names(query, tools):
+    """Ask ToolOrchestra for names only; never send full schemas to the router."""
+    catalog = "\n".join(
+            f"{t.get('name')} | {t.get('server')} | {str(t.get('description') or '')[:120]}"
+                    for t in tools
+                        )
+    prompt = (
+            "Choose at most 6 tools that are strictly necessary for the user request. "
+                    "Return only a JSON array of exact tool names. Return [] when no external "
+                            "tool is required. Do not choose speculative tools.\n\nUSER:\n" + query[:4000] +
+                                    "\n\nAVAILABLE TOOLS:\n" + catalog[:30000]
+                                        )
+    text = _generate([
+        {"role": "system", "content": "You are a fast, conservative tool router. JSON only."},
+        {"role": "user", "content": prompt},
+    ], None, max_tokens=180, temperature=0.0)
+    match = re.search(r"\[[\s\S]*?\]", text or "")
+    if not match:
+        return []
+    try:
+        names = json.loads(match.group(0))
+    except Exception:
+        return []
+    return [str(name) for name in names if isinstance(name, str)][:6]
+
+
+def _route_chat(payload):
+    started = time.time()
+    compact = _compact_chat_messages(payload.get("messages") or [])
+    query = _latest_chat_query(compact).lower()
+    all_tools = (_get_json(f"{OMLX_URL}/v1/mcp/tools", timeout=20).get("tools") or [])
+    tokens = {
+        token for token in re.findall(r"[a-z0-9]{3,}", query)
+        if token not in _CHAT_STOPWORDS
+    }
+    ranked = sorted(
+        ((_tool_score(tool, query, tokens), tool) for tool in all_tools),
+        key=lambda item: item[0], reverse=True,
+    )
+    deterministic = [tool for score, tool in ranked if score >= 6][:6]
+    chosen_names = []
+    used_model = False
+    needs_tools = any(hint in query for hint in _CHAT_ACTION_HINTS)
+    if needs_tools:
+        try:
+            chosen_names = _model_tool_names(query, all_tools)
+            used_model = True
+        except Exception:
+            chosen_names = []
+        finally:
+            # Qwen3.8 gets the RAM; ToolOrchestra reloads quickly for the next route.
+            _unload_model()
+    by_name = {str(tool.get("name") or ""): tool for tool in all_tools}
+    selected = []
+    seen = set()
+    for name in chosen_names + [str(tool.get("name") or "") for tool in deterministic]:
+        tool = by_name.get(name)
+        if not tool or name in seen:
+            continue
+        seen.add(name)
+        selected.append({
+            "type": "function",
+            "function": {
+                "name": name,
+                "description": str(tool.get("description") or f"{tool.get('server')} tool"),
+                "parameters": tool.get("parameters") or {"type": "object", "properties": {}},
+            },
+        })
+        if len(selected) >= 6:
+            break
+    return {
+        "messages": compact,
+        "tools": selected,
+        "tool_choice": "auto" if selected else None,
+        "routing": {
+            "orchestrator": True,
+            "model_router_used": used_model,
+            "input_messages": len(payload.get("messages") or []),
+            "output_messages": len(compact),
+            "available_tools": len(all_tools),
+            "selected_tools": [item["function"]["name"] for item in selected],
+            "elapsed_ms": round((time.time() - started) * 1000),
+        },
+    }
+
+
+# ---------------------------------------------------------------------------
 # HTTP handler
 # ---------------------------------------------------------------------------
 class Handler(BaseHTTPRequestHandler):
@@ -1370,6 +1973,37 @@ class Handler(BaseHTTPRequestHandler):
             data = json.loads(raw.decode("utf-8") or "{}")
         except Exception:
             data = {}
+        if path == "/route-chat":
+            try:
+                routed = _route_chat(data)
+                self._send(200, {"ok": True, **routed})
+            except Exception as exc:
+                self._send(500, {"error": f"{type(exc).__name__}: {exc}"})
+            return
+        if path == "/animation-plan":
+            try:
+                plan = _qwen_animation_plan(data)
+                self._send(200, {"ok": True, **plan})
+            except ValueError as exc:
+                self._send(400, {"error": str(exc)})
+            except Exception as exc:
+                self._send(500, {
+                    "error": f"{type(exc).__name__}: {exc}",
+                    "director_model": QWEN_ANIMATION_MODEL,
+                })
+            return
+        if path == "/sound-plan":
+            try:
+                plan = _qwen_sound_plan(data)
+                self._send(200, {"ok": True, **plan})
+            except ValueError as exc:
+                self._send(400, {"error": str(exc)})
+            except Exception as exc:
+                self._send(500, {
+                    "error": f"{type(exc).__name__}: {exc}",
+                    "director_model": QWEN_ANIMATION_MODEL,
+                })
+            return
         if path == "/orchestrate":
             wid = str(data.get("workflow", "")).strip()
             if wid:

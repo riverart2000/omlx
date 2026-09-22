@@ -1,4 +1,4 @@
-# Pinned to the HiDream-O1 lab's documented tested config. mlx-vlm 0.5.0's
+# Pinned for the shared image service. mlx-vlm 0.5.0's
 # metadata asks for transformers>=5.5, but 5.x breaks the Qwen3-VL backbone
 # import path; 4.57.1 is verified working. Ignore the pip resolver warnings
 # about mlx-lm/mlx-audio — those packages are not used by this server.

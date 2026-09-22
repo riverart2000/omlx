@@ -10,32 +10,25 @@ from typing import Any
 
 from mlx_audio.tts.generate import generate_audio
 
-LOCKED_MODEL = "mlx-community/Voxtral-4B-TTS-2603-mlx-bf16"
+LOCKED_MODEL = "mlx-community/Qwen3-TTS-12Hz-1.7B-VoiceDesign-bf16"
 DEFAULT_MODEL = LOCKED_MODEL
-DEFAULT_VOICE = "neutral_female"
-DEFAULT_LANG_CODE = "en"
+DEFAULT_VOICE = "Eleanor"
+DEFAULT_LANG_CODE = "English"
 DEFAULT_SPEED = 0.9
 DEFAULT_MAX_TOKENS = 1600
 DEFAULT_AUDIO_FORMAT = "wav"
 
+VOICE_DESCRIPTIONS = {
+    "Eleanor": "A native British English woman with a warm, polished, expressive audiobook voice and authentic modern southern British accent.",
+    "Maya": "A native American English woman with a warm, polished, expressive audiobook voice and neutral General American accent.",
+    "Arthur": "A native British English man with a warm, articulate, expressive audiobook voice and authentic modern southern British accent.",
+    "Noah": "A native American English man with a warm, articulate, expressive audiobook voice and neutral General American accent.",
+}
+
 
 def dependency_hint_for_model(model_name: str) -> str:
-    model_key = model_name.lower()
-
-    if "voxtral" in model_key:
-        return (
-            "Voxtral models require mistral-common[audio]. "
-            "Install it with: python -m pip install 'mistral-common[audio]'"
-        )
-
-    if "kokoro" in model_key:
-        return (
-            "Kokoro requires misaki for text processing. "
-            "Install it with: python -m pip install misaki"
-        )
-
     return (
-        "This model may need optional extras. "
+        "Qwen TTS may need the MLX audio extras. "
         "Try: python -m pip install 'mlx-audio[tts]'"
     )
 
@@ -314,7 +307,8 @@ def main() -> int:
             generate_audio(
                 text=text,
                 model=model,
-                voice=voice,
+                instruct=(VOICE_DESCRIPTIONS.get(voice)
+                          or VOICE_DESCRIPTIONS[DEFAULT_VOICE]),
                 lang_code=lang_code,
                 speed=speed,
                 max_tokens=max_tokens,

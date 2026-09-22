@@ -1,7 +1,7 @@
 {
   "version": 1,
   "models": {
-    "porschefreak--Huihui-Qwen3.6-35B-A3B-Claude-4.7-Opus-abliterated-mlx-6Bit": {
+    "Qwen3.8-27B-8bit": {
       "force_sampling": false,
       "thinking_budget_enabled": false,
       "guided_grammar_enabled": false,

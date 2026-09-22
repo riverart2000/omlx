@@ -1,5 +1,5 @@
 #!/bin/bash
-# Control script for the TTS Studio background service (Voxtral HQ TTS).
+# Control script for the Qwen TTS Studio background service.
 #
 #   ./tts-studio.sh start | stop | restart | status | logs
 #

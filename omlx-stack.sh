@@ -10,7 +10,10 @@
 #   * tts-studio        — :8200  (launchd: com.joebains.tts-studio)
 #   * omlx-image        — :8400  (launchd: com.joebains.omlx-image)
 #   * omlx-video        — :8500  (launchd: com.joebains.omlx-video)
+#   * video-polish      — :8950  (launchd: com.joebains.omlx-video-polish)
 #   * omlx-orchestrator — :8700  (launchd: com.joebains.omlx-orchestrator)
+#   * omlx-kindle       — :8800  (launchd: com.joebains.omlx-kindle)
+#   * omlx-shopify      — :8900  (launchd: com.joebains.omlx-shopify)
 #
 # The sidecars are launchd user-agents with KeepAlive=true, so a plain
 # `kill` just gets them respawned — this script drives them via `launchctl`
@@ -34,7 +37,10 @@ SERVICES=(
   "com.joebains.tts-studio|8200|tts-studio (voice/viral)"
   "com.joebains.omlx-image|8400|image (HiDream/Kontext)"
   "com.joebains.omlx-video|8500|video (Wan2.2)"
+  "com.joebains.omlx-video-polish|8950|video-polish (finishing/editor)"
   "com.joebains.omlx-orchestrator|8700|orchestrator (workflow coordinator)"
+  "com.joebains.omlx-kindle|8800|kindle (book studio)"
+  "com.joebains.omlx-shopify|8900|shopify (catalogue mirror)"
 )
 
 # --- colours (fall back to plain if not a tty) ------------------------------

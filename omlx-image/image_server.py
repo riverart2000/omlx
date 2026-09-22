@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""omlx-image — local HiDream-O1 text-to-image microservice (port 8400).
+"""omlx-image — shared local and cloud image-generation service (port 8400).
 
 Mirrors the pattern of the TTS Studio (:8200) and memory (:8300) services:
 a tiny stdlib HTTP server with an async job API and a single serialized
@@ -23,11 +23,14 @@ import re
 import ssl
 import shutil
 import mimetypes
+import select
 import subprocess
 import threading
 import time
 import uuid
 import sys
+import traceback
+import numpy as np
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs
@@ -39,8 +42,12 @@ if COMMON_DIR not in sys.path:
     sys.path.insert(0, COMMON_DIR)
 from model_memory_coordinator import (
     acquire_lease, available_memory_gb, lease_status, release_lease,
-    reload_omlx_models, unload_omlx_models,
+    pressure_available_memory_gb, reload_omlx_models, unload_omlx_models,
 )
+from studio_logging import EventLogger
+from model_registry import REGISTRY_PATH, get_model, public_models
+
+EVENT_LOG = EventLogger("image-service", "image-events.jsonl")
 
 HOST = os.environ.get("IMAGE_HOST", "127.0.0.1")
 PORT = int(os.environ.get("IMAGE_PORT", "8400"))
@@ -54,14 +61,49 @@ MFLUX_KONTEXT_BIN = os.environ.get(
     "MFLUX_KONTEXT_BIN",
     os.path.join(BASE_DIR, ".venv-mflux", "bin", "mflux-generate-kontext"),
 )
+MFLUX_FLUX2_BIN = os.environ.get(
+    "MFLUX_FLUX2_BIN",
+    os.path.join(BASE_DIR, ".venv-mflux", "bin", "mflux-generate-flux2"),
+)
+MFLUX_FLUX2_EDIT_BIN = os.environ.get(
+    "MFLUX_FLUX2_EDIT_BIN",
+    os.path.join(BASE_DIR, ".venv-mflux", "bin", "mflux-generate-flux2-edit"),
+)
+FLUX2_LOCAL_MODEL = os.environ.get("FLUX2_LOCAL_MODEL", "flux2-klein-4b")
+_flux2_quantize_setting = os.environ.get(
+    "FLUX2_LOCAL_QUANTIZE", "full").strip().lower()
+FLUX2_LOCAL_QUANTIZE = (
+    None if _flux2_quantize_setting in {"", "none", "off", "false", "full", "bf16"}
+    else max(3, min(8, int(_flux2_quantize_setting)))
+)
+FLUX2_LOCAL_PRECISION = (
+    "full precision" if FLUX2_LOCAL_QUANTIZE is None
+    else f"{FLUX2_LOCAL_QUANTIZE}-bit"
+)
+FLUX2_LOCAL_STEPS = 4
+FLUX2_LOCAL_MAX_TOKENS = max(512, min(2048, int(os.environ.get(
+    "FLUX2_LOCAL_MAX_TOKENS", "1024"))))
+FLUX2_LOCAL_CACHE_GB = float(os.environ.get("FLUX2_LOCAL_MLX_CACHE_GB", "4"))
+FLUX2_LOCAL_MIN_FREE_GB = float(os.environ.get("FLUX2_LOCAL_MIN_FREE_GB", "32"))
+FLUX2_LOCAL_TIMEOUT_SECONDS = float(os.environ.get(
+    "FLUX2_LOCAL_TIMEOUT_SECONDS", "3600"))
 KONTEXT_MODEL = os.environ.get(
     "KONTEXT_MODEL",
     "akx/FLUX.1-Kontext-dev-mflux-4bit",
 )
 KONTEXT_BASE_MODEL = os.environ.get("KONTEXT_BASE_MODEL", "dev")
-KONTEXT_LOW_RAM = os.environ.get("KONTEXT_LOW_RAM", "1") not in ("0", "false", "no")
-KONTEXT_CACHE_GB = float(os.environ.get("KONTEXT_MLX_CACHE_GB", "1"))
+KONTEXT_LOW_RAM_MODE = os.environ.get("KONTEXT_LOW_RAM", "auto").strip().lower()
+KONTEXT_CACHE_GB = float(os.environ.get("KONTEXT_MLX_CACHE_GB", "4"))
+KONTEXT_LOW_RAM_CACHE_GB = float(
+    os.environ.get("KONTEXT_LOW_RAM_CACHE_GB", "1"))
+KONTEXT_PERFORMANCE_MIN_FREE_GB = float(
+    os.environ.get("KONTEXT_PERFORMANCE_MIN_FREE_GB", "28"))
+KONTEXT_TIMEOUT_SECONDS = float(os.environ.get("KONTEXT_TIMEOUT_SECONDS", "1800"))
 IMAGE_MIN_FREE_GB = float(os.environ.get("IMAGE_MIN_FREE_GB", "18"))
+IMAGE_WARM_MIN_FREE_GB = float(os.environ.get("IMAGE_WARM_MIN_FREE_GB", "12"))
+IMAGE_MEMORY_WAIT_SECONDS = float(os.environ.get("IMAGE_MEMORY_WAIT_SECONDS", "10"))
+IMAGE_RESTORE_OMLX_MODELS = os.environ.get(
+    "IMAGE_RESTORE_OMLX_MODELS", "0").strip().lower() in ("1", "true", "yes")
 
 
 def _load_env_file(path):
@@ -83,6 +125,11 @@ NB_ENV_FILE = os.environ.get("OMLX_ENV_FILE", "/Users/joebains/.omlx/.env")
 _nb_env = _load_env_file(NB_ENV_FILE)
 NB_TOKEN = (os.environ.get("REPLICATE_API_TOKEN")
             or _nb_env.get("REPLICATE_API_TOKEN") or "").strip()
+XAI_TOKEN = (os.environ.get("XAI_API_KEY") or os.environ.get("GROK_API_KEY")
+             or _nb_env.get("XAI_API_KEY") or _nb_env.get("GROK_API_KEY") or "").strip()
+XAI_API = os.environ.get("XAI_BASE_URL", "https://api.x.ai/v1").rstrip("/")
+_grok_registry = get_model("grok") or {}
+GROK_IMAGE_MODEL = _grok_registry.get("model", "grok-imagine-image")
 NB_API = "https://api.replicate.com/v1"
 NB_MODEL = os.environ.get("REPLICATE_NANO_BANANA_MODEL", "google/nano-banana-2")
 NB_VERSION = os.environ.get(
@@ -97,6 +144,23 @@ NB_ASPECTS = [
     "4:3", "4:5", "5:4", "8:1", "9:16", "16:9", "21:9",
 ]
 NB_OUTPUT_FORMATS = ["png", "jpg"]
+
+# FLUX.2 klein 4B is an official Replicate model and can be called without
+# pinning a version. Keep its schema choices explicit so provider-side default
+# changes cannot silently alter the Studio's print artwork.
+FLUX2_MODEL = os.environ.get(
+    "REPLICATE_FLUX2_KLEIN_MODEL", "black-forest-labs/flux-2-klein-4b")
+FLUX2_LABEL = "FLUX 2 Klein 4B (Replicate cloud)"
+FLUX2_RESOLUTIONS = ["0.25", "0.5", "1", "2", "4"]
+FLUX2_ASPECTS = [
+    "1:1", "16:9", "9:16", "3:2", "2:3", "4:3", "3:4", "5:4",
+    "4:5", "21:9", "9:21", "match_input_image",
+]
+FLUX2_OUTPUT_FORMATS = ["webp", "jpg", "png"]
+FLUX2_MAX_REFS = 5
+FLUX2_LOCAL_MAX_REFS = 3
+# A conservative upload bandwidth budget; Klein performs its own input resizing.
+FLUX2_REFERENCE_BUDGET_PIXELS = 9_000_000
 
 MAX_DIM = 3104
 MIN_DIM = 256
@@ -115,6 +179,99 @@ _jobs = {}
 _jobs_lock = threading.Lock()
 _work_q = []
 _work_cv = threading.Condition()
+_active_lock = threading.Lock()
+_active_jid = ""
+_active_proc = None
+
+
+class JobCanceled(RuntimeError):
+    pass
+
+
+def _is_canceled(jid: str) -> bool:
+    with _jobs_lock:
+        return bool((_jobs.get(jid) or {}).get("cancel_requested"))
+
+
+def _check_canceled(jid: str) -> None:
+    if _is_canceled(jid):
+        raise JobCanceled("Image generation stopped")
+
+
+def _set_active(jid: str, proc=None) -> None:
+    global _active_jid, _active_proc
+    with _active_lock:
+        _active_jid = jid
+        _active_proc = proc
+
+
+def _set_active_proc(jid: str, proc) -> None:
+    global _active_proc
+    with _active_lock:
+        if _active_jid == jid:
+            _active_proc = proc
+
+
+def _clear_active(jid: str) -> None:
+    global _active_jid, _active_proc
+    with _active_lock:
+        if _active_jid == jid:
+            _active_jid = ""
+            _active_proc = None
+
+
+def _cancel_all_images() -> dict:
+    """Cancel the active generator and empty the serialized service queue."""
+    with _work_cv:
+        queued = list(_work_q)
+        _work_q.clear()
+    with _active_lock:
+        active_jid = _active_jid
+        proc = _active_proc
+    with _jobs_lock:
+        for jid in queued:
+            job = _jobs.get(jid)
+            if job:
+                job.update(status="canceled", stage="stopped", progress=0,
+                           error=None, cancel_requested=True)
+        if active_jid and active_jid in _jobs:
+            _jobs[active_jid]["cancel_requested"] = True
+            _jobs[active_jid]["stage"] = "stopping image generator…"
+    if proc is not None and proc.poll() is None:
+        try:
+            proc.terminate()
+        except OSError:
+            pass
+    result = {"ok": True, "active_canceled": bool(active_jid),
+              "queued_canceled": len(queued)}
+    EVENT_LOG.event("image.queue_canceled", level="warning",
+                    active_job_id=active_jid, **result)
+    return result
+
+
+def _memory_headroom(required_gb: float, wait_seconds: float = None) -> dict:
+    """Wait briefly for model unloads and return the best OS memory estimate.
+
+    The raw vm_stat figure intentionally excludes compressed pages.  macOS's
+    memory-pressure figure includes memory the kernel can safely reclaim, so we
+    use the larger of the two while retaining both values for useful errors.
+    """
+    timeout = IMAGE_MEMORY_WAIT_SECONDS if wait_seconds is None else wait_seconds
+    deadline = time.time() + max(0.0, timeout)
+    snapshot = {"reclaimable_gb": 0.0, "pressure_available_gb": 0.0,
+                "effective_gb": 0.0}
+    while True:
+        reclaimable = available_memory_gb()
+        pressure_available = pressure_available_memory_gb()
+        effective = max(reclaimable, pressure_available)
+        snapshot = {
+            "reclaimable_gb": reclaimable,
+            "pressure_available_gb": pressure_available,
+            "effective_gb": effective,
+        }
+        if effective <= 0 or effective >= required_gb or time.time() >= deadline:
+            return snapshot
+        time.sleep(1)
 
 
 def _decode_data_url_image(raw: str) -> bytes:
@@ -213,6 +370,134 @@ def _nb_download(url, dest):
         shutil.copyfileobj(r, f)
 
 
+def _xai_json(path, payload, timeout=600):
+    import urllib.error
+    import urllib.request
+
+    if not XAI_TOKEN:
+        raise RuntimeError("XAI_API_KEY/GROK_API_KEY is not set (checked "
+                           + NB_ENV_FILE + ")")
+    req = urllib.request.Request(
+        XAI_API + path, data=json.dumps(payload).encode(), method="POST",
+        headers={
+            "Authorization": "Bearer " + XAI_TOKEN,
+            "Content-Type": "application/json",
+            "User-Agent": "oMLX-Image-Studio/1.0",
+        },
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as response:
+            return json.loads(response.read() or b"{}")
+    except urllib.error.HTTPError as exc:
+        detail = (exc.read() or b"").decode("utf-8", errors="replace")[:1200]
+        raise RuntimeError(f"xAI image API HTTP {exc.code}: {detail}") from exc
+
+
+def _xai_upload_file(path):
+    import urllib.error
+    import urllib.request
+
+    boundary = "----omlximage" + uuid.uuid4().hex
+    ctype = mimetypes.guess_type(path)[0] or "application/octet-stream"
+    with open(path, "rb") as handle:
+        content = handle.read()
+    body = b"".join([
+        (f"--{boundary}\r\nContent-Disposition: form-data; "
+         "name=\"purpose\"\r\n\r\nassistants\r\n").encode(),
+        (f"--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; "
+         f"filename=\"{os.path.basename(path)}\"\r\nContent-Type: {ctype}\r\n\r\n").encode(),
+        content,
+        f"\r\n--{boundary}--\r\n".encode(),
+    ])
+    req = urllib.request.Request(
+        XAI_API + "/files", data=body, method="POST",
+        headers={
+            "Authorization": "Bearer " + XAI_TOKEN,
+            "Content-Type": "multipart/form-data; boundary=" + boundary,
+        },
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=180) as response:
+            result = json.loads(response.read() or b"{}")
+    except urllib.error.HTTPError as exc:
+        detail = (exc.read() or b"").decode("utf-8", errors="replace")[:1200]
+        raise RuntimeError(f"xAI file upload HTTP {exc.code}: {detail}") from exc
+    if not result.get("id"):
+        raise RuntimeError("xAI file upload returned no file id")
+    return result["id"]
+
+
+def _run_grok_image(jid, opts):
+    """Generate or edit an image through xAI using up to three references."""
+    import urllib.request
+    from PIL import Image
+
+    if not XAI_TOKEN:
+        raise RuntimeError("XAI_API_KEY/GROK_API_KEY is not set (checked "
+                           + NB_ENV_FILE + ")")
+    started = time.time()
+    refs = [x for x in (opts.get("reference_images") or []) if x][:3]
+    temp_refs = []
+    try:
+        file_ids = []
+        for index, raw in enumerate(refs, start=1):
+            _check_canceled(jid)
+            path = os.path.join(TMP_DIR, f"{jid}_grok_ref_{index:02d}.png")
+            try:
+                image = Image.open(io.BytesIO(_decode_data_url_image(raw))).convert("RGB")
+                image.save(path, format="PNG", optimize=True)
+            except Exception as exc:
+                raise ValueError(f"invalid reference image #{index}: {exc}") from exc
+            temp_refs.append(path)
+            _set(jid, stage=f"uploading Grok reference {index}/{len(refs)}",
+                 progress=5 + int(7 * index / max(1, len(refs))))
+            file_ids.append(_xai_upload_file(path))
+
+        width = int(opts.get("width") or 1024)
+        height = int(opts.get("height") or 1024)
+        ratio = "1:1" if abs(width - height) / max(width, height) < .12 else (
+            "3:4" if height > width else "4:3")
+        payload = {
+            "model": GROK_IMAGE_MODEL,
+            "prompt": str(opts.get("prompt") or "")[:6000],
+            "n": 1,
+            "resolution": "1k",
+            "aspect_ratio": ratio,
+        }
+        endpoint = "/images/generations"
+        if file_ids:
+            endpoint = "/images/edits"
+            payload["images"] = [{"file_id": value} for value in file_ids]
+        _set(jid, stage="waiting for Grok Imagine…", progress=25)
+        result = _xai_json(endpoint, payload, timeout=600)
+        items = result.get("data") or []
+        if not items:
+            raise RuntimeError("xAI returned no generated image")
+        item = items[0] if isinstance(items[0], dict) else {}
+        output = b""
+        if item.get("b64_json"):
+            output = base64.b64decode(item["b64_json"])
+        elif item.get("url"):
+            _set(jid, stage="downloading Grok image", progress=90)
+            with urllib.request.urlopen(item["url"], timeout=300) as response:
+                output = response.read()
+        if not output:
+            raise RuntimeError("xAI returned an image without downloadable data")
+        name = "img_" + uuid.uuid4().hex[:12] + ".png"
+        path = os.path.join(OUT_DIR, name)
+        with Image.open(io.BytesIO(output)) as image:
+            image = image.convert("RGB")
+            width, height = image.size
+            image.save(path, format="PNG", optimize=True)
+        return name, int(width), int(height), round(time.time() - started, 1)
+    finally:
+        for path in temp_refs:
+            try:
+                os.remove(path)
+            except OSError:
+                pass
+
+
 def _run_nano_banana(jid, opts):
     from PIL import Image
 
@@ -247,8 +532,12 @@ def _run_nano_banana(jid, opts):
         if out_fmt not in NB_OUTPUT_FORMATS:
             out_fmt = "png"
 
+        labels = [str(x).strip() for x in
+                  (opts.get("reference_labels") or [])[:len(uploaded)]]
+        mapped_prompt = _flux2_character_mapped_prompt(
+            opts["prompt"], labels, len(uploaded))
         inp = {
-            "prompt": opts["prompt"],
+            "prompt": mapped_prompt,
             "resolution": NB_RESOLUTION,
             "aspect_ratio": aspect,
             "output_format": out_fmt,
@@ -264,10 +553,18 @@ def _run_nano_banana(jid, opts):
         pid = pred.get("id")
         if not pid:
             raise RuntimeError("Replicate did not return a prediction id")
+        _set(jid, remote_prediction_id=pid)
 
         status = pred.get("status")
         deadline = time.time() + 900
         while status not in ("succeeded", "failed", "canceled"):
+            if _is_canceled(jid):
+                try:
+                    _nb_json(NB_API + "/predictions/" + pid + "/cancel",
+                             method="POST", payload={}, timeout=30)
+                except Exception:
+                    pass
+                raise JobCanceled("Image generation stopped")
             if time.time() > deadline:
                 raise RuntimeError("Replicate prediction timed out (>15 min)")
             time.sleep(2.5)
@@ -304,6 +601,198 @@ def _run_nano_banana(jid, opts):
                 pass
 
 
+def _flux2_character_mapped_prompt(prompt, labels, reference_count,
+                                   compact=False):
+    """Put a deterministic natural-language identity map first in the prompt."""
+    assignments = []
+    for index in range(reference_count):
+        label = labels[index] if index < len(labels) and labels[index] else (
+            f"recurring character {index + 1}")
+        assignments.append(
+            f"Use the subject shown in image {index + 1} as {label}"
+        )
+    if not assignments:
+        return prompt.rstrip()
+    if compact:
+        return (
+            "MANDATORY REFERENCE MAP: " + "; ".join(assignments) + ". "
+            "Each image belongs only to its named character. Preserve that "
+            "character's face, age, body, colouring and permanent features. "
+            "Apply every action, costume and position only to the name assigned "
+            "to it; never swap them. Render each requested mapped character once "
+            "and keep supporting figures visually distinct.\n"
+            + prompt.rstrip()
+        )
+    return (
+        "Character identity mapping (highest priority): "
+        + ". ".join(assignments) + ". "
+        "Each numbered image belongs only to its assigned named character. "
+        "For every mapped character, preserve the assigned image's face, hair, "
+        "apparent age, skin or fur colour, body proportions, permanent physical "
+        "features, and signature accessories. Preserve its clothing by default. "
+        "When a PER-CHARACTER SCENE CONTRACT assigns remains, portrait, statue, "
+        "reflection or vision instead of a living character, use that numbered "
+        "image only for recognisable likeness and render the identity solely in "
+        "the assigned non-living form; do not create a separate living or full-body "
+        "copy of that identity. "
+        "When a PER-CHARACTER SCENE CONTRACT explicitly gives one named character "
+        "a temporary wardrobe override, apply that replacement wardrobe to that "
+        "assigned identity alone and remove the listed default items from that "
+        "character alone. Keep every other character in its own assigned wardrobe; "
+        "never transfer a costume, wig, armour, prop, action or position between "
+        "cast records. Use the scene description for pose, action, expression, camera, "
+        "setting, and relationships between characters. Keep every mapped name as "
+        "one separate individual. Any supporting people requested by the scene are "
+        "additional distinct individuals and do not inherit a mapped identity.\n\n"
+        + prompt.rstrip()
+    )
+
+
+def _run_flux_2_klein_4b(jid, opts):
+    """Run Replicate FLUX.2 klein 4B with ordered character references."""
+    from PIL import Image, ImageOps
+
+    if not NB_TOKEN:
+        raise RuntimeError("REPLICATE_API_TOKEN is not set (checked " + NB_ENV_FILE + ")")
+
+    t0 = time.time()
+    refs = [x for x in (opts.get("reference_images") or []) if x][:FLUX2_MAX_REFS]
+    labels = [str(x).strip() for x in
+              (opts.get("reference_labels") or [])[:len(refs)]]
+    local_tmp = []
+    uploaded = []
+    try:
+        prepared = []
+        total_pixels = 0
+        for i, raw in enumerate(refs, start=1):
+            try:
+                image = Image.open(io.BytesIO(_decode_data_url_image(raw)))
+                image = ImageOps.exif_transpose(image).convert("RGB")
+            except Exception as e:
+                raise ValueError(f"invalid reference image #{i}: {e}") from e
+            prepared.append(image)
+            total_pixels += image.width * image.height
+
+        # Keep multi-reference uploads compact. Scale every reference equally
+        # so none is privileged and the numbered character order remains intact.
+        scale = 1.0
+        if total_pixels > FLUX2_REFERENCE_BUDGET_PIXELS:
+            scale = (FLUX2_REFERENCE_BUDGET_PIXELS / total_pixels) ** 0.5
+
+        if prepared:
+            _set(jid, stage="uploading FLUX 2 Klein references", progress=5)
+        for i, image in enumerate(prepared, start=1):
+            if scale < 1.0:
+                size = (max(1, int(image.width * scale)),
+                        max(1, int(image.height * scale)))
+                image = image.resize(size, Image.Resampling.LANCZOS)
+            path = os.path.join(TMP_DIR, f"{jid}_flux2_ref_{i:02d}.png")
+            image.save(path, format="PNG", optimize=True)
+            local_tmp.append(path)
+            uploaded.append(_nb_upload_file(path))
+            _set(jid, stage=f"uploading reference {i}/{len(prepared)}",
+                 progress=5 + int(5 * i / max(1, len(prepared))))
+
+        aspect = str(opts.get("flux2_aspect_ratio") or "1:1")
+        if aspect == "match_input_image" and not uploaded:
+            aspect = "1:1"
+        if aspect not in FLUX2_ASPECTS:
+            aspect = "1:1"
+        resolution = str(opts.get("flux2_resolution") or "1")
+        if resolution not in FLUX2_RESOLUTIONS:
+            resolution = "1"
+        out_fmt = str(opts.get("flux2_output_format") or "png").lower()
+        if out_fmt not in FLUX2_OUTPUT_FORMATS:
+            out_fmt = "png"
+
+        prompt = opts["prompt"].rstrip()
+        prompt += (
+            "\n\nFill the frame with continuous natural scenery, character action "
+            "and organic material textures. Keep every area pictorial and immersive."
+        )
+        if uploaded:
+            prompt = _flux2_character_mapped_prompt(
+                prompt, labels, len(uploaded), compact=True)
+
+        inp = {
+            "prompt": prompt,
+            "images": uploaded,
+            "output_megapixels": resolution,
+            "aspect_ratio": aspect,
+            "seed": int(opts.get("seed", 32)),
+            "go_fast": bool(opts.get("flux2_go_fast", False)),
+            "output_format": out_fmt,
+            "output_quality": max(0, min(100, int(
+                opts.get("flux2_output_quality", 100)))),
+            "disable_safety_checker": bool(
+                opts.get("flux2_disable_safety_checker", False)),
+        }
+
+        endpoint = NB_API + "/models/" + FLUX2_MODEL + "/predictions"
+        _set(jid, stage="submitting to FLUX 2 Klein", progress=12)
+        pred = _nb_json(endpoint, method="POST", payload={"input": inp}, timeout=90)
+        pid = pred.get("id")
+        if not pid:
+            raise RuntimeError("Replicate did not return a FLUX 2 Klein prediction id")
+        _set(jid, remote_prediction_id=pid)
+        status = pred.get("status")
+        poll_url = (pred.get("urls") or {}).get("get") or (
+            NB_API + "/predictions/" + pid)
+        cancel_url = (pred.get("urls") or {}).get("cancel") or (
+            NB_API + "/predictions/" + pid + "/cancel")
+        deadline = time.time() + 900
+        while status not in ("succeeded", "failed", "canceled"):
+            if _is_canceled(jid):
+                try:
+                    _nb_json(cancel_url, method="POST", payload={}, timeout=30)
+                except Exception:
+                    pass
+                raise JobCanceled("Image generation stopped")
+            if time.time() > deadline:
+                raise RuntimeError("FLUX 2 Klein prediction timed out (>15 min)")
+            time.sleep(2.5)
+            pred = _nb_json(poll_url, method="GET", headers=_nb_headers(), timeout=60)
+            status = pred.get("status")
+            elapsed_wait = time.time() - t0
+            progress = min(88, 25 + int(elapsed_wait / 5))
+            _set(jid, stage="rendering on FLUX 2 Klein…", progress=progress)
+        if status != "succeeded":
+            raise RuntimeError(f"FLUX 2 Klein prediction {status}: {pred.get('error')}")
+
+        out = pred.get("output")
+        out_url = out[0] if isinstance(out, list) else out
+        if not out_url:
+            raise RuntimeError("FLUX 2 Klein succeeded but returned no output URL")
+        _set(jid, stage="downloading FLUX 2 Klein result", progress=92)
+        ext = {"png": ".png", "jpg": ".jpg", "webp": ".webp"}[out_fmt]
+        out_name = "img_" + uuid.uuid4().hex[:12] + ext
+        out_path = os.path.join(OUT_DIR, out_name)
+        _nb_download(out_url, out_path)
+        elapsed = round(time.time() - t0, 1)
+        with Image.open(out_path) as image:
+            width, height = image.size
+        return out_name, int(width), int(height), elapsed
+    finally:
+        for path in local_tmp:
+            try:
+                os.remove(path)
+            except OSError:
+                pass
+
+
+def _kontext_profile(opts):
+    mode = KONTEXT_LOW_RAM_MODE
+    if mode in ("1", "true", "yes", "on"):
+        low_ram = True
+    elif mode in ("0", "false", "no", "off", "performance"):
+        low_ram = False
+    else:
+        available = float(opts.get("_available_memory_gb") or 0)
+        low_ram = available <= 0 or available < KONTEXT_PERFORMANCE_MIN_FREE_GB
+    cache_gb = KONTEXT_LOW_RAM_CACHE_GB if low_ram else KONTEXT_CACHE_GB
+    return low_ram, cache_gb
+
+
 def _run_kontext(jid, opts):
     from PIL import Image
 
@@ -332,18 +821,84 @@ def _run_kontext(jid, opts):
         "--width", str(opts["width"]),
         "--output", out_path,
     ]
-    if KONTEXT_LOW_RAM:
+    low_ram, cache_gb = _kontext_profile(opts)
+    if low_ram:
         cmd.append("--low-ram")
-    cmd.extend(["--mlx-cache-limit-gb", str(KONTEXT_CACHE_GB)])
-    proc = subprocess.run(
-        cmd, cwd=BASE_DIR, capture_output=True, text=True, check=False
+    cmd.extend(["--mlx-cache-limit-gb", str(cache_gb)])
+    profile_name = "safe low-memory" if low_ram else "performance"
+    _set(jid, stage=f"loading FLUX model ({profile_name} mode)", progress=8,
+         flux_profile=profile_name, flux_cache_gb=cache_gb)
+    _check_canceled(jid)
+    proc = subprocess.Popen(
+        cmd, cwd=BASE_DIR, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+        bufsize=0,
     )
+    _set_active_proc(jid, proc)
+    captured = bytearray()
+    scan_text = ""
+    denoising = False
+    last_loading_progress = 8
+    while proc.poll() is None:
+        if _is_canceled(jid):
+            proc.terminate()
+            try:
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait()
+            break
+        elapsed_now = time.time() - t0
+        if elapsed_now > KONTEXT_TIMEOUT_SECONDS:
+            proc.terminate()
+            try:
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait()
+            try:
+                os.remove(ref_path)
+            except OSError:
+                pass
+            raise RuntimeError(
+                f"kontext timed out after {KONTEXT_TIMEOUT_SECONDS / 60:.0f} minutes")
+        readable, _, _ = select.select([proc.stdout], [], [], 1.0)
+        if readable:
+            chunk = os.read(proc.stdout.fileno(), 4096)
+            if chunk:
+                captured.extend(chunk)
+                if len(captured) > 65536:
+                    del captured[:-65536]
+                scan_text = (scan_text + chunk.decode(
+                    "utf-8", "replace"))[-8192:]
+                matches = list(re.finditer(r"(\d+)\s*/\s*(\d+)", scan_text))
+                if matches:
+                    done = int(matches[-1].group(1))
+                    total = max(1, int(matches[-1].group(2)))
+                    if total == int(opts["steps"]) and done <= total:
+                        denoising = True
+                        progress = int(18 + 77 * done / total)
+                        _set(jid, stage=f"FLUX denoising {done}/{total}",
+                             progress=min(95, progress))
+        elif not denoising:
+            # Model loading has no native step counter. Advance slowly as a
+            # heartbeat so the UI distinguishes a long load from a dead job.
+            loading_progress = min(17, 8 + int(elapsed_now / 30))
+            if loading_progress != last_loading_progress:
+                last_loading_progress = loading_progress
+                _set(jid, stage=f"loading FLUX model ({profile_name} mode)",
+                     progress=loading_progress)
+    if proc.stdout:
+        remainder = proc.stdout.read() or b""
+        captured.extend(remainder)
+    proc_output = captured.decode("utf-8", "replace")
     try:
         os.remove(ref_path)
     except OSError:
         pass
+    _set_active_proc(jid, None)
+    _check_canceled(jid)
     if proc.returncode != 0:
-        tail = (proc.stderr or proc.stdout or "").strip().splitlines()[-6:]
+        tail = proc_output.strip().splitlines()[-6:]
         raise RuntimeError("kontext failed: " + " | ".join(tail))
     if not os.path.isfile(out_path):
         raise RuntimeError("kontext failed: output image not found")
@@ -353,12 +908,149 @@ def _run_kontext(jid, opts):
     return out_name, int(w), int(h), elapsed
 
 
-def _materialize_reference_images(jid, refs_raw):
-    """Decode up to 3 base64 data URLs and persist normalized PNG refs."""
+def _run_flux2_klein_local(jid, opts):
+    """Run distilled FLUX.2 Klein 4B locally through native mflux/MLX."""
+    from PIL import Image
+
+    refs_raw = [
+        x for x in (opts.get("reference_images") or []) if x
+    ][:FLUX2_LOCAL_MAX_REFS]
+    labels = [str(x).strip() for x in
+              (opts.get("reference_labels") or [])[:len(refs_raw)]]
+    binary = MFLUX_FLUX2_EDIT_BIN if refs_raw else MFLUX_FLUX2_BIN
+    if not os.path.isfile(binary):
+        raise RuntimeError(f"missing local FLUX 2 Klein binary: {binary}")
+
+    ref_paths = []
+    out_name = f"img_{uuid.uuid4().hex[:12]}.png"
+    out_path = os.path.join(OUT_DIR, out_name)
+    t0 = time.time()
+    try:
+        if refs_raw:
+            _set(jid, stage="preparing local Klein references", progress=4)
+            ref_paths = _materialize_reference_images(
+                jid, refs_raw, max_refs=FLUX2_LOCAL_MAX_REFS)
+
+        prompt = opts["prompt"].rstrip()
+        if ref_paths:
+            prompt = _flux2_character_mapped_prompt(
+                prompt, labels, len(ref_paths), compact=True)
+        prompt += (
+            "\n\nFill the frame with continuous natural scenery, character action "
+            "and organic material textures. Keep every area pictorial and immersive."
+        )
+
+        cmd = [
+            binary,
+            "--model", FLUX2_LOCAL_MODEL,
+            "--prompt", prompt,
+            "--steps", str(FLUX2_LOCAL_STEPS),
+            "--guidance", "1.0",
+            "--seed", str(opts["seed"]),
+            "--height", str(opts["height"]),
+            "--width", str(opts["width"]),
+            "--mlx-cache-limit-gb", str(FLUX2_LOCAL_CACHE_GB),
+            "--output", out_path,
+        ]
+        if FLUX2_LOCAL_QUANTIZE is not None:
+            cmd.extend(["--quantize", str(FLUX2_LOCAL_QUANTIZE)])
+        if ref_paths:
+            cmd.extend(["--image-paths", *ref_paths])
+
+        _set(jid, stage="loading local FLUX 2 Klein (first use downloads weights)",
+             progress=6, flux2_precision=FLUX2_LOCAL_PRECISION,
+             flux2_cache_gb=FLUX2_LOCAL_CACHE_GB)
+        _check_canceled(jid)
+        max_tokens = max(512, min(2048, int(
+            opts.get("flux2_max_tokens") or FLUX2_LOCAL_MAX_TOKENS)))
+        flux2_env = os.environ.copy()
+        flux2_env["MFLUX_FLUX2_MAX_SEQUENCE_LENGTH"] = str(
+            max_tokens)
+        _set(jid, flux2_max_tokens=max_tokens)
+        proc = subprocess.Popen(
+            cmd, cwd=BASE_DIR, stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT, bufsize=0, env=flux2_env,
+        )
+        _set_active_proc(jid, proc)
+        captured = bytearray()
+        scan_text = ""
+        denoising = False
+        last_loading_progress = 6
+        while proc.poll() is None:
+            if _is_canceled(jid):
+                proc.terminate()
+                try:
+                    proc.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                    proc.wait()
+                break
+            elapsed_now = time.time() - t0
+            if elapsed_now > FLUX2_LOCAL_TIMEOUT_SECONDS:
+                proc.terminate()
+                try:
+                    proc.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                    proc.wait()
+                raise RuntimeError(
+                    "local FLUX 2 Klein timed out after "
+                    f"{FLUX2_LOCAL_TIMEOUT_SECONDS / 60:.0f} minutes")
+            readable, _, _ = select.select([proc.stdout], [], [], 1.0)
+            if readable:
+                chunk = os.read(proc.stdout.fileno(), 4096)
+                if chunk:
+                    captured.extend(chunk)
+                    if len(captured) > 131072:
+                        del captured[:-131072]
+                    scan_text = (scan_text + chunk.decode(
+                        "utf-8", "replace"))[-16384:]
+                    matches = list(re.finditer(r"(\d+)\s*/\s*(\d+)", scan_text))
+                    if matches:
+                        done = int(matches[-1].group(1))
+                        total = max(1, int(matches[-1].group(2)))
+                        if total == FLUX2_LOCAL_STEPS and done <= total:
+                            denoising = True
+                            progress = int(20 + 75 * done / total)
+                            _set(jid, stage=f"local Klein rendering {done}/{total}",
+                                 progress=min(95, progress))
+            elif not denoising:
+                # Includes the one-time ~15GB model download and MLX weight load.
+                loading_progress = min(19, 6 + int(elapsed_now / 20))
+                if loading_progress != last_loading_progress:
+                    last_loading_progress = loading_progress
+                    _set(jid, stage=(
+                        "loading local FLUX 2 Klein (first use may be downloading)"),
+                        progress=loading_progress)
+        if proc.stdout:
+            captured.extend(proc.stdout.read() or b"")
+        proc_output = captured.decode("utf-8", "replace")
+        _set_active_proc(jid, None)
+        _check_canceled(jid)
+        if proc.returncode != 0:
+            tail = proc_output.strip().splitlines()[-8:]
+            raise RuntimeError("local FLUX 2 Klein failed: " + " | ".join(tail))
+        if not os.path.isfile(out_path):
+            raise RuntimeError("local FLUX 2 Klein failed: output image not found")
+        with Image.open(out_path) as image:
+            width, height = image.size
+        elapsed = round(time.time() - t0, 1)
+        return out_name, int(width), int(height), elapsed
+    finally:
+        _set_active_proc(jid, None)
+        for path in ref_paths:
+            try:
+                os.remove(path)
+            except OSError:
+                pass
+
+
+def _materialize_reference_images(jid, refs_raw, max_refs=3):
+    """Decode base64 data URLs and persist normalized PNG references."""
     from PIL import Image
 
     out = []
-    for i, raw in enumerate((refs_raw or [])[:3], start=1):
+    for i, raw in enumerate((refs_raw or [])[:max_refs], start=1):
         if not raw:
             continue
         b = _decode_data_url_image(raw)
@@ -370,6 +1062,57 @@ def _materialize_reference_images(jid, refs_raw):
             raise ValueError(f"invalid reference image #{i}: {e}") from e
         out.append(p)
     return out
+
+
+def _combined_reference_guide(jid, ref_paths):
+    """Place multiple identities on one neutral canvas for stable K=1 editing."""
+    from PIL import Image, ImageOps
+
+    count = len(ref_paths)
+    if count < 2:
+        return ref_paths[0] if ref_paths else ""
+    canvas = Image.new("RGB", (1024, 1024), (242, 240, 236))
+    panel_width = 1024 // count
+    for index, path in enumerate(ref_paths):
+        with Image.open(path) as source:
+            subject = ImageOps.contain(
+                source.convert("RGB"), (panel_width - 28, 968),
+                method=Image.Resampling.LANCZOS,
+            )
+        x = index * panel_width + (panel_width - subject.width) // 2
+        y = (1024 - subject.height) // 2
+        canvas.paste(subject, (x, y))
+    path = os.path.join(TMP_DIR, f"{jid}_combined_identity.png")
+    canvas.save(path, format="PNG")
+    return path
+
+
+def _hidream_output_is_blank(arr) -> bool:
+    """Detect HiDream's flat or coloured-noise generation failures.
+
+    Failed outputs can contain lots of high-frequency texture, so ordinary
+    pixel variance alone makes them look nonblank. Real illustrations retain
+    strong structure after averaging into a 32x32 grid; collapsed outputs do
+    not.
+    """
+    pixels = np.asarray(arr, dtype=np.float32)
+    if pixels.ndim != 3 or pixels.shape[2] < 3:
+        return True
+    grey = pixels[:, :, :3].mean(axis=2)
+    low, high = np.percentile(grey, [1, 99])
+    height = grey.shape[0] - grey.shape[0] % 32
+    width = grey.shape[1] - grey.shape[1] % 32
+    if height < 32 or width < 32:
+        structure_std = float(grey.std())
+    else:
+        grid = grey[:height, :width].reshape(
+            32, height // 32, 32, width // 32).mean(axis=(1, 3))
+        structure_std = float(grid.std())
+    return (
+        structure_std < 10.0
+        and float(grey.std()) < 25.0
+        and float(high - low) < 100.0
+    )
 
 
 def _load_overlay_source(source_filename="", source_data_url=""):
@@ -726,33 +1469,91 @@ def _run_job(jid):
     job = _get(jid)
     if not job:
         return
+    if job.get("cancel_requested") or job.get("status") == "canceled":
+        return
     opts = job["opts"]
     lease = None
     freed = []
+    started_clock = time.monotonic()
+    _set_active(jid)
+    EVENT_LOG.event(
+        "image.job_started", job_id=jid, engine=opts.get("engine"),
+        width=opts.get("width"), height=opts.get("height"),
+        steps=opts.get("steps"), seed=opts.get("seed"),
+        reference_count=len(opts.get("reference_images") or []),
+        reference_labels=opts.get("reference_labels") or [],
+        reference_mapping_version=(
+            "character-map-v2"
+            if opts.get("engine") in (
+                "nano_banana_2", "flux_2_klein_4b", "flux_2_klein_4b_local")
+            else ""
+        ),
+        prompt_chars=len(opts.get("prompt") or ""),
+    )
     try:
+        _check_canceled(jid)
         # Cloud generation consumes no local model memory. Local engines share
         # one exclusive lease with video/song and use SSD as a cold model cache.
-        if opts["engine"] != "nano_banana_2":
+        if opts["engine"] not in ("grok", "nano_banana_2", "flux_2_klein_4b"):
             lease = acquire_lease(
                 "image:" + opts["engine"], jid,
                 waiting=lambda: _set(jid, stage="waiting for another local model job…", progress=1),
             )
+            hidream_warm = opts["engine"] == "hidream" and eng.is_loaded()
             freed = unload_omlx_models(
                 stage=lambda message, progress: _set(jid, stage=message, progress=progress))
-            if opts["engine"] == "kontext":
+            if opts["engine"] in ("kontext", "flux_2_klein_4b_local"):
                 eng.unload()
-            free_gb = available_memory_gb()
-            if free_gb and free_gb < IMAGE_MIN_FREE_GB:
+            required_gb = (
+                FLUX2_LOCAL_MIN_FREE_GB
+                if opts["engine"] == "flux_2_klein_4b_local"
+                else IMAGE_WARM_MIN_FREE_GB if hidream_warm
+                else IMAGE_MIN_FREE_GB
+            )
+            memory = _memory_headroom(required_gb)
+            opts["_available_memory_gb"] = memory["effective_gb"]
+            EVENT_LOG.event(
+                "image.memory_checked", job_id=jid, engine=opts.get("engine"),
+                required_gb=required_gb, model_warm=hidream_warm,
+                displaced_models=freed, **memory,
+            )
+
+            # If the warm model itself is leaving too little headroom, move it
+            # back to the SSD cache and retry this as a clean cold start.
+            if (hidream_warm and memory["effective_gb"]
+                    and memory["effective_gb"] < required_gb):
+                _set(jid, stage="freeing cached HiDream memory…", progress=2)
+                eng.unload()
+                hidream_warm = False
+                required_gb = IMAGE_MIN_FREE_GB
+                memory = _memory_headroom(required_gb)
+                opts["_available_memory_gb"] = memory["effective_gb"]
+
+            if (memory["effective_gb"]
+                    and memory["effective_gb"] < required_gb):
                 raise RuntimeError(
-                    f"only {free_gb:.1f}GB reclaimable memory is available after unloading "
-                    f"other models; {IMAGE_MIN_FREE_GB:.0f}GB is required for a safe image job")
-        if opts["engine"] == "kontext":
+                    f"macOS can currently make about {memory['effective_gb']:.1f}GB "
+                    f"available ({memory['reclaimable_gb']:.1f}GB immediately reclaimable); "
+                    f"{required_gb:.0f}GB is required for a safe image job")
+        if opts["engine"] == "grok":
+            _set(jid, stage="preparing Grok Imagine", progress=4)
+            name, w, h, elapsed = _run_grok_image(jid, opts)
+            _set(jid, stage="saving", progress=97)
+        elif opts["engine"] == "kontext":
             _set(jid, stage="kontext generating", progress=8)
             name, w, h, elapsed = _run_kontext(jid, opts)
             _set(jid, stage="saving", progress=97)
         elif opts["engine"] == "nano_banana_2":
             _set(jid, stage="preparing Nano Banana 2", progress=4)
             name, w, h, elapsed = _run_nano_banana(jid, opts)
+            _set(jid, stage="saving", progress=97)
+        elif opts["engine"] == "flux_2_klein_4b":
+            _set(jid, stage="preparing FLUX 2 Klein", progress=4)
+            name, w, h, elapsed = _run_flux_2_klein_4b(jid, opts)
+            _set(jid, stage="saving", progress=97)
+        elif opts["engine"] == "flux_2_klein_4b_local":
+            _set(jid, stage="preparing local FLUX 2 Klein", progress=4)
+            name, w, h, elapsed = _run_flux2_klein_local(jid, opts)
             _set(jid, stage="saving", progress=97)
         else:
             if not eng.weights_ready():
@@ -764,6 +1565,7 @@ def _run_job(jid):
 
             steps = opts["steps"]
             ref_paths = []
+            combined_guide_path = ""
             try:
                 if opts["engine"] == "hidream":
                     refs_raw = [x for x in (opts.get("reference_images") or []) if x]
@@ -772,6 +1574,7 @@ def _run_job(jid):
                         ref_paths = _materialize_reference_images(jid, refs_raw)
 
                 def prog(done, total):
+                    _check_canceled(jid)
                     _set(jid, stage=f"denoising {done}/{total}",
                          progress=int(5 + 90 * done / max(1, total)))
 
@@ -780,44 +1583,146 @@ def _run_job(jid):
                     prompt=opts["prompt"], width=opts["width"], height=opts["height"],
                     steps=steps, seed=opts["seed"], snap=opts["snap"],
                     blend_seams=opts["blend_seams"], ref_images=ref_paths, progress=prog)
+                reference_fallback = ""
+                if _hidream_output_is_blank(arr):
+                    if not ref_paths:
+                        EVENT_LOG.event(
+                            "hidream.collapsed_output", level="error", job_id=jid,
+                            reference_count=0, action="reject",
+                        )
+                        raise RuntimeError(
+                            "HiDream produced a blank image; the previous page image was kept")
+                    if len(ref_paths) > 1:
+                        _set(jid, stage="combining character references safely",
+                             progress=4)
+                        combined_guide_path = _combined_reference_guide(jid, ref_paths)
+                        labels = [str(x) for x in
+                                  (opts.get("reference_labels") or [])[:len(ref_paths)]]
+                        positions = ["left", "right", "centre"]
+                        identity_parts = [
+                            f"{labels[index] if index < len(labels) and labels[index] else 'subject ' + str(index + 1)} on the {positions[index]}"
+                            for index in range(len(ref_paths))
+                        ]
+                        guide_prompt = (
+                            "The single visual reference is a side-by-side identity guide "
+                            "containing distinct subjects: " + "; ".join(identity_parts)
+                            + ". Depict every listed subject as a separate complete character. "
+                              "Keep each subject's species, face, colours, clothing and permanent "
+                              "accessories distinct; never merge or swap their features.\n"
+                            + opts["prompt"]
+                        )
+                        _set(jid, stage="retrying with combined identity guide", progress=5)
+                        EVENT_LOG.event(
+                            "hidream.reference_collapse", level="warning", job_id=jid,
+                            reference_count=len(ref_paths),
+                            action="retry_combined_identity_guide", labels=labels,
+                        )
+                        arr, w, h = eng.generate(
+                            prompt=guide_prompt, width=opts["width"],
+                            height=opts["height"], steps=steps,
+                            seed=opts["seed"] + 1, snap=opts["snap"],
+                            blend_seams=opts["blend_seams"],
+                            ref_images=[combined_guide_path], progress=prog)
+                        reference_fallback = "combined_identity_guide"
+                    if _hidream_output_is_blank(arr):
+                        EVENT_LOG.event(
+                            "hidream.reference_guide_collapse", level="warning",
+                            job_id=jid, action="retry_without_references",
+                        )
+                        _set(jid, stage="reference guide was blank; retrying from descriptions",
+                             progress=5)
+                        arr, w, h = eng.generate(
+                            prompt=opts["prompt"], width=opts["width"],
+                            height=opts["height"], steps=steps,
+                            seed=opts["seed"] + 2, snap=opts["snap"],
+                            blend_seams=opts["blend_seams"], ref_images=[],
+                            progress=prog)
+                        reference_fallback = "description_only"
+                        if _hidream_output_is_blank(arr):
+                            EVENT_LOG.event(
+                                "hidream.fallback_collapsed", level="error", job_id=jid,
+                                action="reject",
+                            )
+                            raise RuntimeError(
+                                "HiDream produced a blank image after safe retries; "
+                                "the previous page image was kept")
                 from PIL import Image
+                _check_canceled(jid)
                 _set(jid, stage="saving", progress=97)
                 name = "img_" + uuid.uuid4().hex[:12] + ".png"
                 path = os.path.join(OUT_DIR, name)
                 Image.fromarray(arr).save(path)
                 elapsed = round(time.time() - t0, 1)
             finally:
-                for rp in ref_paths:
+                for rp in ref_paths + ([combined_guide_path] if combined_guide_path else []):
                     try:
                         os.remove(rp)
                     except OSError:
                         pass
 
+        _check_canceled(jid)
         result = {
             "filename": name,
             "url": f"/files/{name}",
             "width": int(w), "height": int(h),
             "steps": opts["steps"], "seed": opts["seed"],
             "prompt": opts["prompt"],
-            "engine": opts["engine"],
+            "engine": opts.get("registry_id") or opts["engine"],
             "reference_images": len(opts.get("reference_images") or []),
-            "resolution": opts.get("nano_resolution") or None,
-            "aspect_ratio": opts.get("nano_aspect_ratio") or None,
-            "output_format": opts.get("nano_output_format") or None,
+            "reference_fallback": locals().get("reference_fallback", ""),
+            "resolution": (opts.get("flux2_resolution")
+                           if opts["engine"] in (
+                               "flux_2_klein_4b", "flux_2_klein_4b_local")
+                           else opts.get("nano_resolution")) or None,
+            "aspect_ratio": (opts.get("flux2_aspect_ratio")
+                             if opts["engine"] in (
+                                 "flux_2_klein_4b", "flux_2_klein_4b_local")
+                             else opts.get("nano_aspect_ratio")) or None,
+            "output_format": (opts.get("flux2_output_format")
+                              if opts["engine"] in (
+                                  "flux_2_klein_4b", "flux_2_klein_4b_local")
+                              else opts.get("nano_output_format")) or None,
             "seconds": elapsed,
             "created": datetime.now().isoformat(timespec="seconds"),
         }
-        reload_omlx_models(
-            freed, stage=lambda message, progress: _set(jid, stage=message, progress=progress))
+        if IMAGE_RESTORE_OMLX_MODELS:
+            reload_omlx_models(
+                freed, stage=lambda message, progress: _set(
+                    jid, stage=message, progress=progress))
+        # By default, leave displaced chat models in their SSD cold cache.
+        # oMLX loads them automatically when the next chat needs one. This
+        # avoids holding a chat model and HiDream in unified memory together.
         freed = []
+        _check_canceled(jid)
         _set(jid, status="done", stage="done", progress=100, result=result)
+        EVENT_LOG.event(
+            "image.job_completed", job_id=jid, engine=opts.get("engine"),
+            duration_ms=round((time.monotonic() - started_clock) * 1000),
+            filename=name, width=int(w), height=int(h), output_seconds=elapsed,
+            reference_count=len(opts.get("reference_images") or []),
+            reference_fallback=locals().get("reference_fallback", ""),
+        )
+    except JobCanceled:
+        eng.unload()
+        _set(jid, status="canceled", stage="stopped", progress=0,
+             error=None, result=None)
+        EVENT_LOG.event(
+            "image.job_canceled", level="warning", job_id=jid,
+            engine=opts.get("engine"),
+            duration_ms=round((time.monotonic() - started_clock) * 1000),
+        )
     except Exception as e:
         _set(jid, status="error", stage="error",
              error=f"{type(e).__name__}: {e}")
+        EVENT_LOG.exception(
+            "image.job_failed", e, job_id=jid, engine=opts.get("engine"),
+            duration_ms=round((time.monotonic() - started_clock) * 1000),
+        )
     finally:
         if freed:
             reload_omlx_models(freed)
         release_lease(lease)
+        _clear_active(jid)
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -857,49 +1762,44 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         path = urlparse(self.path).path
         if path == "/health":
-            kontext_ready = os.path.isfile(MFLUX_KONTEXT_BIN)
             return self._json(200, {
                 "ok": True,
-                "scripts_available": eng.scripts_available(),
-                "weights_ready": eng.weights_ready(),
-                "model_loaded": eng.is_loaded(),
-                "kontext_ready": kontext_ready,
-                "kontext_model": KONTEXT_MODEL,
-                "kontext_low_ram": KONTEXT_LOW_RAM,
-                "kontext_mlx_cache_gb": KONTEXT_CACHE_GB,
+                "flux_2_klein_4b_local_ready": (
+                    os.path.isfile(MFLUX_FLUX2_BIN)
+                    and os.path.isfile(MFLUX_FLUX2_EDIT_BIN)),
+                "flux_2_klein_4b_local_model": FLUX2_LOCAL_MODEL,
+                "flux_2_klein_4b_local_quantize": FLUX2_LOCAL_QUANTIZE,
+                "flux_2_klein_4b_local_precision": FLUX2_LOCAL_PRECISION,
+                "flux_2_klein_4b_local_cache_gb": FLUX2_LOCAL_CACHE_GB,
+                "flux_2_klein_4b_local_max_tokens": FLUX2_LOCAL_MAX_TOKENS,
+                "memory_guard": {
+                    "cold_start_gb": IMAGE_MIN_FREE_GB,
+                    "warm_model_gb": IMAGE_WARM_MIN_FREE_GB,
+                    "flux_2_klein_local_gb": FLUX2_LOCAL_MIN_FREE_GB,
+                    "restore_chat_models": IMAGE_RESTORE_OMLX_MODELS,
+                },
                 "model_memory_lease": lease_status(),
+                "grok_ready": bool(XAI_TOKEN),
+                "grok_model": GROK_IMAGE_MODEL,
                 "nano_banana_ready": bool(NB_TOKEN),
                 "nano_banana_model": NB_MODEL,
+                "flux_2_klein_4b_ready": bool(NB_TOKEN),
+                "flux_2_klein_4b_model": FLUX2_MODEL,
                 "queue": len(_work_q),
             })
         if path == "/info":
+            registry_models = public_models("image", consumer="image_studio")
             return self._json(200, {
-                "model": "HiDream-O1-Image-Dev (MLX bf16)",
-                "kontext_model": KONTEXT_MODEL,
                 "nano_banana_model": NB_MODEL,
-                "engines": ["hidream", "kontext", "nano_banana_2"],
+                "flux_2_klein_4b_model": FLUX2_MODEL,
+                "flux_2_klein_4b_local_model": FLUX2_LOCAL_MODEL,
+                "flux_2_klein_4b_local_max_tokens": FLUX2_LOCAL_MAX_TOKENS,
+                "registry": str(REGISTRY_PATH),
+                "models": registry_models,
+                "engines": [model["id"] for model in registry_models],
                 "capabilities": {
-                    "hidream": {
-                        "text_to_image": True,
-                        "instruction_edit": True,
-                        "multi_reference": True,
-                        "max_reference_images": 3,
-                    },
-                    "kontext": {
-                        "reference_edit": True,
-                        "max_reference_images": 1,
-                    },
-                    "nano_banana_2": {
-                        "text_to_image": True,
-                        "multi_reference": True,
-                        "max_reference_images": 14,
-                        "native_text_rendering": True,
-                        "resolutions": [NB_RESOLUTION],
-                        "aspect_ratios": NB_ASPECTS,
-                        "output_formats": NB_OUTPUT_FORMATS,
-                        "google_search": True,
-                        "image_search": True,
-                    },
+                    model["id"]: model.get("capabilities", {})
+                    for model in registry_models
                 },
                 "overlay": {
                     "enabled": True,
@@ -907,8 +1807,6 @@ class Handler(BaseHTTPRequestHandler):
                 },
                 "presets": PRESETS, "default_steps": 28,
                 "min_dim": MIN_DIM, "max_dim": MAX_DIM,
-                "weights_ready": eng.weights_ready(),
-                "model_loaded": eng.is_loaded(),
             })
         if path == "/library":
             qs = parse_qs(urlparse(self.path).query)
@@ -970,14 +1868,12 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         path = urlparse(self.path).path
+        if path == "/cancel":
+            return self._json(200, _cancel_all_images())
         if path == "/load":
-            try:
-                if not eng.weights_ready():
-                    return self._json(409, {"error": "weights not ready"})
-                threading.Thread(target=eng.load, daemon=True).start()
-                return self._json(200, {"ok": True, "loading": True})
-            except Exception as e:
-                return self._json(500, {"error": str(e)})
+            return self._json(410, {
+                "error": "The retired HiDream model has been removed."
+            })
         if path == "/generate":
             d = self._body()
             prompt = (d.get("prompt") or "").strip()
@@ -991,55 +1887,112 @@ class Handler(BaseHTTPRequestHandler):
                 h = int(d.get("height", 1024))
             w = max(MIN_DIM, min(MAX_DIM, w))
             h = max(MIN_DIM, min(MAX_DIM, h))
-            engine = str(d.get("engine", "hidream")).strip().lower()
-            if engine not in ("hidream", "kontext", "nano_banana_2"):
-                return self._json(400, {"error": "engine must be hidream, kontext, or nano_banana_2"})
+            requested_engine = str(
+                d.get("engine", "flux_2_klein_4b_local")
+            ).strip().lower()
+            registry_model = get_model(requested_engine)
+            if not registry_model:
+                return self._json(400, {"error": (
+                    "unknown or disabled image model: " + requested_engine)})
+            registry_id = registry_model["id"]
+            engine = registry_model.get("service_engine") or registry_id
             ref_images = []
             raw_refs = d.get("reference_images")
-            max_refs = 14 if engine == "nano_banana_2" else 3
+            max_refs = max(0, int((registry_model.get("capabilities") or {}).get(
+                "max_reference_images", 0)))
             if isinstance(raw_refs, list):
-                ref_images = [str(x) for x in raw_refs if x][:max_refs]
+                ref_images = [str(x) for x in raw_refs if x]
             elif isinstance(raw_refs, str) and raw_refs.strip():
                 ref_images = [raw_refs.strip()]
             if not ref_images:
-                for key in ("reference_image", "reference_image_2", "reference_image_3"):
+                for key in (
+                        "reference_image", "reference_image_2",
+                        "reference_image_3", "reference_image_4"):
                     rv = d.get(key)
                     if isinstance(rv, str) and rv.strip():
                         ref_images.append(rv.strip())
-                ref_images = ref_images[:max_refs]
+            if len(ref_images) > max_refs:
+                return self._json(400, {"error": (
+                    f"{registry_model.get('label') or registry_id} accepts no more "
+                    f"than {max_refs} reference images. Received {len(ref_images)}. "
+                    "No image job or cloud request was started.")})
+            ref_images = ref_images[:max_refs]
+            raw_labels = d.get("reference_labels")
+            reference_labels = ([str(x)[:120] for x in raw_labels[:max_refs]]
+                                if isinstance(raw_labels, list) else [])
             nano_aspect = str(d.get("nano_aspect_ratio") or "1:1")
             if nano_aspect not in NB_ASPECTS:
                 nano_aspect = "1:1"
             nano_fmt = str(d.get("nano_output_format") or "png").lower()
             if nano_fmt not in NB_OUTPUT_FORMATS:
                 nano_fmt = "png"
+            flux2_aspect = str(d.get("flux2_aspect_ratio") or nano_aspect)
+            if flux2_aspect not in FLUX2_ASPECTS:
+                flux2_aspect = "1:1"
+            flux2_resolution = str(d.get("flux2_resolution") or "1")
+            if flux2_resolution not in FLUX2_RESOLUTIONS:
+                flux2_resolution = "1"
+            flux2_fmt = str(d.get("flux2_output_format") or "png").lower()
+            if flux2_fmt not in FLUX2_OUTPUT_FORMATS:
+                flux2_fmt = "png"
             opts = {
                 "engine": engine,
-                "prompt": prompt[:2000],
+                "registry_id": registry_id,
+                "prompt": (prompt[:6000] if engine in (
+                    "grok", "flux_2_klein_4b", "flux_2_klein_4b_local")
+                    else prompt[:2000]),
                 "width": w, "height": h,
-                "steps": max(4, min(50, int(d.get("steps", 28)))),
+                "steps": (FLUX2_LOCAL_STEPS if engine == "flux_2_klein_4b_local"
+                          else max(4, min(50, int(d.get("steps", 28))))),
                 "seed": int(d.get("seed", 32)),
                 "snap": bool(d.get("snap", True)),
                 "blend_seams": max(0, min(4, int(d.get("blend_seams", 0)))),
                 "guidance": float(d.get("guidance", 2.8)),
                 "reference_image": d.get("reference_image", ""),
                 "reference_images": ref_images,
+                "reference_labels": reference_labels,
                 "nano_resolution": NB_RESOLUTION,
                 "nano_aspect_ratio": nano_aspect,
                 "nano_output_format": nano_fmt,
                 "nano_google_search": bool(d.get("nano_google_search", False)),
                 "nano_image_search": bool(d.get("nano_image_search", False)),
+                "flux2_resolution": flux2_resolution,
+                "flux2_aspect_ratio": flux2_aspect,
+                "flux2_output_format": flux2_fmt,
+                "flux2_output_quality": max(0, min(100, int(
+                    d.get("flux2_output_quality", 100)))),
+                "flux2_go_fast": bool(d.get("flux2_go_fast", False)),
+                "flux2_disable_safety_checker": bool(
+                    d.get("flux2_disable_safety_checker", False)),
+                "flux2_max_tokens": max(512, min(2048, int(
+                    d.get("flux2_max_tokens") or FLUX2_LOCAL_MAX_TOKENS))),
             }
             if engine == "kontext" and not opts["reference_image"]:
                 return self._json(400, {"error": "reference_image is required for kontext"})
-            if engine == "nano_banana_2" and not NB_TOKEN:
+            if engine == "grok" and not XAI_TOKEN:
+                return self._json(400, {"error": "XAI_API_KEY/GROK_API_KEY is not set — add it to " + NB_ENV_FILE})
+            if engine in ("nano_banana_2", "flux_2_klein_4b") and not NB_TOKEN:
                 return self._json(400, {"error": "REPLICATE_API_TOKEN is not set — add it to " + NB_ENV_FILE})
             jid = "img_" + uuid.uuid4().hex[:12]
             _set(jid, status="running", stage="queued", progress=0,
-                 result=None, error=None, opts=opts)
+                 result=None, error=None, cancel_requested=False, opts=opts)
             with _work_cv:
                 _work_q.append(jid)
+                queue_depth = len(_work_q)
                 _work_cv.notify()
+            EVENT_LOG.event(
+                "image.job_queued", job_id=jid, engine=registry_id,
+                service_engine=engine, width=w, height=h,
+                steps=opts["steps"], seed=opts["seed"],
+                reference_count=len(ref_images), queue_depth=queue_depth,
+                reference_labels=reference_labels,
+                reference_mapping_version=(
+                    "character-map-v2"
+                    if engine in ("flux_2_klein_4b", "flux_2_klein_4b_local")
+                    else ""
+                ),
+                prompt_chars=len(prompt),
+            )
             return self._json(200, {"ok": True, "job_id": jid})
         if path == "/overlay":
             d = self._body()
@@ -1083,8 +2036,8 @@ def main():
     threading.Thread(target=_worker, daemon=True).start()
     threading.Thread(target=_power_worker, daemon=True).start()
     srv = ThreadingHTTPServer((HOST, PORT), Handler)
-    print(f"omlx-image ready at http://{HOST}:{PORT} "
-          f"(weights_ready={eng.weights_ready()})", flush=True)
+    print(f"omlx-image ready at http://{HOST}:{PORT}", flush=True)
+    EVENT_LOG.event("service.started", host=HOST, port=PORT)
     srv.serve_forever()
 
 

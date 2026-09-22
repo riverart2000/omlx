@@ -1180,40 +1180,52 @@
 
         <!-- Messages area with rail -->
         <div class="flex-1 min-h-0 relative">
-            <!-- Floating model selector capsule (top-center; mirrors the sidebar model picker) -->
+            <!-- Top-center chat controls: model selector and orchestration bypass. -->
             <div x-show="currentModel && availableModels.length > 0" x-cloak
-                class="absolute top-3 left-1/2 -translate-x-1/2 z-20"
-                x-data="{ modelMenuOpen: false }" @click.outside="modelMenuOpen = false"
-                @keydown.escape="modelMenuOpen = false">
-                <button @click="modelMenuOpen = !modelMenuOpen" :title="window.t('chat.switch_model')"
-                    class="flex items-center gap-2 px-3 py-1.5 rounded-full border border-line bg-surface shadow-md text-xs font-medium hover:bg-surface-muted transition-colors"
-                    style="color: var(--text-primary); max-width: 18rem;">
-                    <i data-lucide="box" class="w-3.5 h-3.5 flex-shrink-0" style="color: var(--text-tertiary);"></i>
-                    <span class="truncate min-w-0" x-text="(availableModels.find(m => m.id === currentModel)?.name) || currentModel"></span>
-                    <i data-lucide="chevron-down" class="w-3.5 h-3.5 flex-shrink-0 transition-transform"
-                        :style="modelMenuOpen ? 'color: var(--text-tertiary);' : 'color: var(--text-tertiary); transform: rotate(180deg);'"></i>
-                </button>
-                <!-- Static centered anchor: transform lives here (never animated), so the
-                     dropdown's own x-transition can't fight the -translate-x-1/2 centering. -->
-                <div class="absolute top-full left-1/2 mt-1.5" style="transform: translateX(-50%); z-index: 30;">
-                <div x-show="modelMenuOpen" x-transition.opacity x-cloak
-                    class="overflow-y-auto rounded-xl border border-line bg-surface shadow-lg py-1"
-                    style="min-width: 15rem; max-height: 18rem;">
-                    <template x-for="model in availableModels" :key="model.id">
-                        <button @click="selectModel(model.id); modelMenuOpen = false"
-                            class="w-full flex items-center gap-2 px-3 py-1.5 text-xs text-left hover:bg-surface-muted transition-colors"
-                            :class="model.id === currentModel ? 'font-semibold' : ''"
-                            style="color: var(--text-primary);">
-                            <i data-lucide="check" class="w-3 h-3 flex-shrink-0"
-                                :style="'color: var(--timeline-accent); visibility:' + (model.id === currentModel ? 'visible' : 'hidden')"></i>
-                            <span class="flex-1 min-w-0 truncate" x-text="model.name"></span>
-                            <i data-lucide="star" class="w-3 h-3 flex-shrink-0" x-show="model.is_favorite"
-                                style="color: var(--timeline-accent);"></i>
-                        </button>
-                    </template>
-                </div>
+                class="absolute top-3 left-1/2 -translate-x-1/2 z-20">
+                <div class="relative" x-data="{ modelMenuOpen: false }"
+                    @click.outside="modelMenuOpen = false" @keydown.escape="modelMenuOpen = false">
+                    <button @click="modelMenuOpen = !modelMenuOpen" :title="window.t('chat.switch_model')"
+                        class="flex items-center gap-2 px-3 py-1.5 rounded-full border border-line bg-surface shadow-md text-xs font-medium hover:bg-surface-muted transition-colors"
+                        style="color: var(--text-primary); max-width: 18rem;">
+                        <i data-lucide="box" class="w-3.5 h-3.5 flex-shrink-0" style="color: var(--text-tertiary);"></i>
+                        <span class="truncate min-w-0" x-text="(availableModels.find(m => m.id === currentModel)?.name) || currentModel"></span>
+                        <i data-lucide="chevron-down" class="w-3.5 h-3.5 flex-shrink-0 transition-transform"
+                            :style="modelMenuOpen ? 'color: var(--text-tertiary);' : 'color: var(--text-tertiary); transform: rotate(180deg);'"></i>
+                    </button>
+                    <div class="absolute top-full left-1/2 mt-1.5" style="transform: translateX(-50%); z-index: 30;">
+                        <div x-show="modelMenuOpen" x-transition.opacity x-cloak
+                            class="overflow-y-auto rounded-xl border border-line bg-surface shadow-lg py-1"
+                            style="min-width: 15rem; max-height: 18rem;">
+                            <template x-for="model in availableModels" :key="model.id">
+                                <button @click="selectModel(model.id); modelMenuOpen = false"
+                                    class="w-full flex items-center gap-2 px-3 py-1.5 text-xs text-left hover:bg-surface-muted transition-colors"
+                                    :class="model.id === currentModel ? 'font-semibold' : ''"
+                                    style="color: var(--text-primary);">
+                                    <i data-lucide="check" class="w-3 h-3 flex-shrink-0"
+                                        :style="'color: var(--timeline-accent); visibility:' + (model.id === currentModel ? 'visible' : 'hidden')"></i>
+                                    <span class="flex-1 min-w-0 truncate" x-text="model.name"></span>
+                                    <i data-lucide="star" class="w-3 h-3 flex-shrink-0" x-show="model.is_favorite"
+                                        style="color: var(--timeline-accent);"></i>
+                                </button>
+                            </template>
+                        </div>
+                    </div>
                 </div>
             </div>
+
+            <button x-show="currentModel && availableModels.length > 0" x-cloak
+                @click="toggleDirectChatMode()" :disabled="isCurrentChatStreaming()"
+                class="absolute top-3 z-20 flex items-center gap-2 px-3 py-1.5 rounded-full border bg-surface shadow-md text-xs font-semibold transition-colors hover:bg-surface-muted disabled:opacity-50 disabled:cursor-not-allowed whitespace-nowrap"
+                :class="directChatMode ? 'border-green-500' : 'border-line'"
+                :style="(showRightToggle ? 'right:4.25rem;' : 'right:1rem;') + (directChatMode ? 'box-shadow:0 0 0 1px rgba(34,197,94,.28);' : '')"
+                :title="directChatMode
+                    ? 'Direct chat is on: only user and assistant chat messages are sent to the model. Click to enable the orchestrator.'
+                    : 'Orchestrator is on. Click for direct chat with no system prompt, RAG context, tools, or orchestration injection.'">
+                <i data-lucide="waypoints" class="w-3.5 h-3.5 flex-shrink-0"
+                    :style="directChatMode ? 'color:#22c55e;' : 'color:var(--text-tertiary);'"></i>
+                <span x-text="directChatMode ? 'Direct chat' : 'Orchestrator on'"></span>
+            </button>
             <!-- Messages Container -->
             <div class="absolute inset-0 overflow-y-auto overflow-x-hidden custom-scrollbar" id="messagesContainer">
             <!-- Welcome Screen -->
@@ -2599,6 +2611,7 @@
     const ENHANCED_READABILITY_KEY = 'omlx-enhanced-readability';
     const SYSTEM_PROMPT_STORAGE_KEY = 'omlx_chat_system_prompt';
     const PROMPT_PROFILES_STORAGE_KEY = 'omlx_chat_prompt_profiles';
+    const DIRECT_CHAT_STORAGE_KEY = 'omlx_chat_direct_mode';
 
     function resolveChatUntitledLabel() {
         if (typeof window.t === 'function') {
@@ -2628,6 +2641,7 @@
             enhancedReadability: localStorage.getItem(ENHANCED_READABILITY_KEY) === 'on',
             theme: localStorage.getItem(THEME_STORAGE_KEY) || 'auto',
             allowSvg: localStorage.getItem(ALLOW_SVG_STORAGE_KEY) === 'true',
+            directChatMode: localStorage.getItem(DIRECT_CHAT_STORAGE_KEY) === 'true',
             chatSettings: (() => {
                 const d = {
                     maxImages: 10,
@@ -6662,9 +6676,60 @@
             context._apiVariantChainId = stream.targetMessageId;
         }
         
-        const requestBody = this.buildChatCompletionBody(chatSession.messages, context, depth);
+        let requestBody = this.buildChatCompletionBody(chatSession.messages, context, depth);
+        let routeStatus = window.t('chat.status.starting');
+
+        if (this.directChatMode) {
+            // Direct mode deliberately sends conversation turns only. This strips
+            // profile/system prompts, RAG context, tool history, tool definitions,
+            // and the orchestrator layer so the selected model sees the plain chat.
+            requestBody.messages = (Array.isArray(requestBody.messages) ? requestBody.messages : [])
+                .filter(message => message && (message.role === 'user' || message.role === 'assistant'))
+                .map(message => ({ role: message.role, content: message.content ?? '' }))
+                .filter(message => message.role === 'user'
+                    || (Array.isArray(message.content) ? message.content.length > 0 : String(message.content).trim()));
+            delete requestBody.tools;
+            delete requestBody.tool_choice;
+            delete requestBody.reasoning_effort;
+            delete requestBody.thinking_budget;
+            // Qwen3.8's template defaults to xhigh reasoning when this flag is
+            // omitted. Force it off so Direct really means plain chat only.
+            requestBody.chat_template_kwargs = { enable_thinking: false };
+            routeStatus = 'Direct chat · no injections · thinking off';
+        } else {
+            try {
+                const routeResponse = await fetch('http://127.0.0.1:8700/route-chat', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ messages: requestBody.messages }),
+                    signal: stream.abortController.signal
+                });
+                if (!routeResponse.ok) throw new Error(await routeResponse.text());
+                const routed = await routeResponse.json();
+                requestBody.messages = Array.isArray(routed.messages) ? routed.messages : requestBody.messages;
+                delete requestBody.tools;
+                delete requestBody.tool_choice;
+                if (Array.isArray(routed.tools) && routed.tools.length) {
+                    requestBody.tools = routed.tools;
+                    requestBody.tool_choice = routed.tool_choice || 'auto';
+                }
+                const meta = routed.routing || {};
+                routeStatus = 'Orchestrator · ' + (meta.output_messages || requestBody.messages.length) +
+                    ' messages · ' + ((meta.selected_tools || []).length) + ' tools';
+            } catch (routingError) {
+                // Safe fallback: Qwen still works, but never receives the 230-tool catalog.
+                delete requestBody.tools;
+                delete requestBody.tool_choice;
+                const rows = Array.isArray(requestBody.messages) ? requestBody.messages : [];
+                const system = rows.find(m => m && m.role === 'system');
+                const recent = rows.filter(m => !m || m.role !== 'system').slice(-14);
+                requestBody.messages = system ? [system, ...recent] : recent;
+                routeStatus = 'Direct compact fallback';
+                console.warn('Orchestrator chat routing unavailable:', routingError);
+            }
+        }
         stream._toolRoundContent = '';
-        this.setEngineStatus(context.chatId, { text: window.t('chat.status.starting') });
+        this.setEngineStatus(context.chatId, { text: routeStatus });
         this.startPrefillPolling(context.chatId);
 
         try {
@@ -7901,6 +7966,12 @@
         localStorage.setItem('omlx-chat-settings', JSON.stringify(this.chatSettings));
     },
 
+    toggleDirectChatMode() {
+        if (this.isCurrentChatStreaming()) return;
+        this.directChatMode = !this.directChatMode;
+        localStorage.setItem(DIRECT_CHAT_STORAGE_KEY, this.directChatMode ? 'true' : 'false');
+    },
+
     // ===== Keyboard shortcuts =====
 
     _isTypingTarget(e) {
@@ -8388,6 +8459,149 @@
     }
 </script>
 
+<!-- ===== Bookmarkable chat and studio routes ===== -->
+<script>
+(function () {
+    if (window.OMLXRoute) return;
+    const BASE = '/admin/chat';
+    const TITLES = {
+        'tts-studio': 'TTS Studio',
+        'image-studio': 'Image Studio',
+        'song-studio': 'Song Studio',
+        'video-polish': 'Video Polish',
+        'book-creator': 'Book Creator',
+        'kindle-book': 'Kindle Book Studio',
+        'orchestrator': 'Workflow Orchestrator',
+        'shopify-growth': 'Shopify Growth Studio',
+    };
+    let chatApp = null;
+    let studioOpeners = {};
+    let restoring = false;
+
+    function parsedRoute() {
+        const suffix = location.pathname.startsWith(BASE)
+            ? location.pathname.slice(BASE.length).replace(/^\/+|\/+$/g, '') : '';
+        if (suffix.startsWith('c/')) {
+            try { return { type: 'chat', id: decodeURIComponent(suffix.slice(2)) }; }
+            catch (_) { return { type: 'base' }; }
+        }
+        return TITLES[suffix] ? { type: 'studio', slug: suffix } : { type: 'base' };
+    }
+
+    function chatPath() {
+        return chatApp && chatApp.currentChatId
+            ? BASE + '/c/' + encodeURIComponent(chatApp.currentChatId) : BASE;
+    }
+
+    function titleFor(route) {
+        if (route.type === 'studio') return TITLES[route.slug] + ' · oMLX';
+        if (route.type === 'chat' && chatApp) {
+            const item = (chatApp.chatHistory || []).find(c => c.id === route.id);
+            if (item && item.title) return item.title + ' · oMLX';
+        }
+        return 'oMLX Chat';
+    }
+
+    function setUrl(path, replace) {
+        if (location.pathname !== path) {
+            history[replace ? 'replaceState' : 'pushState']({ omlxRoute: path }, '', path);
+        }
+        document.title = titleFor(parsedRoute());
+    }
+
+    function hideStudios(exceptSlug) {
+        Object.entries(studioOpeners).forEach(([slug, entry]) => {
+            if (slug === exceptSlug) return;
+            const overlay = document.getElementById(entry.overlayId);
+            if (overlay) overlay.style.display = 'none';
+        });
+    }
+
+    async function restoreRoute(attempt) {
+        const route = parsedRoute();
+        if (route.type === 'chat' && chatApp) {
+            const exists = (chatApp.chatHistory || []).some(c => c.id === route.id);
+            if (!exists && (attempt || 0) < 50) {
+                setTimeout(() => restoreRoute((attempt || 0) + 1), 100);
+                return;
+            }
+            if (!exists) {
+                setUrl(BASE, true);
+                return;
+            }
+        }
+        restoring = true;
+        try {
+            if (route.type === 'studio' && studioOpeners[route.slug]) {
+                hideStudios(route.slug);
+                studioOpeners[route.slug].open();
+            } else {
+                hideStudios();
+                if (route.type === 'chat' && chatApp
+                        && (chatApp.chatHistory || []).some(c => c.id === route.id)
+                        && chatApp.currentChatId !== route.id) {
+                    await chatApp.loadChat(route.id);
+                }
+            }
+            document.title = titleFor(route);
+        } finally {
+            setTimeout(() => { restoring = false; }, 0);
+        }
+    }
+
+    function openStudio(slug) {
+        if (!TITLES[slug] || restoring) return;
+        setUrl(BASE + '/' + slug, false);
+    }
+
+    function syncClosedStudio() {
+        const route = parsedRoute();
+        if (restoring || route.type !== 'studio') return;
+        const entry = studioOpeners[route.slug];
+        const overlay = entry && document.getElementById(entry.overlayId);
+        if (overlay && getComputedStyle(overlay).display === 'none') {
+            setUrl(chatPath(), false);
+        }
+    }
+
+    function registerStudios(openers) {
+        studioOpeners = { ...studioOpeners, ...openers };
+        restoreRoute(0);
+    }
+
+    function registerChat(data) {
+        if (!data || chatApp) return;
+        chatApp = data;
+        const originalLoad = data.loadChat.bind(data);
+        const originalNew = data.startNewChat.bind(data);
+        data.loadChat = async function (chatId, ...args) {
+            const result = await originalLoad(chatId, ...args);
+            if (!restoring) setUrl(BASE + '/c/' + encodeURIComponent(chatId), false);
+            return result;
+        };
+        data.startNewChat = async function (...args) {
+            const result = await originalNew(...args);
+            if (!restoring && data.currentChatId) {
+                setUrl(BASE + '/c/' + encodeURIComponent(data.currentChatId), false);
+            }
+            return result;
+        };
+        restoreRoute(0);
+    }
+
+    window.OMLXRoute = { openStudio, registerStudios, restore: () => restoreRoute(0) };
+    window.addEventListener('popstate', () => restoreRoute(0));
+    document.addEventListener('click', () => setTimeout(syncClosedStudio, 0));
+    document.addEventListener('keydown', e => {
+        if (e.key === 'Escape') setTimeout(syncClosedStudio, 0);
+    });
+    document.addEventListener('alpine:initialized', () => {
+        const root = document.querySelector('[x-data="chatApp()"]');
+        if (root && window.Alpine) registerChat(Alpine.$data(root));
+    });
+})();
+</script>
+
 <!-- ===== Voice module: speech-to-text input + text-to-speech output (system voices) ===== -->
 <script>
 (function () {
@@ -8727,6 +8941,7 @@
         const ACTIVE = ['bg-accent', 'text-accent-fg'];
         const IDLE = ['bg-surface-muted', 'hover:bg-surface'];
         const BTN = 'w-10 h-10 m-1 shrink-0 rounded-full border border-line transition-colors flex items-center justify-center';
+        const PROJECT_BTN = 'min-w-0 flex items-center gap-2 px-2 py-2 rounded-lg border border-line transition-colors bg-surface-muted hover:bg-surface-alt text-left';
 
         let micBtn, ttsBtn, hfBtn, voiceSelect;
 
@@ -8801,11 +9016,24 @@
 
         function injectControls() {
             const row = root.querySelector('.input-container .flex.items-end');
-            if (!row) { setTimeout(injectControls, 300); return; }
+            const sidebar = root.querySelector('.sidebar-width');
+            if (!row || !sidebar) { setTimeout(injectControls, 300); return; }
             if (row.querySelector('.omlx-voice-mic')) return;
 
             const ta = row.querySelector('textarea');
             const sendWrap = row.querySelector('.relative.flex-shrink-0');
+
+            // Keep the composer focused on writing: project/studio launchers live in
+            // a compact grid in the left menu instead of competing with the textarea.
+            const projectsSection = document.createElement('div');
+            projectsSection.className = 'omlx-projects-nav px-3 py-2 border-t border-line flex-shrink-0';
+            projectsSection.innerHTML =
+                '<div class="flex items-center gap-1.5 px-1 mb-2 text-[10px] font-bold uppercase tracking-wider" style="color:var(--text-tertiary)">' +
+                    '<i data-lucide="layout-grid" class="w-3 h-3"></i><span>Projects</span>' +
+                '</div>' +
+                '<div class="omlx-projects-grid grid grid-cols-2 gap-1"></div>';
+            sidebar.insertBefore(projectsSection, sidebar.lastElementChild);
+            const projectsGrid = projectsSection.querySelector('.omlx-projects-grid');
 
             // voice picker (left of mic, only when TTS on)
             voiceSelect = document.createElement('select');
@@ -8870,81 +9098,83 @@
             // TTS Studio button — opens the high-quality file generator in an overlay
             const studioBtn = document.createElement('button');
             studioBtn.type = 'button';
-            studioBtn.className = 'omlx-voice-studio ' + BTN + ' ' + IDLE.join(' ');
+            studioBtn.className = 'omlx-voice-studio ' + PROJECT_BTN;
             studioBtn.title = 'TTS Studio — generate high-quality audio files (Voxtral)';
-            studioBtn.innerHTML = '<i data-lucide="audio-lines" class="w-4 h-4" style="color:var(--text-tertiary)"></i>';
+            studioBtn.setAttribute('aria-label', studioBtn.title);
+            studioBtn.innerHTML = '<i data-lucide="audio-lines" class="w-4 h-4 shrink-0" style="color:var(--text-tertiary)"></i><span class="truncate text-xs">TTS</span>';
             studioBtn.onclick = openStudio;
 
             // Image Studio button — HiDream-O1 text-to-image (sidecar :8400)
             const imgBtn = document.createElement('button');
             imgBtn.type = 'button';
-            imgBtn.className = 'omlx-image-studio ' + BTN + ' ' + IDLE.join(' ');
+            imgBtn.className = 'omlx-image-studio ' + PROJECT_BTN;
             imgBtn.title = 'Image Studio — generate images (HiDream + Kontext edit)';
-            imgBtn.innerHTML = '<i data-lucide="image" class="w-4 h-4" style="color:var(--text-tertiary)"></i>';
+            imgBtn.setAttribute('aria-label', imgBtn.title);
+            imgBtn.innerHTML = '<i data-lucide="image" class="w-4 h-4 shrink-0" style="color:var(--text-tertiary)"></i><span class="truncate text-xs">Images</span>';
             imgBtn.onclick = openImageStudio;
 
             // Song Studio button — ACE-Step1.5 music/song generation (:8600)
             const songBtn = document.createElement('button');
             songBtn.type = 'button';
-            songBtn.className = 'omlx-song-studio ' + BTN + ' ' + IDLE.join(' ');
+            songBtn.className = 'omlx-song-studio ' + PROJECT_BTN;
             songBtn.title = 'Song Studio — generate music and vocals with ACE-Step1.5';
-            songBtn.innerHTML = '<i data-lucide="music" class="w-4 h-4" style="color:var(--text-tertiary)"></i>';
+            songBtn.setAttribute('aria-label', songBtn.title);
+            songBtn.innerHTML = '<i data-lucide="music" class="w-4 h-4 shrink-0" style="color:var(--text-tertiary)"></i><span class="truncate text-xs">Music</span>';
             songBtn.onclick = openSongStudio;
+
+            // Video Polish — local light, colour, dialogue and edit finishing (:8950)
+            const polishBtn = document.createElement('button');
+            polishBtn.type = 'button';
+            polishBtn.className = 'omlx-video-polish ' + PROJECT_BTN;
+            polishBtn.title = 'Video Polish — enhance footage, clean dialogue and assemble clips';
+            polishBtn.setAttribute('aria-label', polishBtn.title);
+            polishBtn.innerHTML = '<i data-lucide="sliders-horizontal" class="w-4 h-4 shrink-0" style="color:#8f72ff"></i><span class="truncate text-xs">Polish</span>';
+            polishBtn.onclick = openVideoPolish;
 
             // General Book Creator — books for PDF, EPUB and editable Word (:8800)
             const generalBookBtn = document.createElement('button');
             generalBookBtn.type = 'button';
-            generalBookBtn.className = 'omlx-general-book-studio ' + BTN + ' ' + IDLE.join(' ');
+            generalBookBtn.className = 'omlx-general-book-studio ' + PROJECT_BTN;
             generalBookBtn.title = 'General Book Creator — create books for PDF, EPUB and Word';
-            generalBookBtn.innerHTML = '<i data-lucide="library-big" class="w-4 h-4" style="color:var(--text-tertiary)"></i>';
+            generalBookBtn.setAttribute('aria-label', generalBookBtn.title);
+            generalBookBtn.innerHTML = '<i data-lucide="library-big" class="w-4 h-4 shrink-0" style="color:var(--text-tertiary)"></i><span class="truncate text-xs">Books</span>';
             generalBookBtn.onclick = openGeneralBookStudio;
 
             // Kindle Book Studio — Grok writing, illustration and KDP packaging (:8800)
             const bookBtn = document.createElement('button');
             bookBtn.type = 'button';
-            bookBtn.className = 'omlx-book-studio ' + BTN + ' ' + IDLE.join(' ');
+            bookBtn.className = 'omlx-book-studio ' + PROJECT_BTN;
             bookBtn.title = 'Kindle Book Studio — create and publish illustrated books';
-            bookBtn.innerHTML = '<i data-lucide="book-open" class="w-4 h-4" style="color:var(--text-tertiary)"></i>';
+            bookBtn.setAttribute('aria-label', bookBtn.title);
+            bookBtn.innerHTML = '<i data-lucide="book-open" class="w-4 h-4 shrink-0" style="color:var(--text-tertiary)"></i><span class="truncate text-xs">Kindle</span>';
             bookBtn.onclick = openBookStudio;
 
             // Orchestrator button — workflow coordinator (sidecar :8700)
             const orchBtn = document.createElement('button');
             orchBtn.type = 'button';
-            orchBtn.className = 'omlx-orch-studio ' + BTN + ' ' + IDLE.join(' ');
+            orchBtn.className = 'omlx-orch-studio ' + PROJECT_BTN;
             orchBtn.title = 'Workflow Orchestrator — coordinate image/video/tts pipelines';
-            orchBtn.innerHTML = '<i data-lucide="compass" class="w-4 h-4" style="color:var(--text-tertiary)"></i>';
+            orchBtn.setAttribute('aria-label', orchBtn.title);
+            orchBtn.innerHTML = '<i data-lucide="compass" class="w-4 h-4 shrink-0" style="color:var(--text-tertiary)"></i><span class="truncate text-xs">Workflows</span>';
             orchBtn.onclick = openOrchestrator;
 
-            // Shopify Catalogue — local read-only product mirror (:8900)
+            // Shopify Growth Studio — analytics and reviewed fixes (:8900)
             const shopifyBtn = document.createElement('button');
             shopifyBtn.type = 'button';
-            shopifyBtn.className = 'omlx-shopify-catalogue ' + BTN + ' ' + IDLE.join(' ');
-            shopifyBtn.title = 'Shopify Catalogue — products, prices, costs, shipping and inventory';
-            shopifyBtn.innerHTML = '<i data-lucide="shopping-bag" class="w-4 h-4" style="color:#38a169"></i>';
+            shopifyBtn.className = 'omlx-shopify-catalogue ' + PROJECT_BTN;
+            shopifyBtn.title = 'Shopify Growth Studio — growth analytics, catalogue health and reviewed fixes';
+            shopifyBtn.setAttribute('aria-label', shopifyBtn.title);
+            shopifyBtn.innerHTML = '<i data-lucide="shopping-bag" class="w-4 h-4 shrink-0" style="color:#38a169"></i><span class="truncate text-xs">Shopify</span>';
             shopifyBtn.onclick = openShopifyCatalogue;
 
             if (ta) { row.insertBefore(voiceSelect, ta); row.insertBefore(micBtn, ta); row.insertBefore(hfBtn, ta); }
             else { row.appendChild(voiceSelect); row.appendChild(micBtn); row.appendChild(hfBtn); }
-            // Studio buttons grouped on the right.
-            if (sendWrap) {
-                row.insertBefore(shopifyBtn, sendWrap);
-                row.insertBefore(orchBtn, sendWrap);
-                row.insertBefore(imgBtn, sendWrap);
-                row.insertBefore(songBtn, sendWrap);
-                row.insertBefore(generalBookBtn, sendWrap);
-                row.insertBefore(bookBtn, sendWrap);
-                row.insertBefore(studioBtn, sendWrap);
-                row.insertBefore(ttsBtn, sendWrap);
-            } else {
-                row.appendChild(shopifyBtn);
-                row.appendChild(orchBtn);
-                row.appendChild(imgBtn);
-                row.appendChild(songBtn);
-                row.appendChild(generalBookBtn);
-                row.appendChild(bookBtn);
-                row.appendChild(studioBtn);
-                row.appendChild(ttsBtn);
-            }
+            [imgBtn, songBtn, polishBtn, studioBtn, generalBookBtn, bookBtn, orchBtn, shopifyBtn]
+                .forEach(btn => projectsGrid.appendChild(btn));
+
+            // Voice reply is a per-chat control, so it remains beside Send.
+            if (sendWrap) row.insertBefore(ttsBtn, sendWrap);
+            else row.appendChild(ttsBtn);
 
             renderVoiceOptions();
             updateMic();
@@ -8965,6 +9195,7 @@
             if (ttsStatsUnmount) { ttsStatsUnmount(); ttsStatsUnmount = null; }
         }
         function openStudio() {
+            window.OMLXRoute?.openStudio('tts-studio');
             let ov = document.getElementById('omlx-studio-overlay');
             if (ov) { ov.style.display = 'flex'; ttsStartStats(); return; }
             ov = document.createElement('div');
@@ -9017,9 +9248,48 @@
         const SONG_URL = (window.OLMLX_SONG_URL || 'http://127.0.0.1:8600').replace(/\/$/, '');
         const BOOK_URL = (window.OLMLX_BOOK_URL || 'http://127.0.0.1:8800').replace(/\/$/, '');
         const SHOPIFY_URL = (window.OLMLX_SHOPIFY_URL || 'http://127.0.0.1:8900').replace(/\/$/, '');
+        const VIDEO_POLISH_URL = (window.OLMLX_VIDEO_POLISH_URL || 'http://127.0.0.1:8950').replace(/\/$/, '');
+
+        // ---------- Video Polish overlay ----------
+        function openVideoPolish() {
+            window.OMLXRoute?.openStudio('video-polish');
+            let ov = document.getElementById('omlx-video-polish-overlay');
+            if (ov) { ov.style.display = 'flex'; return; }
+            ov = document.createElement('div');
+            ov.id = 'omlx-video-polish-overlay';
+            ov.style.cssText = 'position:fixed;inset:0;z-index:9999;background:rgba(4,5,8,.72);' +
+                'display:flex;align-items:center;justify-content:center;backdrop-filter:blur(3px);';
+            ov.addEventListener('click', e => { if (e.target === ov) ov.style.display = 'none'; });
+            const panel = document.createElement('div');
+            panel.style.cssText = 'width:min(1900px,99vw);height:min(1160px,98vh);background:#0b0d12;' +
+                'border:1px solid #343948;border-radius:14px;overflow:hidden;' +
+                'box-shadow:0 26px 90px rgba(0,0,0,.62);display:flex;flex-direction:column;';
+            const bar = document.createElement('div');
+            bar.style.cssText = 'display:flex;align-items:center;justify-content:space-between;' +
+                'padding:8px 12px;background:#11141b;border-bottom:1px solid #292e3a;flex-shrink:0;';
+            bar.innerHTML = '<span style="font-size:13px;font-weight:600;color:#f2f4f8;display:flex;gap:8px;align-items:center;">' +
+                '<i data-lucide="sliders-horizontal" class="w-4 h-4" style="color:#8f72ff"></i> Video Polish — local post-production</span>';
+            const closeBtn = document.createElement('button');
+            closeBtn.innerHTML = '<i data-lucide="x" class="w-4 h-4"></i>';
+            closeBtn.title = 'Close';
+            closeBtn.style.cssText = 'background:transparent;border:none;color:#9ba4b4;cursor:pointer;padding:4px;border-radius:6px;';
+            closeBtn.onclick = () => { ov.style.display = 'none'; };
+            bar.appendChild(closeBtn);
+            const frame = document.createElement('iframe');
+            frame.src = VIDEO_POLISH_URL + '/';
+            frame.style.cssText = 'flex:1;border:none;width:100%;background:#0b0d12;';
+            frame.allow = 'autoplay';
+            panel.appendChild(bar); panel.appendChild(frame); ov.appendChild(panel);
+            document.body.appendChild(ov);
+            if (window.lucide && lucide.createIcons) lucide.createIcons();
+            document.addEventListener('keydown', function esc(e) {
+                if (e.key === 'Escape') ov.style.display = 'none';
+            });
+        }
 
         // ---------- General Book Creator overlay ----------
         function openGeneralBookStudio() {
+            window.OMLXRoute?.openStudio('book-creator');
             let ov = document.getElementById('omlx-general-book-overlay');
             if (ov) {
                 ov.style.display = 'flex';
@@ -9060,6 +9330,7 @@
 
         // ---------- Kindle Book Studio overlay ----------
         function openBookStudio() {
+            window.OMLXRoute?.openStudio('kindle-book');
             let ov = document.getElementById('omlx-book-overlay');
             if (ov) {
                 ov.style.display = 'flex';
@@ -9100,6 +9371,7 @@
 
         // ---------- Song Studio overlay (ACE-Step1.5) ----------
         function openSongStudio() {
+            window.OMLXRoute?.openStudio('song-studio');
             let ov = document.getElementById('omlx-song-overlay');
             if (ov) { ov.style.display = 'flex'; return; }
             ov = document.createElement('div');
@@ -9134,8 +9406,9 @@
             });
         }
 
-        // ---------- Shopify Catalogue overlay (read-only local mirror) ----------
+        // ---------- Shopify Growth Studio overlay (local analytics and reviewed changes) ----------
         function openShopifyCatalogue() {
+            window.OMLXRoute?.openStudio('shopify-growth');
             let ov = document.getElementById('omlx-shopify-overlay');
             if (ov) {
                 ov.style.display = 'flex';
@@ -9156,7 +9429,7 @@
             bar.style.cssText = 'display:flex;align-items:center;justify-content:space-between;' +
                 'padding:8px 12px;background:#173d29;border-bottom:1px solid #315f43;flex-shrink:0;';
             bar.innerHTML = '<span style="font-size:13px;font-weight:600;color:#fff;display:flex;gap:8px;align-items:center;">' +
-                '<i data-lucide="shopping-bag" class="w-4 h-4"></i> Shopify Catalogue — local read-only mirror</span>';
+                '<i data-lucide="shopping-bag" class="w-4 h-4"></i> Shopify Growth Studio — analytics and reviewed fixes</span>';
             const closeBtn = document.createElement('button');
             closeBtn.innerHTML = '<i data-lucide="x" class="w-4 h-4"></i>';
             closeBtn.title = 'Close';
@@ -9176,6 +9449,7 @@
 
         // ---------- Orchestrator overlay (workflow coordinator) ----------
         function openOrchestrator() {
+            window.OMLXRoute?.openStudio('orchestrator');
             let ov = document.getElementById('omlx-orch-overlay');
             if (ov) { ov.style.display = 'flex'; return; }
             ov = document.createElement('div');
@@ -9299,6 +9573,7 @@
         let imgPollTimer = null;
         let imgModelRegistry = [];
         function openImageStudio() {
+            window.OMLXRoute?.openStudio('image-studio');
             let ov = document.getElementById('omlx-image-overlay');
             if (ov) { ov.style.display = 'flex'; imgStartStats(); return; }
             ov = document.createElement('div');
@@ -11587,6 +11862,16 @@
         window.vidSaveToDisk = vidSaveToDisk;
         injectControls();
         loadKokoroVoices();
+        window.OMLXRoute?.registerStudios({
+            'tts-studio': { open: openStudio, overlayId: 'omlx-studio-overlay' },
+            'image-studio': { open: openImageStudio, overlayId: 'omlx-image-overlay' },
+            'song-studio': { open: openSongStudio, overlayId: 'omlx-song-overlay' },
+            'video-polish': { open: openVideoPolish, overlayId: 'omlx-video-polish-overlay' },
+            'book-creator': { open: openGeneralBookStudio, overlayId: 'omlx-general-book-overlay' },
+            'kindle-book': { open: openBookStudio, overlayId: 'omlx-book-overlay' },
+            'orchestrator': { open: openOrchestrator, overlayId: 'omlx-orch-overlay' },
+            'shopify-growth': { open: openShopifyCatalogue, overlayId: 'omlx-shopify-overlay' },
+        });
     });
 })();
 </script>
@@ -11747,6 +12032,7 @@
             const origSend = data.sendMessage.bind(data);
             data.sendMessage = async function (...a) {
                 RAG.turnCtx = null; RAG.lastSources = [];
+                if (this.directChatMode) return origSend(...a);
                 syncCollectionWithProfile();
                 if (RAG.on && online) {
                     const q = (this.inputMessage || '').trim();
@@ -11775,7 +12061,7 @@
             data.buildChatCompletionBody = function (...a) {
                 const body = origBuild(...a);
                 try {
-                    if (RAG.turnCtx && body && Array.isArray(body.messages)) {
+                    if (!data.directChatMode && RAG.turnCtx && body && Array.isArray(body.messages)) {
                         const sys = { role: 'system', content: RAG.turnCtx };
                         const at = (body.messages[0] && body.messages[0].role === 'system') ? 1 : 0;
                         body.messages.splice(at, 0, sys);

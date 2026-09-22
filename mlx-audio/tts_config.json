@@ -1,27 +1,27 @@
 {
-  "default_profile": "ultra_natural_hq",
+  "default_profile": "british_female",
   "defaults": {
-    "model": "mlx-community/Voxtral-4B-TTS-2603-mlx-bf16",
-    "lang_code": "en",
+    "model": "mlx-community/Qwen3-TTS-12Hz-1.7B-VoiceDesign-bf16",
+    "lang_code": "English",
     "max_tokens": 1600,
     "audio_format": "wav"
   },
   "profiles": {
-    "ultra_natural_hq": {
-      "voice": "neutral_female",
+    "british_female": {
+      "voice": "Eleanor",
       "speed": 0.9
     },
-    "ultra_natural_alt": {
-      "voice": "neutral_male",
+    "american_female": {
+      "voice": "Maya",
       "speed": 0.9
     },
-    "warm_natural": {
-      "voice": "casual_female",
-      "speed": 0.92
+    "british_male": {
+      "voice": "Arthur",
+      "speed": 0.9
     },
-    "polished_natural": {
-      "voice": "cheerful_female",
-      "speed": 0.94
+    "american_male": {
+      "voice": "Noah",
+      "speed": 0.9
     }
   }
 }

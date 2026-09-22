@@ -1,15 +1,11 @@
 #!/usr/bin/env python3
 """
-Persistent high-quality TTS Studio server (mlx-audio).
+Persistent Qwen TTS Studio server (mlx-audio).
 
-Two engines, lazy-loaded and cached on a single dedicated worker thread
-(which avoids the MLX "no Stream(gpu, 0)" cross-thread error):
-
-  * voxtral  - fast, 20 built-in language/style presets
-  * higgs    - Higgs Audio v2 (Apache-2.0): very realistic + voice cloning
+Qwen engines are lazy-loaded and cached on one dedicated worker thread
+(which avoids the MLX "no Stream(gpu, 0)" cross-thread error).
 
 Production features for YouTube voiceovers:
-  * Voice cloning (Higgs) from a reference clip (auto-transcribed once)
   * Mastering chain via ffmpeg: loudness normalize, sample rate, channels,
     fades, silence trim, mp3 bitrate
   * Multi-take: render N seeded variations, audition, keep the best
@@ -24,6 +20,7 @@ Endpoints:
   GET  /refs             -> [...]
   GET  /files/<name>     -> serves a generated/reference audio file
   POST /generate         -> render (engine, clone, mastering, takes, script)
+  POST /generate-batch   -> render 1-4 stable voice-clone clips in one GPU pass
   POST /history/delete   -> {id}
   POST /history/favorite -> {id, value}
   POST /refs/upload      -> {name, data(base64), ref_text?}
@@ -32,6 +29,7 @@ Endpoints:
 from __future__ import annotations
 
 import base64
+import gc
 import hashlib
 import json
 import os
@@ -69,28 +67,173 @@ VOXTRAL_VOICES = [
 _VOICE_LANG = {"fr": "fr", "es": "es", "de": "de", "it": "it",
                "pt": "pt", "nl": "nl", "hi": "hi", "ar": "ar"}
 
-ENGINES = {
-    "higgs": {
-        "label": "Higgs v2 — realistic + voice cloning",
-        "repo": os.environ.get("TTS_HIGGS", "mlx-community/higgs-audio-v2-3B-mlx-q8"),
-        "clone": True,
-        "presets": False,
+# Qwen3-TTS CustomVoice's built-in speakers.  Keep their native language
+# visible: multilingual support is not the same thing as a native accent.
+QWEN3_VOICE_INFO = {
+    "Serena": {"label": "Serena — Chinese-native female", "gender": "female", "native_language": "Chinese"},
+    "Vivian": {"label": "Vivian — Chinese-native female", "gender": "female", "native_language": "Chinese"},
+    "Sohee": {"label": "Sohee — Korean-native female", "gender": "female", "native_language": "Korean"},
+    "Ono_Anna": {"label": "Ono Anna — Japanese-native female", "gender": "female", "native_language": "Japanese"},
+    "Ryan": {"label": "Ryan — native-English male", "gender": "male", "native_language": "English"},
+    "Aiden": {"label": "Aiden — native-English male", "gender": "male", "native_language": "English"},
+    "Uncle_Fu": {"label": "Uncle Fu — Chinese-native male", "gender": "male", "native_language": "Chinese"},
+}
+QWEN3_VOICES = list(QWEN3_VOICE_INFO)
+QWEN3_DEFAULT_VOICE = os.environ.get("TTS_QWEN3_VOICE", "Serena")
+QWEN3_DEFAULT_INSTRUCT = (
+    "Natural, warm, expressive children's audiobook narration. Vary rhythm and "
+    "emphasis with the meaning, observe punctuation, and use unhurried, "
+    "human-sounding pauses. Speak only the supplied words."
+)
+
+# VoiceDesign supplies genuinely native-English female and male narration,
+# including a real UK/US accent choice.  A fixed, detailed description plus a
+# fixed per-book seed keeps the designed timbre stable across short passages.
+QWEN3_DESIGN_VOICE_INFO = {
+    "Eleanor": {
+        "label": "Eleanor — native British female storyteller",
+        "gender": "female", "accent": "british",
+        "prompt": (
+            "A native British English woman in her early thirties with a clear, "
+            "warm, polished audiobook voice and an authentic modern southern "
+            "British accent. Her timbre is rich, friendly and reassuring, never "
+            "breathy, shrill or sing-song. Precise English pronunciation, natural "
+            "human phrasing, expressive but controlled children's storytelling."
+        ),
     },
-    "voxtral": {
-        "label": "Voxtral — fast, 20 presets",
-        "repo": os.environ.get("TTS_VOXTRAL", "mlx-community/Voxtral-4B-TTS-2603-mlx-bf16"),
-        "clone": False,
-        "presets": True,
+    "Maya": {
+        "label": "Maya — native American female storyteller",
+        "gender": "female", "accent": "american",
+        "prompt": (
+            "A native American English woman in her early thirties with a clear, "
+            "warm, polished audiobook voice and a neutral General American accent. "
+            "Her timbre is rich, friendly and reassuring, never breathy, shrill or "
+            "sing-song. Precise pronunciation, natural human phrasing, expressive "
+            "but controlled children's storytelling."
+        ),
     },
-    "kokoro": {
-        "label": "Kokoro 82M — fast, natural (chat voice)",
-        "repo": os.environ.get("TTS_KOKORO", "mlx-community/Kokoro-82M-bf16"),
-        "clone": False,
-        "presets": False,
-        "kokoro": True,
+    "Poppy": {
+        "label": "Poppy — lively British female storyteller",
+        "gender": "female", "accent": "british",
+        "prompt": (
+            "A native British English woman in her late twenties with an "
+            "authentic modern southern British accent and a bright, playful, "
+            "highly engaging children's audiobook voice. Warm clear timbre, "
+            "crisp diction, lively emotional range and natural comic timing, "
+            "without becoming shrill, breathy or exaggerated."
+        ),
+    },
+    "Harper": {
+        "label": "Harper — lively American female storyteller",
+        "gender": "female", "accent": "american",
+        "prompt": (
+            "A native American English woman in her late twenties with a neutral "
+            "General American accent and a bright, playful, highly engaging "
+            "children's audiobook voice. Warm clear timbre, crisp diction, lively "
+            "emotional range and natural comic timing, without becoming shrill, "
+            "breathy or exaggerated."
+        ),
+    },
+    "Arthur": {
+        "label": "Arthur — native British male storyteller",
+        "gender": "male", "accent": "british",
+        "prompt": (
+            "A native British English man in his thirties with a warm, articulate, "
+            "polished audiobook voice and an authentic modern southern British "
+            "accent. His timbre is engaging and reassuring, with precise English "
+            "pronunciation, natural human phrasing and lively but controlled "
+            "children's storytelling."
+        ),
+    },
+    "Noah": {
+        "label": "Noah — native American male storyteller",
+        "gender": "male", "accent": "american",
+        "prompt": (
+            "A native American English man in his thirties with a warm, articulate, "
+            "polished audiobook voice and a neutral General American accent. His "
+            "timbre is engaging and reassuring, with precise pronunciation, natural "
+            "human phrasing and lively but controlled children's storytelling."
+        ),
+    },
+    "Oliver": {
+        "label": "Oliver — lively British male storyteller",
+        "gender": "male", "accent": "british",
+        "prompt": (
+            "A native British English man in his early thirties with an authentic "
+            "modern southern British accent and a bright, adventurous children's "
+            "audiobook voice. Warm clear timbre, crisp diction, lively emotional "
+            "range and natural comic timing, energetic without sounding forced."
+        ),
+    },
+    "Jack": {
+        "label": "Jack — lively American male storyteller",
+        "gender": "male", "accent": "american",
+        "prompt": (
+            "A native American English man in his early thirties with a neutral "
+            "General American accent and a bright, adventurous children's "
+            "audiobook voice. Warm clear timbre, crisp diction, lively emotional "
+            "range and natural comic timing, energetic without sounding forced."
+        ),
     },
 }
-DEFAULT_ENGINE = "higgs"
+QWEN3_DESIGN_VOICES = list(QWEN3_DESIGN_VOICE_INFO)
+QWEN3_DESIGN_DEFAULT_VOICE = os.environ.get("TTS_QWEN3_DESIGN_VOICE", "Eleanor")
+
+NARRATOR_REF_DIR = os.path.join(BASE_DIR, "narrator_refs")
+NARRATOR_MASTER_TEXT = (
+    "Welcome, little dreamer. Tonight, we are stepping into a world of wonder. "
+    "Listen closely—did you hear that? Something extraordinary is waiting just "
+    "beyond the trees! Take a slow breath, gather your courage, and let our "
+    "adventure begin."
+)
+QWEN3_CLONE_VOICE_INFO = {
+    voice: {
+        **{key: value for key, value in info.items() if key != "prompt"},
+        "label": info["label"].replace(" — ", " — stable ", 1),
+        "ref_audio": os.path.join(
+            NARRATOR_REF_DIR, f"{voice.lower()}-master.wav"),
+        "ref_text": NARRATOR_MASTER_TEXT,
+    }
+    for voice, info in QWEN3_DESIGN_VOICE_INFO.items()
+}
+QWEN3_CLONE_VOICES = list(QWEN3_CLONE_VOICE_INFO)
+QWEN3_CLONE_DEFAULT_VOICE = os.environ.get("TTS_QWEN3_CLONE_VOICE", "Eleanor")
+
+ENGINES = {
+    "qwen3": {
+        "label": "Qwen3-TTS 1.7B CustomVoice BF16 — expressive narration",
+        "repo": os.environ.get(
+            "TTS_QWEN3",
+            "mlx-community/Qwen3-TTS-12Hz-1.7B-CustomVoice-bf16",
+        ),
+        "clone": False,
+        "presets": False,
+        "qwen3": True,
+    },
+    "qwen3_design": {
+        "label": "Qwen3-TTS 1.7B VoiceDesign BF16 — native English voices",
+        "repo": os.environ.get(
+            "TTS_QWEN3_DESIGN",
+            "mlx-community/Qwen3-TTS-12Hz-1.7B-VoiceDesign-bf16",
+        ),
+        "clone": False,
+        "presets": False,
+        "qwen3": True,
+        "voice_design": True,
+    },
+    "qwen3_clone": {
+        "label": "Qwen3-TTS 1.7B Base BF16 — stable English narrators",
+        "repo": os.environ.get(
+            "TTS_QWEN3_CLONE",
+            "mlx-community/Qwen3-TTS-12Hz-1.7B-Base-bf16",
+        ),
+        "clone": False,
+        "presets": False,
+        "qwen3": True,
+        "voice_clone": True,
+    },
+}
+DEFAULT_ENGINE = os.environ.get("TTS_DEFAULT_ENGINE", "qwen3_clone")
 
 # Default Kokoro voice for the in-chat reader. Overridable per request.
 KOKORO_DEFAULT_VOICE = os.environ.get("TTS_KOKORO_VOICE", "af_heart")
@@ -107,6 +250,23 @@ KOKORO_VOICES_FALLBACK = [
     "bf_emma", "bf_isabella", "bf_alice", "bf_lily",
     "bm_george", "bm_daniel", "bm_fable", "bm_lewis",
 ]
+
+# Published voice-pack grades from the model's bundled VOICES.md.  These are
+# surfaced in the Studio so users can distinguish voice character from source
+# quality (the strongest male packs are currently C+; af_heart is grade A).
+KOKORO_VOICE_QUALITY = {
+    "af_heart": "A", "af_bella": "A-", "af_nicole": "B-",
+    "af_aoede": "C+", "af_kore": "C+", "af_alloy": "C",
+    "af_nova": "C", "af_sarah": "C+", "af_sky": "C-",
+    "af_jessica": "D", "af_river": "D",
+    "am_fenrir": "C+", "am_michael": "C+", "am_puck": "C+",
+    "am_echo": "D", "am_eric": "D", "am_liam": "D",
+    "am_onyx": "D", "am_santa": "D-", "am_adam": "F+",
+    "bf_emma": "B-", "bf_isabella": "C", "bf_alice": "D",
+    "bf_lily": "D", "bm_fable": "C", "bm_george": "C",
+    "bm_lewis": "D+", "bm_daniel": "D",
+}
+KOKORO_MINIMUM_QUALITY = ("A", "B", "C")
 _kokoro_voices_cache = None
 
 
@@ -143,7 +303,12 @@ def _kokoro_voices() -> list:
         voices = []
     voices = voices or list(KOKORO_VOICES_FALLBACK)
     # Keep only the enabled languages (by voice-name prefix letter).
-    filtered = [v for v in voices if v[:1].lower() in KOKORO_LANGS]
+    filtered = [
+        v for v in voices
+        if v[:1].lower() in KOKORO_LANGS
+        and KOKORO_VOICE_QUALITY.get(v, "").startswith(
+            KOKORO_MINIMUM_QUALITY)
+    ]
     _kokoro_voices_cache = filtered or voices
     return _kokoro_voices_cache
 
@@ -154,6 +319,33 @@ def _kokoro_lang(voice: str) -> str:
     h=Hindi, i=Italian, p=Brazilian Portuguese). Fall back to American."""
     c = (voice or "a")[:1].lower()
     return c if c in "abjzefhip" else "a"
+
+
+def _kokoro_hq_text(text: str, target_words: int = 160) -> str:
+    """Split long prose into Kokoro's best-performing 100–200 word range.
+
+    Kokoro's pipeline treats newlines as independent synthesis segments.  This
+    keeps long narration from rushing while leaving short copy untouched and
+    preserving the author's punctuation and paragraph order.
+    """
+    text = str(text or "").strip()
+    if len(text.split()) <= target_words:
+        return text
+    chunks = []
+    for paragraph in re.split(r"\n\s*\n", text):
+        sentences = re.split(r"(?<=[.!?…])\s+", paragraph.strip())
+        current = []
+        words = 0
+        for sentence in (s for s in sentences if s):
+            count = len(sentence.split())
+            if current and words + count > target_words:
+                chunks.append(" ".join(current))
+                current, words = [], 0
+            current.append(sentence)
+            words += count
+        if current:
+            chunks.append(" ".join(current))
+    return "\n".join(chunks) if chunks else text
 
 
 _kokoro_patched = False
@@ -311,10 +503,20 @@ _load_errors: dict = {}     # engine -> last load error string
 def _load_engine(engine: str):
     if engine in _models:
         return _models[engine]
+    # Unified memory is shared by every local model on the Mac. Keep only the
+    # requested Qwen engine resident.
+    stale = [name for name in _models if name != engine]
+    for name in stale:
+        del _models[name]
+    if stale:
+        gc.collect()
+        try:
+            import mlx.core as mx
+            mx.clear_cache()
+        except Exception:
+            pass
     from mlx_audio.tts.utils import load
     repo = ENGINES[engine]["repo"]
-    if ENGINES[engine].get("kokoro"):
-        _patch_kokoro_sinegen()   # harden the vocoder before first synthesis
     model = load(repo)
     _models[engine] = model
     return model
@@ -394,12 +596,6 @@ def _worker() -> None:
         _load_engine(DEFAULT_ENGINE)
     except Exception as e:  # pragma: no cover
         _load_errors[DEFAULT_ENGINE] = f"{type(e).__name__}: {e}"
-    # Warm Kokoro (in-chat voice) so the first /say isn't a cold load.
-    try:
-        _warm_kokoro()
-    except Exception as e:  # pragma: no cover
-        _load_errors["kokoro"] = f"{type(e).__name__}: {e}"
-
     while True:
         job = _jobs.get()
         if job is None:
@@ -410,6 +606,8 @@ def _worker() -> None:
                 out = _do_generate(params)
                 result["raw"] = out["raw"]
                 result["call"] = out["call"]
+            elif kind == "gen_batch":
+                result.update(_do_generate_batch(params))
             elif kind == "transcribe":
                 result["text"] = _do_transcribe(params["path"])
             elif kind == "denoise":
@@ -450,22 +648,37 @@ def _do_generate(p: dict) -> dict:
         top_p=p["top_p"],
         top_k=p["top_k"],
     )
-    if engine == "voxtral":
-        kw["voice"] = p["voice"]
-        kw["lang_code"] = _lang_for(p["voice"])
+    if engine == "qwen3":
+        kw["voice"] = p.get("voice") or QWEN3_DEFAULT_VOICE
+        kw["lang_code"] = p.get("language") or "English"
+        kw["instruct"] = (
+            str(p.get("instruct") or QWEN3_DEFAULT_INSTRUCT).strip()
+            or QWEN3_DEFAULT_INSTRUCT
+        )
         kw["max_tokens"] = p["max_len"]
-    elif engine == "kokoro":
-        kw["voice"] = p["voice"]
-        kw["lang_code"] = _kokoro_lang(p["voice"])
-        kw["speed"] = float(p.get("speed") or 1.0)
-        kw["max_tokens"] = None
-    else:  # higgs
-        kw["max_tokens"] = None
-        kw["max_new_frames"] = p["max_len"]
-        if p.get("ref_audio"):
-            kw["ref_audio"] = p["ref_audio"]
-            kw["ref_text"] = p.get("ref_text") or None
-            kw["stt_model"] = STT_REPO
+        kw["repetition_penalty"] = float(
+            p.get("repetition_penalty") or 1.05)
+    elif engine == "qwen3_design":
+        # VoiceDesign uses the instruction as the voice itself; it must not be
+        # given a CustomVoice speaker name.
+        kw["lang_code"] = p.get("language") or "English"
+        kw["instruct"] = str(p.get("instruct") or "").strip()
+        kw["max_tokens"] = p["max_len"]
+        kw["repetition_penalty"] = float(
+            p.get("repetition_penalty") or 1.05)
+    elif engine == "qwen3_clone":
+        voice = p.get("voice") or QWEN3_CLONE_DEFAULT_VOICE
+        info = QWEN3_CLONE_VOICE_INFO.get(voice)
+        if not info or not os.path.isfile(info["ref_audio"]):
+            raise ValueError(f"stable narrator master is missing for {voice}")
+        kw["lang_code"] = p.get("language") or "English"
+        kw["ref_audio"] = info["ref_audio"]
+        kw["ref_text"] = info["ref_text"]
+        kw["max_tokens"] = p["max_len"]
+        kw["repetition_penalty"] = max(
+            1.5, float(p.get("repetition_penalty") or 1.5))
+    else:
+        raise ValueError(f"unsupported TTS engine: {engine}")
 
     call = _call_repr(engine, kw, p)
     generate_audio(**kw)
@@ -473,6 +686,52 @@ def _do_generate(p: dict) -> dict:
     if not os.path.exists(raw):
         raise RuntimeError("generation produced no output file")
     return {"raw": raw, "call": call}
+
+
+def _do_generate_batch(p: dict) -> dict:
+    """Generate stable cloned-voice segments in one Qwen GPU pass."""
+    import mlx.core as mx
+    import numpy as np
+    from mlx_audio.audio_io import write as audio_write
+
+    engine = p["engine"]
+    if engine != "qwen3_clone":
+        raise ValueError("batch generation currently requires qwen3_clone")
+    model = _load_engine(engine)
+    voice = p.get("voice") or QWEN3_CLONE_DEFAULT_VOICE
+    info = QWEN3_CLONE_VOICE_INFO.get(voice)
+    if not info or not os.path.isfile(info["ref_audio"]):
+        raise ValueError(f"stable narrator master is missing for {voice}")
+    if p.get("seed") is not None:
+        mx.random.seed(int(p["seed"]))
+
+    texts = list(p["texts"])
+    prefix = "batch_" + uuid.uuid4().hex[:12]
+    paths: list[str | None] = [None] * len(texts)
+    results = model.batch_generate(
+        texts=texts,
+        voices=[None] * len(texts),
+        ref_audio=info["ref_audio"], ref_text=info["ref_text"],
+        lang_code=p.get("language") or "English",
+        temperature=p["temperature"], top_p=p["top_p"], top_k=p["top_k"],
+        repetition_penalty=max(1.5, float(p.get("repetition_penalty") or 1.5)),
+        max_tokens=p["max_len"], stream=False, verbose=False,
+    )
+    for generated in results:
+        index = int(generated.sequence_idx)
+        if index < 0 or index >= len(paths):
+            continue
+        raw = os.path.join(OUT_DIR, f"{prefix}_{index:02d}.wav")
+        audio_write(raw, np.array(generated.audio), generated.sample_rate,
+                    format="wav")
+        paths[index] = raw
+    missing = [str(index + 1) for index, path in enumerate(paths) if not path]
+    if missing:
+        for path in paths:
+            _safe_rm(path or "")
+        raise RuntimeError("batch generation produced no audio for item "
+                           + ", ".join(missing))
+    return {"raws": paths}
 
 
 def _call_repr(engine: str, kw: dict, p: dict) -> dict:
@@ -490,11 +749,13 @@ def _call_repr(engine: str, kw: dict, p: dict) -> dict:
             args[k] = v[:200] + " …"
         else:
             args[k] = v
-    mode = ("voice_clone" if (engine == "higgs" and kw.get("ref_audio"))
-            else "smart_voice" if engine == "higgs" else "preset")
-    order = ["text", "voice", "lang_code", "ref_audio", "ref_text",
+    mode = ("stable_voice_clone" if engine == "qwen3_clone"
+            else "designed_voice" if engine == "qwen3_design"
+            else "instructed_voice" if engine == "qwen3" else "preset")
+    order = ["text", "voice", "lang_code", "instruct", "speed",
+             "ref_audio", "ref_text",
              "temperature", "top_p", "top_k", "max_tokens", "max_new_frames",
-             "stt_model", "audio_format", "join_audio"]
+             "repetition_penalty", "stt_model", "audio_format", "join_audio"]
     parts = []
     for k in order:
         if k in args and args[k] is not None:
@@ -697,6 +958,7 @@ def _master(raw_path: str, out_path: str, opts: dict) -> None:
     """Apply the mastering chain and encode to the final format."""
     fmt = opts["format"]
     filters = []
+    sample_rate = int(opts.get("sample_rate", 48000))
     speed = opts.get("speed", 1.0)
     if abs(speed - 1.0) > 1e-3:
         filters.append(f"atempo={max(0.5, min(2.0, speed)):.4f}")
@@ -716,16 +978,24 @@ def _master(raw_path: str, out_path: str, opts: dict) -> None:
     if fout and fout > 0:
         d = fout / 1000.0
         filters.append(f"areverse,afade=t=in:st=0:d={d:.3f},areverse")
+    # Use FFmpeg's built-in high-quality windowed-sinc resampler.  This build
+    # does not include the optional libsoxr engine, so keep the portable SWR
+    # path while increasing its filter precision over the defaults.
+    filters.append(
+        f"aresample={sample_rate}:resampler=swr:filter_size=64:"
+        "phase_shift=10:linear_interp=0:exact_rational=1:"
+        "filter_type=kaiser:kaiser_beta=12"
+    )
 
     cmd = ["ffmpeg", "-y", "-loglevel", "error", "-i", raw_path]
     if filters:
         cmd += ["-af", ",".join(filters)]
-    cmd += ["-ar", str(opts.get("sample_rate", 48000)),
+    cmd += ["-ar", str(sample_rate),
             "-ac", str(opts.get("channels", 1))]
     if fmt == "mp3":
         cmd += ["-b:a", opts.get("mp3_bitrate", "192k")]
     elif fmt == "wav":
-        cmd += ["-c:a", "pcm_s16le"]
+        cmd += ["-c:a", "pcm_s24le"]
     cmd += [out_path]
     _run(cmd)
     return cmd
@@ -3006,8 +3276,23 @@ class Handler(BaseHTTPRequestHandler):
                 "engines": [{
                     "id": k, "label": v["label"], "clone": v["clone"],
                     "presets": v["presets"],
-                    "voices": (VOXTRAL_VOICES if v["presets"]
-                               else _kokoro_voices() if v.get("kokoro") else []),
+                    "qwen3": bool(v.get("qwen3")),
+                    "voices": (QWEN3_CLONE_VOICES if v.get("voice_clone")
+                               else QWEN3_DESIGN_VOICES if v.get("voice_design")
+                               else QWEN3_VOICES if v.get("qwen3") else []),
+                    "default_voice": (QWEN3_CLONE_DEFAULT_VOICE
+                                      if v.get("voice_clone")
+                                      else QWEN3_DESIGN_DEFAULT_VOICE
+                                      if v.get("voice_design")
+                                      else QWEN3_DEFAULT_VOICE
+                                      if v.get("qwen3") else None),
+                    "voice_quality": {},
+                    "voice_info": (QWEN3_CLONE_VOICE_INFO
+                                   if v.get("voice_clone")
+                                   else QWEN3_DESIGN_VOICE_INFO
+                                   if v.get("voice_design")
+                                   else QWEN3_VOICE_INFO
+                                   if v.get("qwen3") else {}),
                 } for k, v in ENGINES.items()],
                 "formats": FORMATS,
                 "sample_rates": SAMPLE_RATES,
@@ -3027,8 +3312,8 @@ class Handler(BaseHTTPRequestHandler):
             })
             return
         if path == "/say/voices":
-            self._json(200, {"voices": _kokoro_voices(),
-                             "default": KOKORO_DEFAULT_VOICE})
+            self._json(200, {"voices": QWEN3_CLONE_VOICES,
+                             "default": QWEN3_CLONE_DEFAULT_VOICE})
             return
         if path == "/history":
             self._json(200, {"history": _history_list()})
@@ -3105,6 +3390,8 @@ class Handler(BaseHTTPRequestHandler):
 
         if path == "/generate":
             return self._generate(data)
+        if path == "/generate-batch":
+            return self._generate_batch(data)
         if path == "/say":
             return self._say(data)
         if path == "/history/delete":
@@ -3272,32 +3559,32 @@ class Handler(BaseHTTPRequestHandler):
 
     # ---- generate orchestration ----
     def _say(self, data: dict):
-        """Low-latency chat reader: synthesize one short utterance with Kokoro
-        and stream the raw WAV back directly. No mastering/takes/history — kept
-        deliberately lean so the in-chat voice stays responsive."""
+        """Synthesize one short chat utterance with Qwen VoiceDesign and stream
+        the raw WAV directly. No mastering/takes/history keeps it responsive."""
         if not _worker_started.is_set():
             return self._json(503, {"error": "starting up, try again shortly"})
         text = (data.get("text") or "").strip()
         if not text:
             return self._json(400, {"error": "text is required"})
         text = text[:1500]  # chat utterances are short; guard runaway inputs
-        voice = data.get("voice") or KOKORO_DEFAULT_VOICE
-        if voice not in _kokoro_voices():
-            voice = KOKORO_DEFAULT_VOICE
+        voice = data.get("voice") or QWEN3_CLONE_DEFAULT_VOICE
+        if voice not in QWEN3_CLONE_VOICES:
+            voice = QWEN3_CLONE_DEFAULT_VOICE
         try:
             speed = max(0.5, min(2.0, float(data.get("speed", 1.0))))
         except Exception:
             speed = 1.0
         params = {
-            "engine": "kokoro",
+            "engine": "qwen3_clone",
             "text": text,
             "voice": voice,
             "speed": speed,
-            "temperature": 0.7,
+            "temperature": 0.8,
             "top_p": 0.95,
             "top_k": 50,
-            "max_len": None,
-            "seed": None,
+            "max_len": _auto_len("qwen3_clone", text),
+            "instruct": "",
+            "seed": 14783219,
         }
         res = _enqueue("gen", params, timeout=120)
         if "error" in res:
@@ -3346,19 +3633,37 @@ class Handler(BaseHTTPRequestHandler):
         top_k = num("top_k", 50, 0, 200, int)
         speed = num("speed", 1.0, 0.5, 2.0)
         takes = num("takes", 1, 1, 8, int)
+        instruct = str(data.get("instruct") or "").strip()[:2000]
 
         # voice / cloning
-        voice = data.get("voice") or "neutral_female"
+        voice = data.get("voice") or (
+            QWEN3_CLONE_DEFAULT_VOICE if ENGINES[engine].get("voice_clone")
+            else QWEN3_DESIGN_DEFAULT_VOICE
+            if ENGINES[engine].get("voice_design")
+            else QWEN3_DEFAULT_VOICE if ENGINES[engine].get("qwen3")
+            else "neutral_female")
         ref_audio = None
         ref_text = None
-        if ENGINES[engine]["presets"]:
-            if voice not in VOXTRAL_VOICES:
-                return self._json(400, {"error": f"unknown voice '{voice}'"})
-        elif ENGINES[engine].get("kokoro"):
-            if voice == "neutral_female":
-                voice = KOKORO_DEFAULT_VOICE
-            if voice not in _kokoro_voices():
-                return self._json(400, {"error": f"unknown kokoro voice '{voice}'"})
+        if ENGINES[engine].get("voice_clone"):
+            if voice not in QWEN3_CLONE_VOICES:
+                return self._json(400, {
+                    "error": f"unknown stable Qwen3-TTS voice '{voice}'"
+                })
+            instruct = ""
+        elif ENGINES[engine].get("voice_design"):
+            if voice not in QWEN3_DESIGN_VOICES:
+                return self._json(400, {
+                    "error": f"unknown Qwen3-TTS designed voice '{voice}'"
+                })
+            performance = instruct or QWEN3_DEFAULT_INSTRUCT
+            identity = QWEN3_DESIGN_VOICE_INFO[voice]["prompt"]
+            instruct = f"{identity} Performance direction: {performance}"[:4000]
+        elif ENGINES[engine].get("qwen3"):
+            if voice not in QWEN3_VOICES:
+                return self._json(400, {
+                    "error": f"unknown Qwen3-TTS voice '{voice}'"
+                })
+            instruct = instruct or QWEN3_DEFAULT_INSTRUCT
         if ENGINES[engine]["clone"] and data.get("ref_id"):
             ref = _ref_get(data["ref_id"])
             if not ref:
@@ -3369,6 +3674,7 @@ class Handler(BaseHTTPRequestHandler):
         master = {
             "format": fmt,
             "speed": speed,
+            "synthesis_speed": 1.0,
             "lufs": LUFS_TARGETS.get(data.get("loudness", "youtube"), -14.0),
             "sample_rate": int(data.get("sample_rate", 48000)),
             "channels": 2 if data.get("stereo") else 1,
@@ -3391,14 +3697,14 @@ class Handler(BaseHTTPRequestHandler):
         try:
             if script_mode:
                 results = [self._render_script(
-                    text, engine, voice, temperature, top_p, top_k,
+                    text, engine, voice, temperature, top_p, top_k, instruct,
                     ref_audio, ref_text, base_seed, pause_ms, master, denoise)]
             else:
                 results = []
                 for i in range(takes):
                     seed = (base_seed + i) if base_seed is not None else None
                     results.append(self._render_one(
-                        text, engine, voice, temperature, top_p, top_k,
+                        text, engine, voice, temperature, top_p, top_k, instruct,
                         ref_audio, ref_text, seed, master, denoise))
         except Exception as e:
             return self._json(500, {"error": f"{type(e).__name__}: {e}"})
@@ -3411,6 +3717,7 @@ class Handler(BaseHTTPRequestHandler):
                 "ref_id": data.get("ref_id"), "ref_name": (_ref_get(data["ref_id"]) or {}).get("name") if data.get("ref_id") else None,
                 "seconds": r["seconds"], "seed": r["seed"],
                 "temperature": temperature, "top_p": top_p, "top_k": top_k,
+                "instruct": instruct if ENGINES[engine].get("qwen3") else "",
                 "speed": speed, "format": fmt, "loudness": data.get("loudness", "youtube"),
                 "sample_rate": master["sample_rate"], "favorite": False,
                 "created": datetime.now().isoformat(timespec="seconds"),
@@ -3420,8 +3727,10 @@ class Handler(BaseHTTPRequestHandler):
                     "temperature": temperature, "top_p": top_p, "top_k": top_k,
                     "speed": speed, "loudness": data.get("loudness", "youtube"),
                     "sample_rate": master["sample_rate"], "trim": master["trim"]}
-        if ENGINES[engine]["presets"]:
+        if ENGINES[engine].get("qwen3"):
             req_echo["voice"] = voice
+        if ENGINES[engine].get("qwen3"):
+            req_echo["instruct"] = instruct
         elif data.get("ref_id"):
             req_echo["ref_id"] = data["ref_id"]
         if master["channels"] == 2:
@@ -3463,12 +3772,123 @@ class Handler(BaseHTTPRequestHandler):
             "url": f"/files/{first['filename']}",
         })
 
-    def _render_one(self, text, engine, voice, temperature, top_p, top_k,
+    def _generate_batch(self, data: dict):
+        """Production batch endpoint used by Kindle Studio narration."""
+        if not _worker_started.is_set():
+            return self._json(503, {"error": "starting up, try again shortly"})
+        texts = data.get("texts")
+        if not isinstance(texts, list):
+            return self._json(400, {"error": "texts must be a list"})
+        texts = [str(text or "").strip() for text in texts]
+        if not texts or any(not text for text in texts):
+            return self._json(400, {"error": "every text item is required"})
+        if len(texts) > 4:
+            return self._json(400, {"error": "batch size must be 4 or fewer"})
+        if any(len(text) > MAX_CHARS for text in texts):
+            return self._json(400, {"error": f"text too long (>{MAX_CHARS})"})
+        engine = data.get("engine") or DEFAULT_ENGINE
+        if engine != "qwen3_clone":
+            return self._json(400, {
+                "error": "batch mode requires the stable Qwen3 cloned narrator"})
+        voice = data.get("voice") or QWEN3_CLONE_DEFAULT_VOICE
+        if voice not in QWEN3_CLONE_VOICES:
+            return self._json(400, {"error": f"unknown stable voice '{voice}'"})
+
+        def num(key, default, low, high, cast=float):
+            try:
+                return max(low, min(high, cast(data.get(key, default))))
+            except Exception:
+                return default
+
+        fmt = (data.get("format") or "wav").lower()
+        if fmt not in FORMATS:
+            return self._json(400, {"error": f"unknown format '{fmt}'"})
+        seed = data.get("seed")
+        try:
+            seed = int(seed) if seed not in (None, "") else None
+        except Exception:
+            seed = None
+        master = {
+            "format": fmt, "speed": num("speed", 1.0, .5, 2.0),
+            "synthesis_speed": 1.0,
+            "lufs": LUFS_TARGETS.get(data.get("loudness", "youtube"), -14.0),
+            "sample_rate": int(data.get("sample_rate", 48000)),
+            "channels": 2 if data.get("stereo") else 1,
+            "fade_in": num("fade_in", 0, 0, 10000, int),
+            "fade_out": num("fade_out", 0, 0, 10000, int),
+            "trim": bool(data.get("trim", True)),
+            "mp3_bitrate": data.get("mp3_bitrate", "192k"),
+        }
+        params = {
+            "engine": engine, "texts": texts, "voice": voice,
+            "temperature": num("temperature", .7, .1, 1.5),
+            "top_p": num("top_p", .95, .1, 1.0),
+            "top_k": num("top_k", 50, 0, 200, int),
+            "repetition_penalty": 1.5, "language": "English",
+            "max_len": max(_auto_len(engine, text, has_ref=True)
+                           for text in texts), "seed": seed,
+        }
+        started = time.time()
+        generated = _enqueue("gen_batch", params, timeout=900)
+        if generated.get("error"):
+            return self._json(500, {"error": generated["error"]})
+        raws = list(generated.get("raws") or [])
+        items = []
+        try:
+            for index, raw in enumerate(raws):
+                if not raw or not os.path.isfile(raw):
+                    raise RuntimeError(f"missing raw audio for item {index + 1}")
+                floor = max(.4, _expected_seconds(texts[index]) * .45)
+                if (_audio_seconds(raw) < floor
+                        or _mean_volume_db(raw) <= -55.0):
+                    _safe_rm(raw)
+                    replacement = _gen_guarded({
+                        "engine": engine, "text": texts[index], "voice": voice,
+                        "speed": 1.0,
+                        "temperature": params["temperature"],
+                        "top_p": params["top_p"], "top_k": params["top_k"],
+                        "instruct": "", "max_len": _auto_len(
+                            engine, texts[index], has_ref=True),
+                        "seed": seed, "ref_audio": None, "ref_text": None,
+                    }, engine, texts[index])
+                    if replacement.get("error"):
+                        raise RuntimeError(replacement["error"])
+                    raw = replacement.get("raw")
+                    raws[index] = raw
+                    if not raw or not os.path.isfile(raw):
+                        raise RuntimeError(
+                            f"retry produced no audio for item {index + 1}")
+                eid = "tts_" + uuid.uuid4().hex[:12]
+                out = os.path.join(OUT_DIR, f"{eid}.{fmt}")
+                command = _master(raw, out, master)
+                items.append({
+                    "index": index, "id": eid,
+                    "filename": os.path.basename(out),
+                    "url": f"/files/{os.path.basename(out)}",
+                    "seconds": _audio_seconds(out),
+                    "master_cmd": _fmt_cmd(command),
+                })
+        except Exception as exc:
+            for item in items:
+                _safe_rm(os.path.join(OUT_DIR, item["filename"]))
+            return self._json(500, {"error": f"{type(exc).__name__}: {exc}"})
+        finally:
+            for raw in raws:
+                _safe_rm(raw or "")
+        self._json(200, {
+            "ok": True, "engine": engine, "voice": voice,
+            "batch_size": len(items),
+            "gen_seconds": round(time.time() - started, 2), "items": items,
+        })
+
+    def _render_one(self, text, engine, voice, temperature, top_p, top_k, instruct,
                     ref_audio, ref_text, seed, master, denoise=False):
         max_len = _auto_len(engine, text, has_ref=bool(ref_audio))
         res = _gen_guarded({
             "engine": engine, "text": text, "voice": voice,
+            "speed": master.get("synthesis_speed", 1.0),
             "temperature": temperature, "top_p": top_p, "top_k": top_k,
+            "instruct": instruct,
             "max_len": max_len, "seed": seed,
             "ref_audio": ref_audio, "ref_text": ref_text,
         }, engine, text)
@@ -3494,7 +3914,7 @@ class Handler(BaseHTTPRequestHandler):
                 "calls": [res.get("call")] if res.get("call") else [],
                 "master_cmd": _fmt_cmd(mcmd)}
 
-    def _render_script(self, text, engine, voice, temperature, top_p, top_k,
+    def _render_script(self, text, engine, voice, temperature, top_p, top_k, instruct,
                        ref_audio, ref_text, base_seed, pause_ms, master, denoise=False):
         segs, gap_kinds = _split_script(text)
         if not segs:
@@ -3506,7 +3926,9 @@ class Handler(BaseHTTPRequestHandler):
                 seed = (base_seed + i) if base_seed is not None else None
                 res = _gen_guarded({
                     "engine": engine, "text": seg, "voice": voice,
+                    "speed": master.get("synthesis_speed", 1.0),
                     "temperature": temperature, "top_p": top_p, "top_k": top_k,
+                    "instruct": instruct,
                     "max_len": _auto_len(engine, seg, has_ref=bool(ref_audio)), "seed": seed,
                     "ref_audio": ref_audio, "ref_text": ref_text,
                 }, engine, seg)
@@ -3551,7 +3973,7 @@ def _gen_guarded(params: dict, engine: str, text: str, retries: int = 4) -> dict
     a near-silent or truncated take regardless of voice; a short retry loop
     makes every built-in voice reliable for production use."""
     res = _enqueue("gen", params)
-    if engine != "higgs" or "error" in res:
+    if engine not in {"qwen3", "qwen3_design", "qwen3_clone"} or "error" in res:
         return res
     floor = max(0.4, _expected_seconds(text) * 0.45)
     for _ in range(retries):
@@ -3572,13 +3994,12 @@ def _gen_guarded(params: dict, engine: str, text: str, retries: int = 4) -> dict
 
 def _auto_len(engine: str, text: str, has_ref: bool = False) -> int:
     words = max(1, len(text.split()))
-    if engine == "voxtral":
-        return int(max(400, min(8192, words * 55)))
-    # higgs frames (~40 ms each). Cloning stops at EOS so allow generous
-    # headroom; smart-voice can ramble, so bound it tighter.
-    if has_ref:
-        return int(max(300, min(6000, words * 28 + 200)))
-    return int(max(150, min(1400, words * 18 + 60)))
+    if engine in {"qwen3", "qwen3_design", "qwen3_clone"}:
+        # Qwen3-TTS emits low-rate acoustic tokens. This leaves comfortable
+        # room for deliberate children's narration without allowing a failed
+        # generation to ramble indefinitely.
+        return int(max(240, min(4096, words * 8 + 180)))
+    raise ValueError(f"unsupported TTS engine: {engine}")
 
 
 def _safe_rm(path: str) -> None:
@@ -3690,6 +4111,7 @@ STUDIO_HTML = r"""<!DOCTYPE html>
       <div class="field" id="voiceField">
         <label>Voice</label>
         <select id="voice"></select>
+        <div class="hint" id="kokoroVoiceHint" style="display:none">Full-precision BF16. Grades describe the source voice-pack quality.</div>
       </div>
       <div class="field" id="cloneField" style="display:none">
         <label>Voice</label>
@@ -3708,6 +4130,10 @@ STUDIO_HTML = r"""<!DOCTYPE html>
           <option value="expressive">Expressive</option>
           <option value="custom">Custom...</option>
         </select>
+      </div>
+      <div class="field" id="qwenInstructField" style="display:none;min-width:320px;flex:2">
+        <label>Qwen performance direction</label>
+        <input id="instruct" type="text" value="Natural, warm, expressive children's audiobook narration with meaningful pauses. Speak only the supplied words.">
       </div>
     </div>
 
@@ -3730,16 +4156,16 @@ STUDIO_HTML = r"""<!DOCTYPE html>
     <details id="advTune">
       <summary>Voice tuning</summary>
       <div class="grid">
-        <div class="slider"><div class="lab"><label>Temperature</label><b id="tempV">0.70</b></div>
+        <div class="slider" id="tempControl"><div class="lab"><label>Temperature</label><b id="tempV">0.70</b></div>
           <input id="temp" type="range" min="0.1" max="1.5" step="0.05" value="0.7">
           <div class="hint">Lower = stable, consistent reads. Higher = expressive but variable.</div></div>
         <div class="slider"><div class="lab"><label>Speed</label><b id="speedV">1.00x</b></div>
-          <input id="speed" type="range" min="0.5" max="2" step="0.05" value="1.0">
+          <input id="speed" type="range" min="0.5" max="2" step="0.01" value="1.0">
           <div class="hint">Tempo only, pitch preserved. ~0.95 reads relaxed.</div></div>
-        <div class="slider"><div class="lab"><label>Top-p</label><b id="toppV">0.95</b></div>
+        <div class="slider" id="topPControl"><div class="lab"><label>Top-p</label><b id="toppV">0.95</b></div>
           <input id="topp" type="range" min="0.1" max="1" step="0.01" value="0.95">
           <div class="hint">Nucleus sampling. ~0.9 tightens delivery.</div></div>
-        <div class="slider"><div class="lab"><label>Top-k</label><b id="topkV">50</b></div>
+        <div class="slider" id="topKControl"><div class="lab"><label>Top-k</label><b id="topkV">50</b></div>
           <input id="topk" type="range" min="0" max="200" step="1" value="50">
           <div class="hint">Candidate cap. Lower = safer.</div></div>
         <div class="slider"><label>Seed</label>
@@ -3748,6 +4174,7 @@ STUDIO_HTML = r"""<!DOCTYPE html>
             <button class="mini" id="lockSeed" title="Reuse last seed">&#128274;</button></div>
           <div class="hint">Set a seed for repeatable takes. Generate, then lock the one you like.</div></div>
       </div>
+      <div class="hint" id="kokoroTuneHint" style="display:none;margin-top:10px">Kokoro uses the selected voice, punctuation and speed for expression. Sampling controls are disabled because this model ignores them. Expressive mode uses a more spacious 0.92× delivery and automatically protects long passages from rushing.</div>
     </details>
 
     <details id="advMaster" open>
@@ -4004,6 +4431,7 @@ const $ = id => document.getElementById(id);
 let ready=false, lastSeed=null, ENG=null, ENGINES=[], REFS=[], curEngine='higgs', DENOISE_AVAILABLE=false, ENHANCE_AVAILABLE=false, CAPTIONS_AVAILABLE=false, MEMORY_AVAILABLE=false, MEMORY_URL='', TRANSCRIPT_COLLECTION='video_transcripts';
 
 const STYLES = { clean:{temp:0.50,topp:0.90,topk:40}, natural:{temp:0.70,topp:0.95,topk:50}, expressive:{temp:0.95,topp:0.97,topk:80} };
+const KOKORO_SPEEDS = { clean:1.00, natural:0.96, expressive:0.92 };
 
 function setDot(s){ $('dot').className='dot'+(s==='on'?'':s==='load'?' load':' off'); }
 function syncLabels(){
@@ -4012,7 +4440,7 @@ function syncLabels(){
   $('toppV').textContent=parseFloat($('topp').value).toFixed(2);
   $('topkV').textContent=$('topk').value;
 }
-function applyStyle(n){ const s=STYLES[n]; if(!s)return; $('temp').value=s.temp;$('topp').value=s.topp;$('topk').value=s.topk; syncLabels(); }
+function applyStyle(n){ const s=STYLES[n]; if(!s)return; $('temp').value=s.temp;$('topp').value=s.topp;$('topk').value=s.topk; if(ENG?.kokoro&&KOKORO_SPEEDS[n])$('speed').value=KOKORO_SPEEDS[n]; syncLabels(); }
 ['temp','topp','topk','speed'].forEach(id=>$(id).addEventListener('input',()=>{ syncLabels(); if(id!=='speed')$('style').value='custom'; }));
 $('style').addEventListener('change',()=>{ applyStyle($('style').value); $('advTune').open=true; });
 $('dice').onclick=()=>{ $('seed').value=Math.floor(Math.random()*1e9); };
@@ -4057,16 +4485,25 @@ async function loadEngines(){
 function selectEngine(id){
   curEngine=id; ENG=ENGINES.find(e=>e.id===id);
   [...$('engineSeg').children].forEach(b=>b.classList.toggle('on',b.dataset.id===id));
-  if(ENG.presets){
+  const hasVoices=Array.isArray(ENG.voices)&&ENG.voices.length>0;
+  if(hasVoices){
     $('voiceField').style.display=''; $('cloneField').style.display='none'; $('cloneAddField').style.display='none';
     $('refDenoiseField').style.display='none';
-    $('voice').innerHTML=ENG.voices.map(v=>`<option value="${v}">${v.replace('_',' ')}</option>`).join('');
-    $('voice').value='neutral_female';
+    const accent=v=>v[0]==='b'?'British':'American';
+    const gender=v=>v[1]==='m'?'male':'female';
+    $('voice').innerHTML=ENG.voices.map(v=>{const grade=ENG.voice_quality?.[v];const label=ENG.kokoro?`${v.replace('_',' ')} · ${accent(v)} ${gender(v)}${grade?' · quality '+grade:''}`:(ENG.voice_info?.[v]?.label||v.replace('_',' '));return `<option value="${v}">${label}</option>`}).join('');
+    $('voice').value=ENG.default_voice||ENG.voices[0]||'';
   } else {
     $('voiceField').style.display='none'; $('cloneField').style.display=''; $('cloneAddField').style.display='';
     $('refDenoiseField').style.display=DENOISE_AVAILABLE?'':'none';
     renderRefs();
   }
+  $('kokoroVoiceHint').style.display=ENG.kokoro?'':'none';
+  $('kokoroTuneHint').style.display=ENG.kokoro?'':'none';
+  $('qwenInstructField').style.display=ENG.qwen3?'':'none';
+  ['temp','topp','topk'].forEach(k=>$(k).disabled=!!ENG.kokoro);
+  ['tempControl','topPControl','topKControl'].forEach(k=>$(k).style.opacity=ENG.kokoro?'.45':'1');
+  if(ENG.kokoro&&$('style').value!=='custom')applyStyle($('style').value);
 }
 function renderRefs(){
   const esc=s=>String(s).replace(/[<>&]/g,c=>({'<':'&lt;','>':'&gt;','&':'&amp;'}[c]));
@@ -4114,7 +4551,8 @@ $('gen').onclick=async()=>{
   const seedV=$('seed').value.trim();
   const body={
     text, engine:curEngine, format:$('format').value,
-    voice: ENG.presets?$('voice').value:undefined,
+    voice: (!ENG.clone&&ENG.voices?.length)?$('voice').value:undefined,
+    instruct: ENG.qwen3?$('instruct').value.trim():undefined,
     ref_id: ENG.clone?($('ref').value||undefined):undefined,
     temperature:parseFloat($('temp').value), top_p:parseFloat($('topp').value),
     top_k:parseInt($('topk').value,10), speed:parseFloat($('speed').value),

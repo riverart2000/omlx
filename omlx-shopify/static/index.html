@@ -1,0 +1,319 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Shopify Growth Studio · oMLX</title>
+  <style>
+    :root{color-scheme:light;--bg:#f5f7f5;--panel:#fff;--ink:#17211a;--muted:#617066;
+      --line:#dfe6e0;--green:#167647;--green2:#e7f5ec;--red:#b42318;--amber:#9a6700;
+      --shadow:0 12px 35px rgba(25,45,31,.08)}
+    *{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);
+      font:14px/1.45 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
+    button,input,select{font:inherit}header{position:sticky;top:0;z-index:20;background:rgba(255,255,255,.94);
+      backdrop-filter:blur(12px);border-bottom:1px solid var(--line);padding:14px 22px}
+    .header-row,.toolbar,.stats{display:flex;align-items:center;gap:12px}.header-row{justify-content:space-between}
+    .brand{display:flex;align-items:center;gap:12px}.logo{width:38px;height:38px;border-radius:12px;
+      background:var(--green);color:#fff;display:grid;place-items:center;font-size:21px;box-shadow:var(--shadow)}
+    h1{font-size:19px;margin:0}.subtitle{color:var(--muted);font-size:12px;margin-top:2px}
+    .sync{border:0;border-radius:10px;background:var(--green);color:#fff;font-weight:700;padding:10px 15px;
+      cursor:pointer;display:flex;align-items:center;gap:8px}.sync:hover{filter:brightness(.95)}.sync:disabled{opacity:.6;cursor:wait}
+    .spin{display:inline-block;animation:spin .8s linear infinite}@keyframes spin{to{transform:rotate(360deg)}}
+    main{padding:18px 22px 34px;max-width:1900px;margin:auto}.notice{display:none;border:1px solid #f1c7c3;
+      background:#fff0ee;color:#7a271a;border-radius:10px;padding:11px 13px;margin-bottom:14px}.notice.show{display:block}
+    .stats{display:grid;grid-template-columns:repeat(7,minmax(115px,1fr));gap:12px;margin-bottom:14px}
+    .stat{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:13px 15px;box-shadow:var(--shadow)}
+    .stat b{font-size:21px;display:block}.stat span{font-size:11px;text-transform:uppercase;letter-spacing:.06em;color:var(--muted)}
+    .controls{background:var(--panel);border:1px solid var(--line);border-radius:12px 12px 0 0;padding:12px;
+      display:flex;gap:10px;align-items:center;flex-wrap:wrap}.search{min-width:290px;flex:1;position:relative}.search input{
+      width:100%;border:1px solid var(--line);border-radius:9px;padding:9px 12px 9px 34px;background:#fbfcfb;color:var(--ink)}
+    .search span{position:absolute;left:11px;top:8px;color:var(--muted)}select{border:1px solid var(--line);border-radius:9px;
+      background:#fbfcfb;padding:9px 30px 9px 10px;color:var(--ink)}.count{margin-left:auto;color:var(--muted);font-size:12px}
+    .table-wrap{background:var(--panel);border:1px solid var(--line);border-top:0;border-radius:0 0 12px 12px;
+      overflow:auto;max-height:calc(100vh - 270px);box-shadow:var(--shadow)}table{width:100%;border-collapse:separate;border-spacing:0;min-width:1650px}
+    th{position:sticky;top:0;z-index:3;background:#f8faf8;border-bottom:1px solid var(--line);padding:10px 9px;text-align:left;
+      color:#4d5d52;font-size:11px;text-transform:uppercase;letter-spacing:.05em;white-space:nowrap}
+    td{padding:11px 9px;border-bottom:1px solid #edf1ed;vertical-align:top}tbody tr.product:hover{background:#f9fbf9}
+    .product-cell{display:flex;gap:10px;min-width:260px}.thumb{width:52px;height:52px;border-radius:8px;border:1px solid var(--line);
+      object-fit:cover;background:#eff3ef;flex:none}.placeholder{display:grid;place-items:center;color:#849187}.title{font-weight:700;line-height:1.3;
+      max-width:270px}.handle{font-size:11px;color:var(--muted);margin-top:3px}.description{max-width:330px;display:-webkit-box;
+      -webkit-line-clamp:4;-webkit-box-orient:vertical;overflow:hidden;color:#445047;font-size:12px}.money{font-variant-numeric:tabular-nums;
+      white-space:nowrap}.missing{color:var(--amber);font-size:12px}.profit{color:var(--green);font-weight:700}.negative{color:var(--red)!important}
+    .pill{display:inline-block;border-radius:999px;padding:3px 8px;font-size:11px;font-weight:700;background:#edf1ed;color:#536158;
+      white-space:nowrap}.pill.active,.pill.ship{background:var(--green2);color:var(--green)}.pill.draft{background:#fff4d6;color:#815600}
+    .pill.archived{background:#f2f0f5;color:#695a78}.small{font-size:11px;color:var(--muted)}.sku{max-width:170px;word-break:break-word}
+    .expand{border:1px solid var(--line);background:#fff;border-radius:7px;padding:5px 8px;cursor:pointer;color:#425047}
+    .ai-btn{border:1px solid #b8d9c5;background:#eef8f1;color:#12683d;border-radius:8px;padding:6px 9px;
+      font-weight:700;cursor:pointer;white-space:nowrap}.ai-btn:hover{background:#e2f2e7}.ai-btn:disabled{opacity:.55;cursor:wait}
+    .rating{color:#8a6200;font-weight:800;white-space:nowrap}.review-link{display:inline-block;margin-top:4px;font-size:11px}
+    .select-all{display:flex;align-items:center;gap:7px}.select-all input,.row-check{width:16px;height:16px;accent-color:var(--green)}
+    .draft-note{max-width:170px;font-size:11px;color:var(--muted);margin-top:4px}.chips{display:flex;gap:4px;flex-wrap:wrap;margin-top:5px}
+    .chip{background:#eef2ee;border:1px solid #dbe3dc;border-radius:999px;padding:2px 6px;font-size:10px;color:#526157}
+    .modal{position:fixed;inset:0;z-index:50;background:rgba(12,27,17,.68);display:none;align-items:center;justify-content:center;
+      padding:14px;backdrop-filter:blur(4px)}.modal.show{display:flex}.modal-panel{width:min(1480px,98vw);height:min(980px,96vh);
+      background:#f7f9f7;border-radius:15px;box-shadow:0 30px 100px rgba(0,0,0,.4);display:flex;flex-direction:column;overflow:hidden}
+    .modal-head{background:#173d29;color:#fff;padding:12px 16px;display:flex;align-items:center;justify-content:space-between}
+    .modal-head h2{margin:0;font-size:16px}.close{border:0;background:transparent;color:#fff;font-size:22px;cursor:pointer}
+    .modal-body{display:grid;grid-template-columns:minmax(300px,.8fr) minmax(480px,1.2fr);gap:14px;padding:14px;overflow:auto}
+    .edit-card{background:#fff;border:1px solid var(--line);border-radius:11px;padding:14px}.edit-card h3{margin:0 0 11px;font-size:14px}
+    .field{margin-bottom:12px}.field label{display:block;font-size:11px;font-weight:700;text-transform:uppercase;color:#58665d;
+      letter-spacing:.04em;margin-bottom:4px}.field input,.field textarea{width:100%;border:1px solid #ccd8ce;border-radius:8px;padding:9px;
+      background:#fcfdfc;color:var(--ink)}.field textarea{min-height:92px;resize:vertical}.field textarea.body{min-height:240px}
+    .original-copy{white-space:pre-wrap;max-height:460px;overflow:auto;color:#465148;font-size:12px}.collection-grid{display:grid;
+      grid-template-columns:repeat(2,minmax(180px,1fr));gap:6px;max-height:180px;overflow:auto;border:1px solid var(--line);border-radius:8px;padding:8px}
+    .collection-grid label{display:flex;gap:7px;align-items:flex-start;font-size:12px}.modal-foot{border-top:1px solid var(--line);background:#fff;
+      padding:10px 14px;display:flex;justify-content:space-between;gap:10px;align-items:center}.actions{display:flex;gap:8px}.secondary,.publish{
+      border:1px solid var(--line);border-radius:9px;padding:9px 13px;font-weight:700;cursor:pointer}.secondary{background:#fff;color:var(--ink)}
+    .publish{background:var(--green);color:#fff;border-color:var(--green)}.publish:disabled,.secondary:disabled{opacity:.55;cursor:wait}
+    .warning{background:#fff7df;border:1px solid #efd48a;color:#765100;border-radius:8px;padding:8px 10px;font-size:12px;margin-top:8px}
+    .toast{position:fixed;right:18px;bottom:18px;z-index:80;background:#173d29;color:#fff;border-radius:10px;padding:11px 14px;
+      box-shadow:var(--shadow);display:none;max-width:420px}.toast.show{display:block}
+    .detail-row td{padding:0;background:#f8faf8}.details{padding:14px 20px 18px 82px}.variant-grid{overflow:auto;border:1px solid var(--line);
+      border-radius:9px;background:#fff}.variant-grid table{min-width:1100px}.variant-grid th{position:static}.variant-grid td{padding:8px;font-size:12px}
+    .empty{padding:70px 20px;text-align:center;color:var(--muted)}.sync-line{height:3px;position:absolute;left:0;right:0;bottom:-1px;
+      overflow:hidden}.sync-line i{display:none;height:100%;background:var(--green);width:35%;animation:slide 1.2s ease-in-out infinite}
+    .sync-line.running i{display:block}@keyframes slide{from{transform:translateX(-100%)}to{transform:translateX(390%)}}
+    a{color:var(--green);text-decoration:none}a:hover{text-decoration:underline}
+    @media(max-width:900px){header,main{padding-left:12px;padding-right:12px}.stats{grid-template-columns:repeat(2,1fr)}
+      .stats .stat:last-child{grid-column:1/-1}.subtitle{max-width:220px}.table-wrap{max-height:none}.count{width:100%;margin:0}.details{padding-left:12px}}
+    @media(max-width:850px){.modal-body{grid-template-columns:1fr}.collection-grid{grid-template-columns:1fr}}
+  </style>
+  <link rel="stylesheet" href="/growth.css">
+</head>
+<body>
+<header>
+  <div class="header-row">
+    <div class="brand"><div class="logo">S</div><div><h1>Shopify Growth Studio</h1>
+      <div class="subtitle" id="storeLine">Growth analysis and reviewed Shopify fixes</div></div></div>
+    <div class="header-actions"><div class="model-badge" id="grokModel" title="The Grok model used for product rewrites">Grok: checking…</div>
+      <button class="sync" id="syncBtn" onclick="startSync()"><span id="syncIcon">↻</span><span id="syncText">Sync with Shopify</span></button></div>
+  </div>
+  <nav class="studio-tabs" aria-label="Shopify Studio sections">
+    <button class="studio-tab active" data-view="growth" onclick="showStudioView('growth')">Growth</button>
+    <button class="studio-tab" data-view="catalogue" onclick="showStudioView('catalogue')">Catalogue</button>
+  </nav>
+  <div class="sync-line" id="syncLine"><i></i></div>
+</header>
+<main>
+  <div class="notice" id="notice"></div>
+  <section id="growthView" class="studio-view">
+    <div class="growth-toolbar">
+      <div><h2>Growth overview</h2><p>Evidence from Shopify analytics, catalogue health and reviewed change history.</p></div>
+      <div class="growth-actions">
+        <select id="growthPeriod" onchange="loadGrowth()" aria-label="Growth reporting period">
+          <option value="7">Last 7 days</option><option value="30" selected>Last 30 days</option><option value="90">Last 90 days</option>
+        </select>
+        <button class="secondary" id="growthSyncBtn" onclick="startGrowthSync()">↻ Sync analytics</button>
+        <button class="secondary" id="paidMediaImportBtn" onclick="importPaidMedia()">↥ Refresh Pinterest exports</button>
+        <button class="ai-btn" id="growthAnalyseBtn" onclick="startGrowthAnalysis()">✦ Analyse with local oMLX</button>
+      </div>
+    </div>
+    <div class="growth-status" id="growthStatus">No growth snapshot yet. Sync analytics to begin.</div>
+    <div class="growth-adjustment" id="growthAdjustment" hidden></div>
+    <div class="growth-kpis" id="growthKpis"></div>
+    <div class="growth-grid">
+      <section class="growth-card growth-card-wide"><div class="growth-card-head"><h3>Conversion funnel</h3><span id="funnelNote"></span></div><div class="funnel" id="growthFunnel"></div></section>
+      <section class="growth-card"><div class="growth-card-head"><h3>Attribution health</h3></div><div id="attributionHealth"></div></section>
+    </div>
+    <div class="growth-grid">
+      <section class="growth-card growth-card-full"><div class="growth-card-head"><h3>Pinterest campaign performance</h3><span id="paidMediaNote">No exports imported</span></div>
+        <div class="paid-media-kpis" id="paidMediaKpis"></div>
+        <div class="paid-media-warning" id="paidMediaWarning" hidden></div>
+        <div class="growth-table-wrap"><table class="growth-table paid-media-table"><thead><tr><th>Campaign</th><th>Dates</th><th>Spend</th><th>Impressions</th><th>Pin clicks</th><th>CTR</th><th>CPC</th><th>Page visits</th><th>Checkouts</th></tr></thead><tbody id="paidMediaRows"></tbody></table></div>
+      </section>
+    </div>
+    <div class="growth-grid">
+      <section class="growth-card"><div class="growth-card-head"><h3>Priority findings</h3><span>Evidence before action</span></div><div id="growthFindings" class="finding-list"></div></section>
+      <section class="growth-card"><div class="growth-card-head"><h3>Local oMLX analysis</h3><span id="aiModel"></span></div><div id="growthAiReport" class="ai-report empty-copy">Run local analysis after syncing.</div></section>
+    </div>
+    <div class="growth-grid">
+      <section class="growth-card"><div class="growth-card-head"><h3>Traffic sources</h3></div><div class="growth-table-wrap"><table class="growth-table"><thead><tr><th>Source</th><th>Sessions</th><th>Share</th><th>Purchases</th><th>Conversion</th></tr></thead><tbody id="trafficRows"></tbody></table></div></section>
+      <section class="growth-card"><div class="growth-card-head"><h3>Landing-page opportunities</h3><span>Ranked by intent without purchase</span></div><div class="growth-table-wrap"><table class="growth-table"><thead><tr><th>Landing page</th><th>Sessions</th><th>Carts</th><th>Checkout</th><th>Sales</th></tr></thead><tbody id="landingRows"></tbody></table></div></section>
+    </div>
+    <div class="growth-grid">
+      <section class="growth-card"><div class="growth-card-head"><h3>Catalogue fix queue</h3><span>Open a product to review its draft</span></div><div id="productOpportunities" class="opportunity-list"></div></section>
+      <section class="growth-card"><div class="growth-card-head"><h3>Recent reversible changes</h3><span>Rollback is always confirmed</span></div><div id="changeHistory" class="change-list"></div></section>
+    </div>
+  </section>
+  <section id="catalogueView" class="studio-view" hidden>
+  <div class="stats">
+    <div class="stat"><b id="productStat">—</b><span>Products</span></div>
+    <div class="stat"><b id="variantStat">—</b><span>Variants</span></div>
+    <div class="stat"><b id="activeStat">—</b><span>Active products</span></div>
+    <div class="stat"><b id="stockStat">—</b><span>Total stock</span></div>
+    <div class="stat"><b id="costStat">—</b><span>Missing cost prices</span></div>
+    <div class="stat"><b id="draftStat">—</b><span>Grok rewrite drafts</span></div>
+    <div class="stat"><b id="reviewStat">—</b><span>Products with reviews</span></div>
+  </div>
+  <div class="controls">
+    <label class="search"><span>⌕</span><input id="search" placeholder="Search title, description, SKU, vendor, tag…" oninput="render()"></label>
+    <select id="status" onchange="render()"><option value="">All statuses</option><option>ACTIVE</option><option>DRAFT</option><option>ARCHIVED</option></select>
+    <select id="stock" onchange="render()"><option value="">All stock</option><option value="in">In stock</option><option value="out">Out of stock</option></select>
+    <select id="shipping" onchange="render()"><option value="">All products</option><option value="physical">Requires shipping</option><option value="digital">No shipping</option></select>
+    <select id="draftFilter" onchange="render()"><option value="">All rewrite states</option><option value="none">Needs rewrite</option><option value="draft">Draft ready</option><option value="published">Published draft</option></select>
+    <button class="ai-btn" id="rewriteSelected" onclick="rewriteSelected()" disabled>✦ Rewrite selected with Grok</button>
+    <button class="publish" id="publishAll" onclick="publishAllPending()" disabled hidden>Bulk publishing disabled</button>
+    <span class="count" id="visibleCount"></span>
+  </div>
+  <div class="table-wrap">
+    <table><thead><tr>
+      <th><input id="selectAll" type="checkbox" title="Select all visible products" onchange="selectVisible(this.checked)"></th><th></th><th>Product</th><th>Description</th><th>Reviews</th><th>Grok rewrite</th><th>Vendor / type</th><th>SKU / variants</th>
+      <th>Cost price</th><th>Selling price</th><th>Compare at</th><th>Profit / margin</th>
+      <th>Shipping</th><th>Stock</th><th>Status</th><th>Updated</th>
+    </tr></thead><tbody id="rows"></tbody></table>
+    <div class="empty" id="empty">No catalogue has been synced yet.<br><br>Use <b>Sync with Shopify</b> to download it.</div>
+  </div>
+  </section>
+</main>
+<div class="modal" id="rewriteModal" onclick="if(event.target===this)closeModal()">
+  <div class="modal-panel">
+    <div class="modal-head"><h2 id="modalTitle">Review Grok rewrite</h2><button class="close" onclick="closeModal()">×</button></div>
+    <div class="modal-body">
+      <section class="edit-card"><h3>Current Shopify product</h3><div id="originalTitle" class="title"></div>
+        <div id="originalMeta" class="small" style="margin:5px 0 12px"></div><div id="originalCopy" class="original-copy"></div></section>
+      <section class="edit-card"><h3>Editable Grok draft</h3>
+        <div class="warning"><b>Replacement preview</b><br>When applied, this title and complete description replace the existing Shopify title and description.</div>
+        <div id="applicationStatus" class="application-status" hidden></div>
+        <div class="field publish-field-picker"><label>Fields to apply to Shopify</label><div>
+          <label><input class="publish-field" type="checkbox" value="title" checked> Title</label>
+          <label><input class="publish-field" type="checkbox" value="description_html" checked> Description</label>
+          <label><input class="publish-field" type="checkbox" value="product_type" checked> Product type</label>
+          <label><input class="publish-field" type="checkbox" value="tags" checked> Tags</label>
+          <label><input class="publish-field" type="checkbox" value="collections"> Collection additions</label>
+        </div><span class="small">Only checked fields will change. The exact previous values are stored for rollback.</span></div>
+        <div class="field"><label>Replacement product title — Shopify renders this as H1</label><input id="draftTitle"></div>
+        <div class="field"><label>Hero summary — rendered as H2</label><textarea id="draftHero"></textarea></div>
+        <div class="field"><label>Description paragraphs — separate paragraphs with a blank line</label><textarea class="body" id="draftBody"></textarea></div>
+        <div class="field"><label>Wellness lifestyle closing line</label><input id="draftClose"></div>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px"><div class="field"><label>Product type</label><input id="draftType"></div><div class="field"><label>Category</label><input id="draftCategory"></div></div>
+        <div class="field"><label>Tags — comma separated</label><textarea id="draftTags"></textarea></div>
+        <div class="field"><label>Existing collections to add</label><div class="collection-grid" id="draftCollections"></div>
+          <div class="small" style="margin-top:5px">Existing memberships are preserved. Automated collections are controlled by Shopify rules.</div></div>
+        <div class="field"><label>Suggested new collections — suggestions only</label><input id="draftSuggestions"></div>
+        <div id="draftWarnings"></div>
+      </section>
+    </div>
+    <div class="modal-foot"><span class="small" id="draftStatus"></span><div class="actions"><button class="secondary" id="saveDraft" onclick="saveEditorDraft()">Save draft</button><button class="publish" id="publishDraft" onclick="publishEditorDraft()">Apply selected fields to Shopify</button></div></div>
+  </div>
+</div>
+<div class="toast" id="toast"></div>
+<script>
+let catalogue={meta:{},products:[],collections:[],sync:{},rewrite:{},publish:{}}, openRows=new Set(), selected=new Set(), pollTimer=null, rewritePollTimer=null, publishPollTimer=null, editingId=null;
+const $=id=>document.getElementById(id);
+const esc=value=>String(value??'').replace(/[&<>'"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c]));
+const n=value=>value===null||value===undefined||value===''?null:Number(value);
+const compact=value=>new Intl.NumberFormat().format(Number(value||0));
+function money(value,currency){const x=n(value);if(x===null)return '—';try{return new Intl.NumberFormat('en-GB',{style:'currency',currency:currency||'GBP'}).format(x)}catch{return x.toFixed(2)+' '+(currency||'')}}
+function range(a,b,currency){a=n(a);b=n(b);if(a===null)return '—';return Math.abs(a-b)<.005?money(a,currency):money(a,currency)+' – '+money(b,currency)}
+function date(value){if(!value)return '—';const d=new Date(value);return isNaN(d)?value:d.toLocaleString('en-GB',{dateStyle:'medium',timeStyle:'short'})}
+function weightRange(p){const a=n(p.weight_min),b=n(p.weight_max);if(a===null)return 'Weight not set';const unit=(p.variants.find(v=>v.weight_unit)||{}).weight_unit||'';const label={KILOGRAMS:'kg',GRAMS:'g',POUNDS:'lb',OUNCES:'oz'}[unit]||unit.toLowerCase();return a===b?`${a} ${label}`:`${a}–${b} ${label}`}
+function productMargin(p){const priced=p.variants.filter(v=>n(v.price)!==null&&n(v.cost)!==null);if(!priced.length)return null;return priced.reduce((s,v)=>s+((v.price-v.cost)/v.price*100),0)/priced.length}
+function firstCompare(p){const values=p.variants.map(v=>n(v.compare_at_price)).filter(v=>v!==null&&v>0);return values.length?[Math.min(...values),Math.max(...values)]:[null,null]}
+const CHANGE_FIELD_LABELS={title:'Title',description_html:'Description',product_type:'Product type',tags:'Tags',collections:'Collections'};
+function applicationState(p){const c=p.last_change;if(!c)return null;const fields=(c.selected_fields||[]).map(x=>CHANGE_FIELD_LABELS[x]||x).join(', ')||'No fields recorded',when=c.applied_at||c.rolled_back_at||c.created_at;
+  if(c.status==='applied')return{css:p.rewrite_pending?'partial':'applied',label:p.rewrite_pending?'Partly applied — draft still has unapplied changes':'Applied and verified',icon:p.rewrite_pending?'◐':'✓',meta:`${date(when)} · ${fields}`};
+  if(c.status==='applied_unverified')return{css:'warning',label:'Applied — verification needs attention',icon:'!',meta:`${date(when)} · ${fields}${c.error?' · '+c.error:''}`};
+  if(c.status==='rolled_back')return{css:'rolled-back',label:'Previous application rolled back',icon:'↶',meta:`${date(c.rolled_back_at||when)} · ${fields}`};
+  if(c.status==='failed'||c.status==='rollback_failed')return{css:'failed',label:c.status==='rollback_failed'?'Rollback failed':'Application failed',icon:'×',meta:`${date(when)}${c.error?' · '+c.error:''}`};
+  return{css:'prepared',label:'Application was prepared but not completed',icon:'…',meta:`${date(when)} · ${fields}`}}
+function applicationMarkup(p){const a=applicationState(p);return a?`<div class="application-note ${a.css}" title="${esc(a.meta)}"><b>${a.icon} ${esc(a.label)}</b><span>${esc(a.meta)}</span></div>`:''}
+async function load(){try{const r=await fetch('/api/catalog',{cache:'no-store'});if(!r.ok)throw new Error(await r.text());catalogue=await r.json();updateHeader();render();setSync(catalogue.sync);setRewrite(catalogue.rewrite);setPublish(catalogue.publish);refreshGrokModel()}catch(e){showError('Could not load the local catalogue: '+e.message)}}
+async function refreshGrokModel(){try{const r=await fetch('/api/grok/model',{cache:'no-store'});if(!r.ok)return;catalogue.grok_model=await r.json();updateGrokBadge()}catch{}}
+function updateGrokBadge(){const g=catalogue.grok_model||{},cache=g.prompt_cache||{};$('grokModel').textContent=`Grok: ${g.resolved||'checking'} · ${g.mode==='pinned'?'pinned':'auto-latest'}`;$('grokModel').title=(g.error?`Model check warning: ${g.error}`:`Resolved from ${g.source||'xAI'}${g.checked_at?' · '+date(g.checked_at):''}`)+` · prompt cache ${cache.enabled?'on ('+cache.key+')':'off'}`}
+function updateHeader(){const m=catalogue.meta||{},p=catalogue.products||[],g=catalogue.grok_model||{};$('storeLine').textContent=m.shop_name?`${m.shop_name} · ${m.shop_domain} · last synced ${date(m.last_sync_at)}`:'Local catalogue and Grok rewrite studio';
+  updateGrokBadge();
+  $('productStat').textContent=compact(p.length);$('variantStat').textContent=compact(p.reduce((s,x)=>s+x.variants.length,0));$('activeStat').textContent=compact(p.filter(x=>x.status==='ACTIVE').length);
+  $('stockStat').textContent=compact(p.reduce((s,x)=>s+Math.max(0,Number(x.total_inventory||0)),0));$('costStat').textContent=compact(p.reduce((s,x)=>s+Number(x.missing_cost_count||0),0));
+  $('draftStat').textContent=compact(p.filter(x=>x.rewrite_draft).length);$('reviewStat').textContent=compact(p.filter(x=>Number(x.review_count||0)>0).length);updateSelection();}
+function filtered(){const q=$('search').value.trim().toLowerCase(),status=$('status').value,stock=$('stock').value,shipping=$('shipping').value,draftFilter=$('draftFilter').value;return (catalogue.products||[]).filter(p=>{
+  const hay=[p.title,p.description,p.vendor,p.product_type,p.handle,p.skus,(p.tags||[]).join(' '),(p.collections||[]).map(x=>x.title).join(' ')].join(' ').toLowerCase();
+  if(q&&!hay.includes(q))return false;if(status&&p.status!==status)return false;if(stock==='in'&&Number(p.total_inventory||0)<=0)return false;if(stock==='out'&&Number(p.total_inventory||0)>0)return false;
+  if(shipping==='physical'&&!p.requires_shipping)return false;if(shipping==='digital'&&p.requires_shipping)return false;
+  if(draftFilter==='none'&&p.rewrite_draft)return false;if(draftFilter==='draft'&&(!p.rewrite_draft||p.rewrite_draft.status!=='draft'))return false;if(draftFilter==='published'&&(!p.rewrite_draft||p.rewrite_draft.status!=='published'))return false;return true;});}
+function render(){const rows=$('rows'),products=filtered(),currency=catalogue.meta.currency||'GBP';$('visibleCount').textContent=`Showing ${compact(products.length)} of ${compact((catalogue.products||[]).length)} products`;
+  $('empty').style.display=products.length?'none':'block';let html='';for(const p of products){const margin=productMargin(p),profitClass=n(p.profit_min)!==null&&p.profit_min<0?'negative':'profit',compare=firstCompare(p),id=esc(p.shopify_id),isOpen=openRows.has(p.shopify_id);
+    const image=p.featured_image_url?`<img class="thumb" src="${esc(p.featured_image_url)}" alt="${esc(p.featured_image_alt||p.title)}" loading="lazy">`:'<div class="thumb placeholder">◇</div>';
+    const draft=p.rewrite_draft,draftLabel=draft?(p.rewrite_pending?'Ready to apply':draft.status==='published'?'In sync':'Draft saved'):'Not generated',applied=applicationState(p),draftAction=draft?(applied&&applied.css==='applied'?'View applied':applied&&applied.css==='partial'?'Review remaining':'Review draft'):'✦ Rewrite';
+    const collections=(p.collections||[]).slice(0,3).map(x=>`<span class="chip">${esc(x.title)}</span>`).join('');
+    const reviewCount=Number(p.review_count||0),reviewRating=Number(p.review_rating||0),storefront=p.online_store_url||((catalogue.meta||{}).shop_domain?`https://${catalogue.meta.shop_domain}/products/${p.handle}`:''),reviewUrl=storefront?`${storefront}#judgeme_product_reviews`:'';
+    html+=`<tr class="product"><td><input class="row-check" type="checkbox" ${selected.has(p.shopify_id)?'checked':''} onchange="selectOne('${id}',this.checked)" aria-label="Select ${esc(p.title)}"></td><td><button class="expand" onclick="toggle('${id}')" title="Show variants">${isOpen?'−':'+'}</button></td>
+      <td><div class="product-cell">${image}<div><div class="title">${esc(p.title)}</div><div class="handle">${p.online_store_url?`<a href="${esc(p.online_store_url)}" target="_blank" rel="noopener">/${esc(p.handle)} ↗</a>`:`/${esc(p.handle)}`}</div></div></div></td>
+      <td><div class="description" title="${esc(p.description)}">${esc(p.description||'No description')}</div></td>
+      <td>${reviewCount?`<div class="rating">★ ${reviewRating.toFixed(2)}</div><div class="small">${compact(reviewCount)} review${reviewCount===1?'':'s'}</div>${reviewUrl?`<a class="review-link" href="${esc(reviewUrl)}" target="_blank" rel="noopener">View reviews ↗</a>`:''}`:'<span class="small">No reviews</span>'}</td>
+      <td><button class="ai-btn" onclick="${draft?`openDraft('${id}')`:`rewriteOne('${id}')`}">${esc(draftAction)}</button><div class="draft-note">${esc(draftLabel)}${draft?` · ${date(draft.updated_at)}`:''}</div>${applicationMarkup(p)}</td>
+      <td>${esc(p.vendor||'—')}<div class="small">${esc(p.product_type||'No product type')}</div><div class="chips">${collections||'<span class="small">No collections</span>'}</div></td>
+      <td class="sku">${esc((p.skus||'').split(',').slice(0,2).join(', ')||'No SKU')}<div class="small">${p.variant_count} variant${p.variant_count==1?'':'s'}</div></td>
+      <td class="money">${range(p.cost_min,p.cost_max,currency)}${Number(p.missing_cost_count)>0?`<div class="missing">${p.missing_cost_count} missing</div>`:''}</td>
+      <td class="money"><b>${range(p.price_min,p.price_max,currency)}</b></td><td class="money">${range(compare[0],compare[1],currency)}</td>
+      <td class="money ${profitClass}">${range(p.profit_min,p.profit_max,currency)}<div class="small">${margin===null?'Margin unavailable':margin.toFixed(1)+'% average margin'}</div></td>
+      <td><span class="pill ${p.requires_shipping?'ship':''}">${p.requires_shipping?'Physical':'No shipping'}</span><div class="small">${p.requires_shipping?esc(weightRange(p)):'Digital/service'}</div></td>
+      <td class="money"><b>${compact(p.total_inventory||0)}</b></td><td><span class="pill ${String(p.status).toLowerCase()}">${esc(p.status)}</span></td><td class="small">${date(p.updated_at)}</td></tr>`;
+    if(isOpen)html+=detailRow(p,currency);
+  }rows.innerHTML=html;updateSelection();}
+function detailRow(p,currency){let body='';for(const v of p.variants){const profit=n(v.price)!==null&&n(v.cost)!==null?v.price-v.cost:null,margin=profit!==null&&v.price?profit/v.price*100:null,options=(v.selected_options||[]).map(o=>`${o.name}: ${o.value}`).join(' · ');
+  body+=`<tr><td><b>${esc(v.title||'Default')}</b><div class="small">${esc(options)}</div></td><td>${esc(v.sku||'—')}</td><td>${esc(v.barcode||'—')}</td><td class="money">${money(v.cost,currency)}</td><td class="money"><b>${money(v.price,currency)}</b></td><td class="money">${n(v.compare_at_price)>0?money(v.compare_at_price,currency):'—'}</td>
+    <td class="money ${profit!==null&&profit<0?'negative':'profit'}">${money(profit,currency)}${margin!==null?`<div class="small">${margin.toFixed(1)}%</div>`:''}</td><td>${compact(v.inventory_quantity||0)}<div class="small">${v.tracked?'Tracked':'Not tracked'} · ${esc(v.inventory_policy)}</div></td>
+    <td>${v.requires_shipping?`Yes · ${v.weight??'—'} ${esc(({KILOGRAMS:'kg',GRAMS:'g',POUNDS:'lb',OUNCES:'oz'}[v.weight_unit]||v.weight_unit||''))}`:'No'}</td><td>${v.taxable?'Yes':'No'}</td><td>${esc(v.country_of_origin||'—')}</td><td class="small">${date(v.updated_at)}</td></tr>`;}
+  const tags=(p.tags||[]).map(x=>`<span class="chip">${esc(x)}</span>`).join('');
+  const collections=(p.collections||[]).map(x=>`<span class="chip">${esc(x.title)}${x.is_smart?' · automated':''}</span>`).join('');
+  return `<tr class="detail-row"><td colspan="16"><div class="details"><div style="margin-bottom:9px"><b>Collections</b><div class="chips">${collections||'<span class="small">None</span>'}</div><b style="display:block;margin-top:8px">Tags</b><div class="chips">${tags||'<span class="small">None</span>'}</div></div><b>Variants</b><div class="variant-grid"><table><thead><tr><th>Variant / options</th><th>SKU</th><th>Barcode</th><th>Cost</th><th>Price</th><th>Compare at</th><th>Profit / margin</th><th>Inventory</th><th>Shipping / weight</th><th>Taxable</th><th>Origin</th><th>Updated</th></tr></thead><tbody>${body}</tbody></table></div></div></td></tr>`}
+function toggle(id){openRows.has(id)?openRows.delete(id):openRows.add(id);render()}
+function selectOne(id,checked){checked?selected.add(id):selected.delete(id);updateSelection()}
+function selectVisible(checked){for(const p of filtered())checked?selected.add(p.shopify_id):selected.delete(p.shopify_id);render()}
+function pendingRewrites(){return (catalogue.products||[]).filter(p=>p.rewrite_draft&&p.rewrite_pending)}
+function updateSelection(){const visible=filtered(),chosen=visible.filter(p=>selected.has(p.shopify_id)).length,all=$('selectAll');
+  all.checked=visible.length>0&&chosen===visible.length;all.indeterminate=chosen>0&&chosen<visible.length;
+  const btn=$('rewriteSelected'),rewriting=!!(catalogue.rewrite||{}).running,publishing=!!(catalogue.publish||{}).running;btn.disabled=selected.size===0||rewriting||publishing;
+  if(!rewriting)btn.textContent=selected.size?`✦ Rewrite ${selected.size} selected with Grok`:'✦ Rewrite selected with Grok';
+  const pending=pendingRewrites(),publishBtn=$('publishAll');publishBtn.disabled=!pending.length||publishing||rewriting;
+  if(!publishing)publishBtn.textContent=pending.length?`⇧ Apply ${pending.length} pending rewrite${pending.length===1?'':'s'} to Shopify`:'⇧ All rewrites are in sync';}
+async function postJson(url,body){const r=await fetch(url,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)}),data=await r.json();if(!r.ok)throw new Error(data.error||'Request failed');return data}
+async function rewriteOne(id){selected.clear();selected.add(id);render();await beginRewrite([id])}
+async function rewriteSelected(){await beginRewrite([...selected])}
+async function beginRewrite(ids){if(!ids.length)return;const plural=ids.length===1?'this product':`${ids.length} products`;
+  if(!confirm(`Generate Grok rewrite drafts for ${plural}?\n\nThis uses the cloud model and may incur API cost. Nothing will be changed on Shopify until you review a draft and press Apply to Shopify.`))return;
+  clearError();try{const s=await postJson('/api/rewrite',{product_ids:ids});catalogue.rewrite=s;setRewrite(s);pollRewrite()}catch(e){showError(e.message)}}
+function setRewrite(s={}){catalogue.rewrite=s;const running=!!s.running,btn=$('rewriteSelected');btn.disabled=running||!!(catalogue.publish||{}).running||selected.size===0;
+  if(running)btn.textContent=`✦ ${s.message||`Grok ${s.completed||0}/${s.total||0}`}`;else btn.textContent=selected.size?`✦ Rewrite ${selected.size} selected with Grok`:'✦ Rewrite selected with Grok';
+  if(s.error&&!running)showError(s.error)}
+function pollRewrite(){clearTimeout(rewritePollTimer);rewritePollTimer=setTimeout(async()=>{try{const r=await fetch('/api/rewrite/status',{cache:'no-store'}),s=await r.json();setRewrite(s);if(s.running)pollRewrite();else{const wasSingle=Number(s.total)===1,onlyId=selected.size===1?[...selected][0]:null;await load();toast(s.message||'Grok drafts are ready');if(wasSingle&&onlyId)openDraft(onlyId)}}catch(e){showError('Lost contact with Grok rewrite service: '+e.message)}},1000)}
+async function publishAllPending(){const products=pendingRewrites();if(!products.length)return;
+  if(!confirm(`Apply ${products.length} saved Grok rewrite${products.length===1?'':'s'} to the live Shopify store?\n\nThis will completely replace each product's existing title and ENTIRE description. Product type and tags will also be replaced. Existing collection memberships will be preserved.\n\nThis action uses the saved drafts and does not make any new Grok calls.`))return;
+  clearError();try{const s=await postJson('/api/publish/batch',{product_ids:products.map(p=>p.shopify_id)});catalogue.publish=s;setPublish(s);pollPublish()}catch(e){showError('Bulk Shopify update could not start: '+e.message)}}
+function setPublish(s={}){catalogue.publish=s;const running=!!s.running,btn=$('publishAll');
+  if(running){btn.disabled=true;btn.textContent=`⇧ ${s.message||`Applying ${s.completed||0} of ${s.total||0}`}`;$('rewriteSelected').disabled=true;$('syncBtn').disabled=true}
+  else{updateSelection();setSync(catalogue.sync||{});if(s.error)showError(s.error)}}
+function pollPublish(){clearTimeout(publishPollTimer);publishPollTimer=setTimeout(async()=>{try{const r=await fetch('/api/publish/status',{cache:'no-store'}),s=await r.json();setPublish(s);if(s.running)pollPublish();else{await load();toast(s.message||'Shopify rewrites applied');if((s.errors||[]).length)showError(`${s.errors.length} product${s.errors.length===1?'':'s'} could not be updated. ${s.errors[0].error}`)}}catch(e){showError('Lost contact with the Shopify update service: '+e.message)}},1000)}
+function productById(id){return (catalogue.products||[]).find(p=>p.shopify_id===id)}
+function openDraft(id){const p=productById(id),d=p&&p.rewrite_draft;if(!p||!d){showError('This product does not have a rewrite draft yet');return}editingId=id;
+  document.querySelectorAll('.publish-field').forEach(x=>x.checked=x.value!=='collections');
+  $('modalTitle').textContent='Review Grok rewrite · '+p.title;$('originalTitle').textContent=p.title;
+  $('originalMeta').textContent=[p.product_type||'No product type',(p.collections||[]).map(x=>x.title).join(', ')||'No collections',(p.tags||[]).join(', ')||'No tags'].join(' · ');
+  $('originalCopy').textContent=p.description||'No current description';$('draftTitle').value=d.title||'';$('draftHero').value=d.hero_summary||'';
+  $('draftBody').value=(d.body_paragraphs||[]).join('\n\n');$('draftClose').value=d.lifestyle_close||'';$('draftType').value=d.product_type||'';$('draftCategory').value=d.category||'';
+  $('draftTags').value=(d.tags||[]).join(', ');$('draftSuggestions').value=(d.suggested_collections||[]).join(', ');
+  const selectedIds=new Set(d.collection_ids||[]);$('draftCollections').innerHTML=(catalogue.collections||[]).map(c=>`<label><input class="collection-choice" type="checkbox" value="${esc(c.shopify_id)}" ${selectedIds.has(c.shopify_id)?'checked':''} ${c.is_smart?'disabled':''}><span>${esc(c.title)}${c.is_smart?' <span class="small">(automated)</span>':''}</span></label>`).join('')||'<span class="small">Sync collections from Shopify first.</span>';
+  $('draftWarnings').innerHTML=(d.warnings||[]).length?`<div class="warning"><b>Editorial checks</b><br>${d.warnings.map(esc).join('<br>')}</div>`:'';
+  const app=applicationState(p),appBox=$('applicationStatus');appBox.hidden=!app;appBox.className=`application-status ${app?app.css:''}`;appBox.innerHTML=app?`<b>${app.icon} ${esc(app.label)}</b><span>${esc(app.meta)}</span>`:'';
+  $('draftStatus').textContent=`${d.model||'Grok'} · ${d.status==='published'?'last applied '+date(d.published_at):d.status==='partially_published'?'partially applied '+date(d.published_at):'draft saved '+date(d.updated_at)}`;$('rewriteModal').classList.add('show')}
+function closeModal(){$('rewriteModal').classList.remove('show');editingId=null}
+function editorPayload(){return{product_id:editingId,title:$('draftTitle').value,hero_summary:$('draftHero').value,
+  body_paragraphs:$('draftBody').value.split(/\n\s*\n/).map(x=>x.trim()).filter(Boolean),lifestyle_close:$('draftClose').value,
+  product_type:$('draftType').value,category:$('draftCategory').value,tags:$('draftTags').value.split(/[,\n]/).map(x=>x.trim()).filter(Boolean),
+  suggested_collections:$('draftSuggestions').value.split(/[,\n]/).map(x=>x.trim()).filter(Boolean),
+  collection_ids:[...document.querySelectorAll('.collection-choice:checked')].map(x=>x.value)}}
+function setEditorBusy(busy){$('saveDraft').disabled=busy;$('publishDraft').disabled=busy}
+function putDraftInCatalogue(draft){const p=productById(draft.product_id);if(p)p.rewrite_draft=draft;updateHeader();render()}
+async function saveEditorDraft(silent=false){if(!editingId)return null;setEditorBusy(true);clearError();try{const data=await postJson('/api/draft',editorPayload());putDraftInCatalogue(data.draft);if(!silent){toast('Draft saved locally');openDraft(data.draft.product_id)}return data.draft}catch(e){showError(e.message);return null}finally{setEditorBusy(false)}}
+async function publishEditorDraft(){if(!editingId)return;if((catalogue.publish||{}).running){showError('Wait for the Shopify update to finish first');return}const product=productById(editingId),fields=[...document.querySelectorAll('.publish-field:checked')].map(x=>x.value);if(!fields.length){showError('Select at least one field to apply');return}const labels={title:'title',description_html:'description',product_type:'product type',tags:'tags',collections:'collection additions'},fieldText=fields.map(x=>labels[x]).join(', ');if(!confirm(`Apply these reviewed fields to the live Shopify product?\n\n${product.title}\n\nFields: ${fieldText}\n\nThe exact previous values will be stored so this change can be rolled back.`))return;
+  const id=editingId,draft=await saveEditorDraft(true);if(!draft)return;setEditorBusy(true);clearError();try{const result=await postJson('/api/publish',{product_id:id,fields});toast('Selected fields updated on Shopify · rollback saved');await load();await loadGrowth();openDraft(id);const notes=[...(result.collection_notes||[])];if(result.verification_warning)notes.push(result.verification_warning);if(notes.length)showError(notes.join(' · '))}catch(e){showError('Shopify update failed: '+e.message)}finally{setEditorBusy(false)}}
+function toast(text){const box=$('toast');box.textContent=text;box.classList.add('show');setTimeout(()=>box.classList.remove('show'),3500)}
+function showError(text){$('notice').textContent=text;$('notice').classList.add('show')}
+function clearError(){$('notice').classList.remove('show')}
+async function startSync(){clearError();try{const r=await fetch('/api/sync',{method:'POST'});const s=await r.json();if(!r.ok)throw new Error(s.error||'Sync could not start');setSync(s);poll()}catch(e){showError(e.message);setSync({running:false})}}
+function setSync(s={}){const running=!!s.running;$('syncBtn').disabled=running||!!(catalogue.publish||{}).running;$('syncIcon').className=running?'spin':'';$('syncText').textContent=running?(s.message||'Syncing…'):'Sync with Shopify';$('syncLine').classList.toggle('running',running);if(s.error)showError(s.error)}
+function poll(){clearTimeout(pollTimer);pollTimer=setTimeout(async()=>{try{const r=await fetch('/api/sync/status',{cache:'no-store'}),s=await r.json();setSync(s);if(s.running)poll();else if(s.phase==='complete')load()}catch(e){showError('Lost contact with sync service: '+e.message);setSync({running:false})}},1000)}
+load();setInterval(async()=>{try{const r=await fetch('/api/sync/status',{cache:'no-store'}),s=await r.json();if(s.running){setSync(s);poll()}const rr=await fetch('/api/rewrite/status',{cache:'no-store'}),rs=await rr.json();if(rs.running){setRewrite(rs);pollRewrite()}const pr=await fetch('/api/publish/status',{cache:'no-store'}),ps=await pr.json();if(ps.running){setPublish(ps);pollPublish()}}catch{}},5000);
+</script>
+<script src="/growth.js"></script>
+</body></html>
